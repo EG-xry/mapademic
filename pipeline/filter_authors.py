@@ -1,4 +1,6 @@
 """Select authors with works_count >= threshold into nodes.parquet."""
+from pathlib import Path
+
 import duckdb
 
 from pipeline.config import data_dir
@@ -6,22 +8,24 @@ from pipeline.config import data_dir
 
 def filter_authors(src_glob: str, out_path: str, min_works: int = 5) -> int:
     con = duckdb.connect()
-    con.execute(
+    tmp_dir = Path(out_path).parent / ".duckdb_tmp"
+    con.execute(f"SET temp_directory='{tmp_dir}'")
+    con.execute("SET preserve_insertion_order=false")
+    return con.execute(
         f"""
-        CREATE TABLE nodes AS
-        SELECT
-            id,
-            display_name,
-            works_count,
-            cited_by_count,
-            last_known_institutions[1].display_name AS institution,
-            topics[1].field.display_name AS field
-        FROM read_parquet('{src_glob}')
-        WHERE works_count >= {int(min_works)}
+        COPY (
+            SELECT
+                id,
+                display_name,
+                works_count,
+                cited_by_count,
+                last_known_institutions[1].display_name AS institution,
+                topics[1].field.display_name AS field
+            FROM read_parquet('{src_glob}')
+            WHERE works_count >= {int(min_works)}
+        ) TO '{out_path}' (FORMAT PARQUET)
         """
-    )
-    con.execute(f"COPY nodes TO '{out_path}' (FORMAT PARQUET)")
-    return con.execute("SELECT count(*) FROM nodes").fetchone()[0]
+    ).fetchone()[0]
 
 
 def add_parser(parser) -> None:

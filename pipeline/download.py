@@ -12,6 +12,7 @@ def sync_command(dest: Path) -> list[str]:
         str(dest / "snapshot" / "authors"),
         "--no-sign-request",
         "--no-progress",
+        "--delete",
     ]
 
 

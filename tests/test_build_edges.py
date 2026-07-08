@@ -87,3 +87,16 @@ def test_duplicate_author_in_list_no_self_edge_or_double_count(tmp_path):
     edges = edges_of(out)
     assert set(edges) == {(A, B)}
     assert edges[(A, B)] == pytest.approx(0.5)  # n_authors=3 per snapshot count
+
+
+def test_duplicate_work_id_across_partitions_counted_once(tmp_path):
+    # Snapshot re-release landing mid-extract can leave the same work_id in
+    # two partition extract files; it must be counted once, not twice.
+    works_dir = tmp_path / "works_authorships"
+    works_dir.mkdir()
+    write_extract_output(works_dir / "part_0000.parquet", [("W1", 2, [A, B])])
+    write_extract_output(works_dir / "part_0001.parquet", [("W1", 2, [A, B])])
+    nodes = write_nodes(tmp_path, [A, B])
+    out = tmp_path / "edges.parquet"
+    build_edges(str(works_dir / "*.parquet"), nodes, str(out))
+    assert edges_of(out) == {(A, B): 1.0}

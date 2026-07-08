@@ -1,4 +1,6 @@
 """Build weighted coauthorship edges from authorship extracts and selected nodes."""
+from pathlib import Path
+
 import duckdb
 
 from pipeline.config import data_dir
@@ -12,36 +14,45 @@ def build_edges(
     works_glob: str, nodes_path: str, out_path: str, max_authors: int = MAX_AUTHORS
 ) -> int:
     con = duckdb.connect()
-    con.execute(
+    tmp_dir = Path(out_path).parent / ".duckdb_tmp"
+    con.execute(f"SET temp_directory='{tmp_dir}'")
+    con.execute("SET preserve_insertion_order=false")
+    return con.execute(
         f"""
-        CREATE TABLE edges AS
-        WITH exploded AS (
-            SELECT work_id, unnest(author_ids) AS author_id, n_authors
-            FROM read_parquet('{works_glob}')
-            WHERE n_authors BETWEEN 2 AND {int(max_authors)}
-        ),
-        -- DISTINCT guards against the same author appearing twice on one work
-        kept AS (
-            SELECT DISTINCT e.work_id, e.author_id, e.n_authors
-            FROM exploded e
-            JOIN read_parquet('{nodes_path}') n ON n.id = e.author_id
-        ),
-        pairs AS (
-            SELECT
-                a.author_id AS src,
-                b.author_id AS dst,
-                1.0 / (a.n_authors - 1) AS w
-            FROM kept a
-            JOIN kept b
-              ON a.work_id = b.work_id AND a.author_id < b.author_id
-        )
-        SELECT src, dst, sum(w) AS weight
-        FROM pairs
-        GROUP BY src, dst
+        COPY (
+            WITH deduped AS (
+                -- guards against the same work_id appearing in two partition
+                -- extracts (snapshot re-release landing mid-extract)
+                SELECT work_id, n_authors, author_ids
+                FROM read_parquet('{works_glob}')
+                QUALIFY row_number() OVER (PARTITION BY work_id) = 1
+            ),
+            exploded AS (
+                SELECT work_id, unnest(author_ids) AS author_id, n_authors
+                FROM deduped
+                WHERE n_authors BETWEEN 2 AND {int(max_authors)}
+            ),
+            -- DISTINCT guards against the same author appearing twice on one work
+            kept AS (
+                SELECT DISTINCT e.work_id, e.author_id, e.n_authors
+                FROM exploded e
+                JOIN read_parquet('{nodes_path}') n ON n.id = e.author_id
+            ),
+            pairs AS (
+                SELECT
+                    a.author_id AS src,
+                    b.author_id AS dst,
+                    1.0 / (a.n_authors - 1) AS w
+                FROM kept a
+                JOIN kept b
+                  ON a.work_id = b.work_id AND a.author_id < b.author_id
+            )
+            SELECT src, dst, sum(w) AS weight
+            FROM pairs
+            GROUP BY src, dst
+        ) TO '{out_path}' (FORMAT PARQUET)
         """
-    )
-    con.execute(f"COPY edges TO '{out_path}' (FORMAT PARQUET)")
-    return con.execute("SELECT count(*) FROM edges").fetchone()[0]
+    ).fetchone()[0]
 
 
 def add_parser(parser) -> None:
