@@ -1031,6 +1031,22 @@ git commit -m "test: end-to-end extract->filter->edges fixture; docs: real-run s
 
 ---
 
+## Post-review amendments (2026-07-06, commit fbb345f)
+
+The final whole-branch review found plan-level gaps; the code deviates from the
+task text above in four ways (all spec-aligned):
+
+- `build_edges`/`filter_authors` set `temp_directory=<out_parent>/.duckdb_tmp`
+  and `preserve_insertion_order=false`, and stream via a single
+  `COPY (SELECT/WITH ...) TO` whose returned count is the return value. DuckDB
+  (verified on 1.5.4) otherwise spills out-of-core work to `.tmp` under CWD -
+  i.e. the internal disk - during the real ~50-200M-edge run.
+- `download` syncs with `--delete`: OpenAlex releases move/remove partition
+  files, and stale partitions would silently duplicate authors in the glob.
+- `build_edges` dedupes to one row per `work_id` (QUALIFY row_number) before
+  exploding, guarding against a snapshot release landing mid-extract.
+- `.gitignore` covers `.tmp/`.
+
 ## Out of scope for this plan
 
 - Layout, communities, Slurm scripts (Plan 2 - written after this plan lands, so it can target the actual Parquet schemas produced here)
