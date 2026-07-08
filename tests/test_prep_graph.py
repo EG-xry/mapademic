@@ -43,6 +43,12 @@ def test_renumbers_nodes_deterministically_by_id(graph_inputs):
         f"SELECT node_idx, id, display_name FROM '{out / 'nodes_int32.parquet'}' ORDER BY node_idx"
     ).fetchall()
     assert rows == [(0, A, "Aye"), (1, B, "Bee"), (2, C, "Sea")]  # ORDER BY id
+    # Physical row order is load-bearing (Plan 3 uses row order for per-tile
+    # indexes): read WITHOUT any ORDER BY and require node_idx order on disk.
+    physical = duckdb.sql(
+        f"SELECT node_idx FROM read_parquet('{out / 'nodes_int32.parquet'}')"
+    ).fetchall()
+    assert physical == [(0,), (1,), (2,)]
 
 
 def test_edges_remapped_to_int32_with_float_weight(graph_inputs):
