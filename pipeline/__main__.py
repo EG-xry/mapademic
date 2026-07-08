@@ -1,7 +1,11 @@
 """mapademic pipeline CLI: python -m pipeline <stage> [options]."""
 import argparse
 
-STAGES: dict = {}  # name -> stage module; stages register in Tasks 2-5
+from pipeline import download
+
+STAGES: dict = {
+    "download": download,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
