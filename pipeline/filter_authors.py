@@ -3,11 +3,12 @@ from pathlib import Path
 
 import duckdb
 
-from pipeline.config import data_dir
+from pipeline.config import apply_resource_limits, data_dir
 
 
 def filter_authors(src_glob: str, out_path: str, min_works: int = 5) -> int:
     con = duckdb.connect()
+    apply_resource_limits(con)
     tmp_dir = Path(out_path).parent / ".duckdb_tmp"
     con.execute(f"SET temp_directory='{tmp_dir}'")
     con.execute("SET preserve_insertion_order=false")

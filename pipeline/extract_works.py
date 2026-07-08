@@ -3,13 +3,14 @@ from pathlib import Path
 
 import duckdb
 
-from pipeline.config import data_dir
+from pipeline.config import apply_resource_limits, data_dir
 
 DEFAULT_SRC = "s3://openalex/data/parquet/works"
 
 
 def connect(src_root: str) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect()
+    apply_resource_limits(con)
     if src_root.startswith("s3://"):
         con.execute("INSTALL httpfs; LOAD httpfs;")
         # long timeout + retries: VPN'd reads of ~200MB column chunks time out

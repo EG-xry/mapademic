@@ -3,7 +3,7 @@ from pathlib import Path
 
 import duckdb
 
-from pipeline.config import data_dir
+from pipeline.config import apply_resource_limits, data_dir
 
 # Spec-locked: works with more than 50 authors are excluded from edge building
 # (a 3,000-author CERN paper would otherwise contribute ~4.5M clique edges).
@@ -14,6 +14,7 @@ def build_edges(
     works_glob: str, nodes_path: str, out_path: str, max_authors: int = MAX_AUTHORS
 ) -> int:
     con = duckdb.connect()
+    apply_resource_limits(con)
     tmp_dir = Path(out_path).parent / ".duckdb_tmp"
     con.execute(f"SET temp_directory='{tmp_dir}'")
     con.execute("SET preserve_insertion_order=false")
