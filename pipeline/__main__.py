@@ -1,10 +1,11 @@
 """mapademic pipeline CLI: python -m pipeline <stage> [options]."""
 import argparse
 
-from pipeline import download
+from pipeline import download, extract_works
 
 STAGES: dict = {
     "download": download,
+    "extract": extract_works,
 }
 
 
