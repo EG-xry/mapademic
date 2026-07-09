@@ -3,5 +3,7 @@ data
 __pycache__/
 *.egg-info/
 .venv/
+.venv-gpu/
+mapademic-smoke-*.log
 .DS_Store
 .tmp/

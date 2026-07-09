@@ -9,7 +9,7 @@ python3 -m venv .venv-gpu
 # RAPIDS pip wheels (CUDA 12 bundled; node driver must be >= 525 - smoke job verifies)
 .venv-gpu/bin/pip install \
     --extra-index-url=https://pypi.nvidia.com \
-    "cudf-cu12>=24.10" "cugraph-cu12>=24.10" pyarrow
+    "cudf-cu12==26.6.*" "cugraph-cu12==26.6.*" pyarrow
 # Workaround for libcuvs-cu12 26.6.0 wheel: libcuvs.so lists libnvrtc.so.12 as a
 # direct dependency but its RPATH omits nvidia/cuda_nvrtc/lib, so "import cugraph"
 # fails with "libcugraph.so: cannot open shared object file". Symlink libnvrtc into
@@ -17,6 +17,8 @@ python3 -m venv .venv-gpu
 SP=".venv-gpu/lib/python3.11/site-packages"
 if [ -f "$SP/nvidia/cuda_nvrtc/lib/libnvrtc.so.12" ] && [ -d "$SP/libcuvs/lib64" ]; then
     ln -sf ../../nvidia/cuda_nvrtc/lib/libnvrtc.so.12 "$SP/libcuvs/lib64/libnvrtc.so.12"
+else
+    echo "skipping nvrtc symlink: unexpected layout"
 fi
 .venv-gpu/bin/python -c "import cudf, cugraph; print('import OK:', cudf.__version__, cugraph.__version__)"
 echo "GPU venv ready: $HOME/mapademic/.venv-gpu"
