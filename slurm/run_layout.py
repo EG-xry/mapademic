@@ -28,15 +28,24 @@ def main() -> None:
     ap.add_argument("--strong-gravity", action="store_true")
     ap.add_argument("--lin-log", action="store_true")
     ap.add_argument("--resolution", type=float, default=1.0)
+    ap.add_argument("--managed-memory", action="store_true",
+                    help="RMM managed memory: oversubscribe GPU into host RAM")
     args = ap.parse_args()
     if args.chunk <= 0 or args.iters < 0:
         raise SystemExit("--chunk must be > 0 and --iters >= 0")
+
+    if args.managed_memory:
+        import rmm
+        rmm.reinitialize(managed_memory=True)
+        print("rmm managed memory enabled", flush=True)
 
     data = Path(args.data)
     ckpt_dir = data / "layout_ckpt"
     ckpt_dir.mkdir(exist_ok=True)
 
     edges = cudf.read_parquet(data / "graph" / "edges_int32.parquet")
+    print(f"edges loaded: {len(edges):,} rows from "
+          f"{data / 'graph' / 'edges_int32.parquet'}", flush=True)
     G = cugraph.Graph(directed=False)
     G.from_cudf_edgelist(
         edges, source="src", destination="dst", weight="weight", renumber=False

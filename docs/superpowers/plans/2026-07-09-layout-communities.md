@@ -619,6 +619,26 @@ Append run facts (SUs spent, chunk timings, modularity, community count, verdict
 
 ---
 
+## Run log (2026-07-09/10)
+
+- **Run 1 = FINAL** (Anvil job 19007814, A100, full 379M edges, default knobs,
+  1000 iters, ~15 min): modularity 0.8034, 216,620 communities, 8,587,906
+  rows, 0 isolated. Macro field-lobes real (confirmed by density-equalized
+  renders); soft cluster edges; large sparse halo (extent ±700k, core ±~100k).
+- Run 2 (job 19013701, `--lin-log --strong-gravity`): over-compressed uniform
+  disk, structure destroyed. Rejected.
+- Run 3 (job 19018133, `--lin-log`, 2000 iters): halo exploded to ±56M,
+  single-blob core, colors don't separate. Rejected. Lesson: lin-log variants
+  hurt at this scale/weighting; default FA2 balance wins.
+- Expanse lane (V100 32GB): both attempts OOM'd at graph build even with
+  edges pruned to 95.9M (min-weight 0.34) - the allocator asks for the same
+  ~6.07GB regardless, memory bound is structural. A100 40GB required for the
+  full graph. Expanse env is built and staged as standby.
+- Cost: ~3 SUs Anvil (3 layout runs + smoke + minitest), ~0.4 SUs Expanse.
+- Artifacts: coords.parquet (=run1) canonical on Anvil scratch, Eric's Mac
+  (`data/coords.parquet`), and external drive (`artifacts/`), all verified by
+  row count 8,587,906.
+
 ## Out of scope for this plan
 
 - node2vec→UMAP fallback layout (built only if FA2 QA fails; see deviation note)
