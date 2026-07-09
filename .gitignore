@@ -7,3 +7,5 @@ __pycache__/
 mapademic-smoke-*.log
 .DS_Store
 .tmp/
+mapademic-layout-*.log
+minitest-*.log

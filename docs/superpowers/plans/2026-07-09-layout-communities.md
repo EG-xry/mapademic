@@ -635,6 +635,32 @@ Append run facts (SUs spent, chunk timings, modularity, community count, verdict
   ~6.07GB regardless, memory bound is structural. A100 40GB required for the
   full graph. Expanse env is built and staged as standby.
 - Cost: ~3 SUs Anvil (3 layout runs + smoke + minitest), ~0.4 SUs Expanse.
+- **ACTUAL coords.parquet schema (Plan 3: code against THIS, not the plan text
+  above):** `id VARCHAR, display_name VARCHAR, x FLOAT, y FLOAT,
+  community INTEGER, works_count INTEGER, cited_by_count INTEGER,
+  institution VARCHAR, field VARCHAR`. x/y are float32 (cuGraph output;
+  ~0.06-unit resolution at the ±700k halo edge - fine for tiles, stated
+  deliberately). The plan's earlier `DOUBLE`/`BIGINT` wording is superseded.
+- **coords.parquet row order is ARBITRARY** (cudf hash merges; verified
+  ~3k inversions per 100k rows). Plan 3 must join/sort by `id` (or re-derive
+  node order from `nodes_int32.parquet`, whose physical order IS pinned).
+  Any future layout re-run should add `.sort_values("node_idx")` before
+  `to_parquet` if aligned order is wanted.
+- **Checkpoint discipline:** `layout_ckpt/` is shared per DATA dir and keyed
+  only by iteration count, NOT by knobs. Runs 2 and 3 were cold-started (the
+  controller archived/wiped `layout_ckpt` between runs - so the run
+  comparisons above are clean), but nothing enforces this: wipe or redirect
+  the checkpoint dir before any re-run with different LAYOUT_ARGS.
+- Run 1 executed with `sbatch -p gpu -t 02:00:00` (not the sbatch file's 6h
+  default): account `bio260224-gpu` has no Slurm association for the `ai`
+  partition, and the short walltime was chosen for backfill (it worked -
+  started ~2 days before its scheduler estimate).
+- `--managed-memory` flag: added during Expanse OOM debugging, placement
+  follows the documented RAPIDS pattern, but it has never run on a successful
+  job - treat as unproven, not as an established OOM escape hatch.
+- Expanse standby env was built ad hoc (py3.13 venv + pinned 26.6 wheels +
+  `LD_LIBRARY_PATH` over the lib package dirs, per the sbatch files); there is
+  no committed Expanse setup script - write one before relying on that lane.
 - Artifacts: coords.parquet (=run1) canonical on Anvil scratch, Eric's Mac
   (`data/coords.parquet`), and external drive (`artifacts/`), all verified by
   row count 8,587,906.
