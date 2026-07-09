@@ -1,5 +1,6 @@
 """Chunked ForceAtlas2 + Leiden on the prepped int32 graph. Resumable via checkpoints."""
 import argparse
+import os
 import re
 import time
 from pathlib import Path
@@ -28,6 +29,8 @@ def main() -> None:
     ap.add_argument("--lin-log", action="store_true")
     ap.add_argument("--resolution", type=float, default=1.0)
     args = ap.parse_args()
+    if args.chunk <= 0 or args.iters < 0:
+        raise SystemExit("--chunk must be > 0 and --iters >= 0")
 
     data = Path(args.data)
     ckpt_dir = data / "layout_ckpt"
@@ -45,6 +48,9 @@ def main() -> None:
     pos = cudf.read_parquet(ckpt) if ckpt else None
     if done:
         print(f"resuming from {ckpt} ({done} iters done)", flush=True)
+    if done >= args.iters:
+        print(f"checkpoint at {done} iters >= --iters {args.iters}; "
+              "skipping FA2, reusing positions", flush=True)
 
     while done < args.iters:
         step = min(args.chunk, args.iters - done)
@@ -62,8 +68,16 @@ def main() -> None:
             lin_log_mode=args.lin_log,
         )
         done += step
-        pos.to_parquet(ckpt_dir / f"pos_{done}.parquet")
+        ckpt_path = ckpt_dir / f"pos_{done}.parquet"
+        tmp = ckpt_path.with_name(ckpt_path.name + ".tmp")
+        pos.to_parquet(tmp)
+        os.replace(tmp, ckpt_path)  # atomic: a kill mid-write never yields a half checkpoint
         print(f"iters {done}/{args.iters} (+{step} in {time.time()-t0:.0f}s)", flush=True)
+
+    if pos is None:
+        raise SystemExit(
+            "no positions to write: no checkpoint found and --iters is 0"
+        )
 
     parts, modularity = cugraph.leiden(G, resolution=args.resolution)
     print(f"leiden: modularity={modularity:.4f}, "
