@@ -60,7 +60,7 @@ def build_search_shards(web: str, out_dir: Path) -> int:
     shards = defaultdict(list)
     rows = con.execute(
         f"""SELECT display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count
-            FROM read_parquet('{web}') ORDER BY cited_by_count DESC"""
+            FROM read_parquet('{web}') ORDER BY cited_by_count DESC, id"""
     ).fetchall()
     for name, aid, xw, yw, cited in rows:
         norm = normalize(name or "")

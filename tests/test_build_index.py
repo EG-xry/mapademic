@@ -1,7 +1,6 @@
 import json
 
 import duckdb
-import pytest
 
 from pipeline.build_index import build_label_tiles, build_search_shards, normalize
 
@@ -37,6 +36,20 @@ def test_label_tiles_ranked_and_capped(tmp_path):
     assert len(z9["l"]) == 60                       # cap 200 not hit
     far = json.loads((out / "labels/6/48/15.json").read_text())
     assert far["l"][0][0] == "Far Away"
+
+
+def test_label_tiles_200_cap(tmp_path):
+    web = tmp_path / "w.parquet"
+    # 250 researchers in one z8/z9 tile -> capped at 200 there, uncapped at z6/z7
+    rows = [(f"C{i}", f"Name{i}", 0.25, 0.25, 5000 - i) for i in range(250)]
+    write_web(web, rows)
+    out = tmp_path / "index"
+    build_label_tiles(str(web), out)
+    z8 = json.loads((out / "labels/8/64/191.json").read_text())  # 0.25*256=64; y-flip 64@z8=191
+    assert len(z8["l"]) == 200                      # capped at z8
+    assert z8["l"][0][0] == "Name0"                 # highest cited first
+    z9 = json.loads((out / "labels/9/128/383.json").read_text())
+    assert len(z9["l"]) == 200                       # capped at z9 too
 
 
 def test_search_shards_cover_everyone(tmp_path):
