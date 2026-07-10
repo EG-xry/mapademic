@@ -23,11 +23,38 @@
     #legend .row { display: flex; gap: 6px; align-items: center; padding: 2px 10px; }
     #legend .sw { width: 10px; height: 10px; border-radius: 2px; flex: none; }
     #legend .n { color: #888; margin-left: auto; }
+    #search { position: fixed; left: 10px; top: 10px; z-index: 9; width: 260px;
+              font: 12px system-ui; }
+    #search-input { width: 100%; box-sizing: border-box; background: #0b0b0bd9;
+                     color: #ddd; border: 1px solid #333; border-radius: 6px;
+                     padding: 6px 10px; font: 13px system-ui; outline: none; }
+    #search-input:focus { border-color: #7fae8e; }
+    #search-dropdown { position: absolute; left: 0; top: 100%; margin-top: 4px;
+                        width: 100%; background: #0b0b0bd9; border-radius: 6px;
+                        max-height: 300px; overflow-y: auto; display: none; }
+    #search-dropdown.open { display: block; }
+    #search-dropdown .row { padding: 6px 10px; cursor: pointer; display: flex;
+                             justify-content: space-between; gap: 8px; color: #ddd; }
+    #search-dropdown .row:hover, #search-dropdown .row.active { background: #ffffff1a; }
+    #search-dropdown .row .n { color: #888; }
+    #search-dropdown .row.empty { color: #888; cursor: default; }
+    .search-highlight { width: 22px; height: 22px; border-radius: 50%;
+                         border: 3px solid #7fae8e; box-sizing: border-box;
+                         animation: search-pulse 1.4s ease-out infinite; }
+    @keyframes search-pulse {
+      0%   { box-shadow: 0 0 0 0 #7fae8e99; }
+      70%  { box-shadow: 0 0 0 14px #7fae8e00; }
+      100% { box-shadow: 0 0 0 0 #7fae8e00; }
+    }
   </style>
 </head>
 <body>
 <div id="map"></div>
 <div id="tip"></div>
+<div id="search">
+  <input id="search-input" type="text" placeholder="Search authors…" autocomplete="off">
+  <div id="search-dropdown"></div>
+</div>
 <details id="legend" open><summary>Legend</summary><div id="legend-rows"></div></details>
 <script>
 const HIT_ZOOM = 10;                 // hover/click active at or past this zoom
@@ -71,6 +98,168 @@ function visibleTiles(lz) {
   return tiles;
 }
 const toLngLat = (xw, yw) => new maplibregl.MercatorCoordinate(xw, 1 - yw, 0).toLngLat();
+
+// ---- author search ----
+// normalize(): JS mirror of pipeline/build_index.py normalize(). Each step
+// maps to the python line it must match bit-for-bit (shard keys are built
+// server-side with the python version, so any drift here breaks lookups):
+//   unicodedata.normalize("NFKD", name)                       -> name.normalize("NFKD")
+//   "".join(c for c in s if not unicodedata.combining(c))     -> replace(/\p{M}/gu, "")
+//   .lower()                                                  -> .toLowerCase()
+//   c if (c.isalnum() or c == " ") else " " (per char;        -> replace(/[^\p{L}\p{N}]/gu, " ")
+//     python isalnum() covers unicode letters+digits, not just ascii)
+//   " ".join(s.split())                                       -> trim + collapse whitespace
+function normalize(name) {
+  let s = name.normalize("NFKD");
+  s = s.replace(/\p{M}/gu, "");
+  s = s.toLowerCase();
+  s = s.replace(/[^\p{L}\p{N}]/gu, " ");
+  s = s.trim().replace(/\s+/g, " ");
+  return s;
+}
+
+const searchShardCache = new Map();  // shard key -> Promise<entries|null>; 404s cache as null; cap 20 FIFO
+async function fetchSearchShard(key) {
+  if (searchShardCache.has(key)) return searchShardCache.get(key);
+  const p = fetch(`/data/index/search/${key}.json`)
+    .then(r => r.ok ? r.json() : null)
+    .catch(() => null);
+  searchShardCache.set(key, p);
+  if (searchShardCache.size > 20) searchShardCache.delete(searchShardCache.keys().next().value);
+  return p;
+}
+
+// Shard fallback chain per pipeline/build_index.py's _split_prefix_shard /
+// _split_catchall_shard contract. An ascii-alpha head of 2+ chars always
+// lives somewhere in the prefix-shard tree (never in `_`), so for those
+// queries we walk prefix lengths from min(5, len) down to 2, deepest first,
+// and stop at the first shard that exists (a 404 falls through to the next,
+// shorter, prefix). Anything else (short query, or a non-ascii-alpha first
+// char) goes straight to the codepoint shard, then the plain catch-all.
+// Today's on-disk shards are still the old 2-char-only scheme (Task 8 adds
+// the 5..2 recursive split), so in practice every 3+ char attempt 404s and
+// this chain falls back to the 2-char shard -- exactly the behavior this
+// fallback is designed for.
+async function lookupSearchShard(norm) {
+  const concat = norm.replace(/ /g, "");
+  if (concat.length >= 2 && /^[a-z]/.test(concat)) {
+    for (let k = Math.min(5, concat.length); k >= 2; k--) {
+      const entries = await fetchSearchShard(concat.slice(0, k));
+      if (entries) return entries;
+    }
+    return [];
+  }
+  if (concat.length > 0) {
+    const entries = await fetchSearchShard(`_${concat.codePointAt(0) % 32}`);
+    if (entries) return entries;
+  }
+  return (await fetchSearchShard("_")) || [];
+}
+
+// entry shape: [norm, display_name, id, xw, yw, cited]
+function rankSearchEntries(entries, norm) {
+  const starts = [], contains = [];
+  for (const e of entries) {
+    if (e[0].startsWith(norm)) starts.push(e);
+    else if (e[0].includes(norm)) contains.push(e);
+  }
+  starts.sort((a, b) => b[5] - a[5]);
+  contains.sort((a, b) => b[5] - a[5]);
+  return [...starts, ...contains].slice(0, 12);
+}
+
+const searchInput = document.getElementById("search-input");
+const searchDropdown = document.getElementById("search-dropdown");
+let searchResults = [];
+let searchActive = -1;
+let searchGen = 0;      // invalidates stale in-flight lookups
+let searchTimer = null;
+let highlightMarker = null;
+
+function clearSearchHighlight() {
+  if (highlightMarker) { highlightMarker.remove(); highlightMarker = null; }
+}
+
+function renderSearchDropdown() {
+  searchDropdown.innerHTML = "";
+  if (searchResults.length === 0) {
+    const row = document.createElement("div");
+    row.className = "row empty";
+    row.textContent = "no matches";
+    searchDropdown.appendChild(row);
+  } else {
+    searchResults.forEach((e, i) => {
+      const row = document.createElement("div");
+      row.className = "row" + (i === searchActive ? " active" : "");
+      const name = document.createElement("span");
+      name.textContent = e[1];
+      const n = document.createElement("span");
+      n.className = "n"; n.textContent = e[5].toLocaleString();
+      row.append(name, n);
+      row.addEventListener("mousedown", ev => { ev.preventDefault(); selectSearchEntry(e); });
+      searchDropdown.appendChild(row);
+    });
+  }
+  searchDropdown.classList.add("open");
+}
+
+function closeSearchDropdown() {
+  searchDropdown.classList.remove("open");
+  searchDropdown.innerHTML = "";
+  searchResults = [];
+  searchActive = -1;
+}
+
+function selectSearchEntry(e) {
+  const [, , , xw, yw] = e;
+  map.flyTo({ center: toLngLat(xw, yw), zoom: 10.5 });
+  clearSearchHighlight();
+  const el = document.createElement("div");
+  el.className = "search-highlight";
+  highlightMarker = new maplibregl.Marker({ element: el })
+    .setLngLat(toLngLat(xw, yw)).addTo(map);
+  closeSearchDropdown();
+  searchInput.blur();
+}
+
+async function runSearch(query) {
+  const gen = ++searchGen;
+  const norm = normalize(query);
+  if (!norm) { closeSearchDropdown(); return; }
+  const entries = await lookupSearchShard(norm);
+  if (gen !== searchGen) return;    // a newer query took over
+  searchResults = rankSearchEntries(entries, norm);
+  searchActive = -1;
+  renderSearchDropdown();
+}
+
+searchInput.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  const query = searchInput.value;
+  searchTimer = setTimeout(() => runSearch(query), 150);
+});
+
+searchInput.addEventListener("keydown", ev => {
+  if (ev.key === "ArrowDown") {
+    ev.preventDefault();
+    if (searchResults.length) { searchActive = (searchActive + 1) % searchResults.length; renderSearchDropdown(); }
+  } else if (ev.key === "ArrowUp") {
+    ev.preventDefault();
+    if (searchResults.length) { searchActive = (searchActive - 1 + searchResults.length) % searchResults.length; renderSearchDropdown(); }
+  } else if (ev.key === "Enter") {
+    ev.preventDefault();
+    const pick = searchResults[searchActive >= 0 ? searchActive : 0];
+    if (pick) selectSearchEntry(pick);
+  } else if (ev.key === "Escape") {
+    searchInput.value = "";
+    clearTimeout(searchTimer);
+    searchGen++;
+    closeSearchDropdown();
+    clearSearchHighlight();
+  }
+});
+
+searchInput.addEventListener("blur", () => setTimeout(closeSearchDropdown, 100));
 
 // Greedy screen-rect collision test shared by drawLabels and drawRegions.
 // `placed` holds {x, y, w, h} rects already committed for this redraw.
