@@ -27,6 +27,26 @@ const map = new maplibregl.Map({
   center: [0, 0], zoom: 1, minZoom: 0, maxZoom: 12, renderWorldCopies: false
 });
 map.addControl(new maplibregl.NavigationControl());
+
+async function drawLabels() {
+  const z = Math.round(map.getZoom());
+  if (z < 6) return document.querySelectorAll(".lbl").forEach(e => e.remove());
+  // naive: fetch the center tile's labels and render the top 10 as DOM pins
+  const n = 1 << z, c = map.getCenter();
+  const merc = maplibregl.MercatorCoordinate.fromLngLat(c);
+  const tx = Math.floor(merc.x * n), ty = Math.floor(merc.y * n);
+  const r = await fetch(`/data/index/labels/${z}/${tx}/${ty}.json`);
+  document.querySelectorAll(".lbl").forEach(e => e.remove());
+  if (!r.ok) return;
+  (await r.json()).l.slice(0, 10).forEach(([name, id, xw, yw]) => {
+    const ll = new maplibregl.MercatorCoordinate(xw, 1 - yw, 0).toLngLat();
+    const el = document.createElement("div");
+    el.className = "lbl"; el.textContent = name;
+    el.style.cssText = "color:#fff;font:12px sans-serif;text-shadow:0 0 4px #000";
+    new maplibregl.Marker({ element: el }).setLngLat(ll).addTo(map);
+  });
+}
+map.on("moveend", drawLabels);
 </script>
 </body>
 </html>

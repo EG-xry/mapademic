@@ -1,7 +1,7 @@
 """mapademic pipeline CLI: python -m pipeline <stage> [options]."""
 import argparse
 
-from pipeline import build_edges, download, extract_works, filter_authors, prep_graph, regions, tiles, webcoords
+from pipeline import build_edges, build_index, download, extract_works, filter_authors, prep_graph, regions, tiles, webcoords
 
 STAGES: dict = {
     "download": download,
@@ -12,6 +12,7 @@ STAGES: dict = {
     "webcoords": webcoords,
     "tiles": tiles,
     "regions": regions,
+    "index": build_index,
 }
 
 
