@@ -443,7 +443,7 @@ def test_pyramid_counts_conserved(tiny_web, tmp_path):
     for _ in range(MAXZ):                      # 9 reductions -> zoom 0
         level = reduce_level(level)
         assert level["cnt"].sum() == total
-    assert len(level["cnt"]) == 1              # zoom 0: one occupied pixel run
+    assert len(level["cnt"]) == 2              # 2 distinct pixels (128px apart at z0), same tile
 
 
 def test_render_writes_expected_tiles_and_is_idempotent(tiny_web, tmp_path):
@@ -515,8 +515,10 @@ def aggregate_z9(webcoords_path: str, out_path: str, con) -> int:
         f"""
         COPY (
             WITH binned AS (
-                SELECT least({PIX - 1}, CAST(floor(xw * {PIX}) AS INT)) AS px,
-                       least({PIX - 1}, CAST(floor(yw * {PIX}) AS INT)) AS py,
+                -- cast to DOUBLE first: high-precision fixture literals are DECIMAL,
+                -- which overflows when multiplied by PIX (no-op on real DOUBLE data)
+                SELECT least({PIX - 1}, CAST(floor(CAST(xw AS DOUBLE) * {PIX}) AS INT)) AS px,
+                       least({PIX - 1}, CAST(floor(CAST(yw AS DOUBLE) * {PIX}) AS INT)) AS py,
                        field, community
                 FROM read_parquet('{webcoords_path}')
             ),
