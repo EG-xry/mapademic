@@ -31,6 +31,7 @@
 <details id="legend" open><summary>Legend</summary><div id="legend-rows"></div></details>
 <script>
 const HIT_ZOOM = 10;                 // hover/click active at or past this zoom
+const HIT_RADIUS = 14;               // px hit-test radius around the cursor
 const map = new maplibregl.Map({
   container: "map",
   style: {
@@ -137,15 +138,26 @@ fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
 const tip = document.getElementById("tip");
 async function hitTest(pt) {
   if (map.getZoom() < HIT_ZOOM) return null;
-  const merc = maplibregl.MercatorCoordinate.fromLngLat(map.unproject(pt));
-  const xw = merc.x, yw = 1 - merc.y, n = 1 << 9;
-  const t = await fetchTile(9, Math.floor(xw * n), Math.floor(yw * n));
-  if (!t) return null;
-  let best = null, bestD = 14;                  // px radius
-  for (const e of t.l) {
-    const p = map.project(toLngLat(e[2], e[3]));
-    const d = Math.hypot(p.x - pt.x, p.y - pt.y);
-    if (d < bestD) { bestD = d; best = e; }
+  // Candidate tiles come from the four corners of the hit box, so dots just
+  // across a z9 tile boundary are still found (2-4 tiles worst case).
+  const n = 1 << 9, seen = new Set(), tiles = [];
+  for (const dx of [-HIT_RADIUS, HIT_RADIUS]) for (const dy of [-HIT_RADIUS, HIT_RADIUS]) {
+    const m = maplibregl.MercatorCoordinate.fromLngLat(
+      map.unproject([pt.x + dx, pt.y + dy]));
+    const tx = Math.min(n - 1, Math.max(0, Math.floor(m.x * n)));
+    const ty = Math.min(n - 1, Math.max(0, Math.floor(m.y * n)));  // label tiles are keyed by mercator y, same as visibleTiles
+    const k = `${tx}/${ty}`;
+    if (!seen.has(k)) { seen.add(k); tiles.push([tx, ty]); }
+  }
+  const lists = await Promise.all(tiles.map(([x, y]) => fetchTile(9, x, y)));
+  let best = null, bestD = HIT_RADIUS;
+  for (const t of lists) {
+    if (!t) continue;
+    for (const e of t.l) {
+      const p = map.project(toLngLat(e[2], e[3]));
+      const d = Math.hypot(p.x - pt.x, p.y - pt.y);
+      if (d < bestD) { bestD = d; best = e; }
+    }
   }
   return best;
 }
