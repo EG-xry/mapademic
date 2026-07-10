@@ -68,3 +68,41 @@ def test_build_community_palette_covers_all(tmp_path):
     pal = build_community_palette(duckdb.connect(), p, min_members=1000)
     assert set(pal) == {0, 1, 2}
     assert all(len(v) == 3 for v in pal.values())
+
+
+def test_build_community_palette_majority_tie_and_null(tmp_path):
+    import duckdb
+    p = str(tmp_path / "web.parquet")
+    duckdb.sql(
+        "COPY (SELECT 'A' || range::VARCHAR AS id, 'n' AS display_name,"
+        " 0.5 AS xw, 0.5 AS yw, 1 AS community, 20 AS works_count,"
+        " 10 AS cited_by_count, 'i' AS institution, 'Medicine' AS field, FALSE AS is_ring FROM range(600)"
+        " UNION ALL"
+        " SELECT 'B' || range::VARCHAR AS id, 'n' AS display_name,"
+        " 0.5 AS xw, 0.5 AS yw, 1 AS community, 20 AS works_count,"
+        " 10 AS cited_by_count, 'i' AS institution, 'Chemistry' AS field, FALSE AS is_ring FROM range(400)"
+        " UNION ALL"
+        " SELECT 'C' || range::VARCHAR AS id, 'n' AS display_name,"
+        " 0.5 AS xw, 0.5 AS yw, 2 AS community, 20 AS works_count,"
+        " 10 AS cited_by_count, 'i' AS institution, 'Chemistry' AS field, FALSE AS is_ring FROM range(500)"
+        " UNION ALL"
+        " SELECT 'D' || range::VARCHAR AS id, 'n' AS display_name,"
+        " 0.5 AS xw, 0.5 AS yw, 2 AS community, 20 AS works_count,"
+        " 10 AS cited_by_count, 'i' AS institution, 'Physics and Astronomy' AS field, FALSE AS is_ring FROM range(500)"
+        " UNION ALL"
+        " SELECT 'E' || range::VARCHAR AS id, 'n' AS display_name,"
+        " 0.5 AS xw, 0.5 AS yw, 3 AS community, 20 AS works_count,"
+        " 10 AS cited_by_count, 'i' AS institution, 'Medicine' AS field, FALSE AS is_ring FROM range(200)"
+        " UNION ALL"
+        " SELECT 'F' || range::VARCHAR AS id, 'n' AS display_name,"
+        " 0.5 AS xw, 0.5 AS yw, 3 AS community, 20 AS works_count,"
+        " 10 AS cited_by_count, 'i' AS institution, NULL AS field, FALSE AS is_ring FROM range(800))"
+        f" TO '{p}' (FORMAT PARQUET)")
+    pal = build_community_palette(duckdb.connect(), p, min_members=1000)
+    assert set(pal) == {1, 2, 3}
+    # Community 1: 600 Medicine + 400 Chemistry -> Medicine majority
+    assert pal[1] == community_rgb(1, 'Medicine', 1000)
+    # Community 2: 500 Chemistry + 500 Physics and Astronomy (tie) -> Chemistry wins (alphabetic tie-break)
+    assert pal[2] == community_rgb(2, 'Chemistry', 1000)
+    # Community 3: 200 Medicine + 800 NULL -> NULL majority (grey)
+    assert pal[3] == community_rgb(3, None, 1000)
