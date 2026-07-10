@@ -1,4 +1,4 @@
-"""Aggregate web coords at zoom 9, pyramid-reduce, write styled PNG tiles."""
+"""Aggregate web coords at zoom MAXZ, pyramid-reduce, write styled PNG tiles."""
 import json
 import os
 from pathlib import Path
@@ -10,14 +10,16 @@ from PIL import Image
 from pipeline.config import apply_resource_limits, data_dir
 from pipeline.palette import community_rgb, load_community_stats
 
-MAXZ = 9
+MAXZ = 10
 TILE = 256
-PIX = (2 ** MAXZ) * TILE  # 131072 virtual pixels per side at zoom 9
+PIX = (2 ** MAXZ) * TILE  # 262144 virtual pixels per side at zoom MAXZ
 
-SPLAT_RADIUS = {8: 1, 9: 2}   # citation-star disc radius in px at each zoom
+SPLAT_RADIUS = {9: 1, 10: 2}   # citation-star disc radius in px at each zoom
+
+PIXELS_NAME = f"pixels_z{MAXZ}.parquet"
 
 
-def aggregate_z9(webcoords_path: str, out_path: str, con) -> int:
+def aggregate_maxz(webcoords_path: str, out_path: str, con) -> int:
     """Per-pixel count + dominant community. Returns occupied pixels."""
     apply_resource_limits(con)
     return con.execute(
@@ -273,9 +275,9 @@ def add_parser(parser) -> None:
     parser.add_argument("--web", default=None)
     parser.add_argument("--out", default=None)
     parser.add_argument("--force-aggregate", action="store_true",
-                         help="re-aggregate pixels_z9.parquet even if it looks fresh")
+                         help=f"re-aggregate {PIXELS_NAME} even if it looks fresh")
     parser.add_argument("--splat-min-cited", type=int, default=60000,
-                         help="cited_by_count threshold for z8-9 citation splats (~p99.9)")
+                         help="cited_by_count threshold for z9-10 citation splats (~p99.9)")
     parser.add_argument("--edges", nargs="?", const="__default__", default=None,
                          help="bake faint coauthor edges into z>=%d tiles;"
                               " bare flag uses data/edges_px.parquet;"
@@ -286,7 +288,7 @@ def add_parser(parser) -> None:
 def run(args) -> int:
     web = args.web or str(data_dir() / "coords_web.parquet")
     out = Path(args.out) if args.out else data_dir() / "tiles"
-    pixels = str(data_dir() / "pixels_z9.parquet")
+    pixels = str(data_dir() / PIXELS_NAME)
     stale = (
         Path(pixels).exists()
         and Path(web).exists()
@@ -298,10 +300,10 @@ def run(args) -> int:
         if "field" in cols:            # old schema cached before Task 4
             stale = True
     if args.force_aggregate or not Path(pixels).exists() or stale:
-        n = aggregate_z9(web, pixels, duckdb.connect())
-        print(f"aggregated {n:,} occupied z9 pixels", flush=True)
+        n = aggregate_maxz(web, pixels, duckdb.connect())
+        print(f"aggregated {n:,} occupied z{MAXZ} pixels", flush=True)
     else:
-        print("reusing cached pixels_z9.parquet (delete it or re-run webcoords to force)",
+        print(f"reusing cached {PIXELS_NAME} (delete it or re-run webcoords to force)",
               flush=True)
     con = duckdb.connect()
     stats = load_community_stats(con, web)          # single parquet scan feeds both
@@ -323,7 +325,7 @@ def run(args) -> int:
     print(f"legend: {n_legend} communities written", flush=True)
     for z in range(MAXZ, -1, -1):
         if z in zooms:
-            w = render_zoom(level, z, out, bloom=(z >= 8), splats=splats, edges=edges)
+            w = render_zoom(level, z, out, bloom=(z >= MAXZ - 1), splats=splats, edges=edges)
             print(f"zoom {z}: {w} tiles written", flush=True)
         if z > 0:
             level = reduce_level(level)

@@ -6,11 +6,12 @@ import pytest
 from PIL import Image
 
 from pipeline.palette import load_community_stats
-from pipeline.tiles import (MAXZ, PIX, TILE, aggregate_z9, load_level9,
+from pipeline.tiles import (MAXZ, PIX, TILE, aggregate_maxz, load_level9,
                             load_splats, reduce_level, render_zoom,
                             write_legend)
 
-# MAXZ == 9, PIX == 2**9 * 256 == 131072
+# MAXZ and PIX are imported from pipeline.tiles; values follow whatever
+# native max zoom the pipeline currently targets.
 
 
 def write_web(path, rows):
@@ -44,7 +45,7 @@ def tiny_web(tmp_path):
 def test_aggregate_dominant_and_counts(tiny_web, tmp_path):
     out = str(tmp_path / "pixels_z9.parquet")
     con = duckdb.connect()
-    aggregate_z9(tiny_web, out, con)
+    aggregate_maxz(tiny_web, out, con)
     rows = duckdb.sql(
         f"SELECT px, py, cnt, community FROM '{out}' ORDER BY px"
     ).fetchall()
@@ -63,14 +64,14 @@ def test_aggregate_schema_has_no_field(tmp_path):
         " 'Medicine' field, FALSE is_ring)"
         f" TO '{web}' (FORMAT PARQUET)")
     out = tmp_path / "px.parquet"
-    aggregate_z9(str(web), str(out), duckdb.connect())
+    aggregate_maxz(str(web), str(out), duckdb.connect())
     cols = [r[0] for r in duckdb.sql(f"DESCRIBE SELECT * FROM '{out}'").fetchall()]
     assert cols == ["px", "py", "cnt", "community"]
 
 
 def test_pyramid_counts_conserved(tiny_web, tmp_path):
     out = str(tmp_path / "pixels_z9.parquet")
-    aggregate_z9(tiny_web, out, duckdb.connect())
+    aggregate_maxz(tiny_web, out, duckdb.connect())
     pal = {1: (1.0, 0.0, 0.0), 2: (0.0, 1.0, 0.0), 3: (0.0, 0.0, 1.0)}
     level = load_level9(out, pal)
     total = level["cnt"].sum()
@@ -94,7 +95,7 @@ def test_reduce_level_empty_returns_empty():
 
 def test_render_writes_expected_tiles_and_is_idempotent(tiny_web, tmp_path):
     pixels = str(tmp_path / "pixels_z9.parquet")
-    aggregate_z9(tiny_web, pixels, duckdb.connect())
+    aggregate_maxz(tiny_web, pixels, duckdb.connect())
     pal = {1: (0.2, 0.8, 0.4), 2: (0.9, 0.1, 0.1), 3: (0.1, 0.1, 0.9)}
     level = load_level9(pixels, pal)
     for _ in range(MAXZ - 1):                  # reduce to zoom 1 (2x2 tiles)
@@ -149,7 +150,7 @@ def test_render_bloom_lights_up_neighbors(tmp_path):
 
 def test_styled_pixels_deterministic(tiny_web, tmp_path):
     pixels = str(tmp_path / "pixels_z9.parquet")
-    aggregate_z9(tiny_web, pixels, duckdb.connect())
+    aggregate_maxz(tiny_web, pixels, duckdb.connect())
     pal = {1: (1.0, 0.0, 0.0), 2: (0.0, 1.0, 0.0), 3: (0.0, 0.0, 1.0)}
     level = load_level9(pixels, pal)
     for _ in range(MAXZ - 1):
@@ -183,11 +184,11 @@ def test_render_zoom_draws_splat_disc(tmp_path):
              "cnt": np.array([1]), "rgb": np.array([[0.1, 0.1, 0.1]], np.float32)}
     splats = {"px": np.array([128 + 3]), "py": np.array([128]),
               "rgb": np.array([[0.0, 1.0, 0.0]], np.float32)}
-    render_zoom(level, 9, tmp_path, bloom=False, splats=splats)
-    # z9: level px are already zoom-9 pixel coords; tile 0/0 holds px<256.
+    render_zoom(level, MAXZ, tmp_path, bloom=False, splats=splats)
+    # MAXZ: level px are already zoom-MAXZ pixel coords; tile 0/0 holds px<256.
     # XYZ y-flip means tile row (yu=0) is written as ty = ntiles - 1.
-    ntiles = 1 << 9
-    img = np.asarray(Image.open(tmp_path / "9" / "0" / f"{ntiles - 1}.png"))
+    ntiles = 1 << MAXZ
+    img = np.asarray(Image.open(tmp_path / str(MAXZ) / "0" / f"{ntiles - 1}.png"))
     ys, xs = np.nonzero(img[:, :, 1] > 200)       # bright green disc pixels
     assert len(ys) >= 5                           # radius-2 disc, not 1 pixel
 
@@ -212,18 +213,15 @@ def test_legend_json(tmp_path):
     assert entries[0]["color"].startswith("#") and len(entries[0]["color"]) == 7
 
 
-def test_render_zoom_bakes_faint_edges_at_z9(tmp_path):
+def test_render_zoom_bakes_faint_edges_at_maxz(tmp_path):
     level = {"px": np.array([10]), "py": np.array([10]),
              "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
     edges = {"x0": np.array([10]), "y0": np.array([10]),
              "x1": np.array([110]), "y1": np.array([10])}
-    render_zoom(level, 9, tmp_path, bloom=False, edges=edges)
-    # z9: yu = py // TILE = 0, ntiles = 1 << 9 = 512, ty = (ntiles-1) - yu = 511
-    # (brief's literal "255.png" assumed ntiles=256; corrected per Task 6 brief's
-    # own instruction to recompute the y-flip when a literal is mathematically
-    # wrong -- see test_render_zoom_draws_splat_disc which already derives the
-    # same z9/yu=0 tile as ntiles - 1, not 255).
-    img = np.asarray(Image.open(tmp_path / "9" / "0" / "511.png")).astype(int)
+    render_zoom(level, MAXZ, tmp_path, bloom=False, edges=edges)
+    # MAXZ: yu = py // TILE = 0, ntiles = 1 << MAXZ, ty = (ntiles-1) - yu
+    ntiles = 1 << MAXZ
+    img = np.asarray(Image.open(tmp_path / str(MAXZ) / "0" / f"{ntiles - 1}.png")).astype(int)
     mid = img[(TILE - 1) - 10, 60]              # a pixel along the edge
     assert 3 <= mid.max() <= 40                 # faint but present
     assert img[(TILE - 1) - 10, 10, 0] > 200    # node still bright red
@@ -241,14 +239,14 @@ def test_no_edges_below_z8(tmp_path):
 
 
 def test_edge_with_midpoint_in_other_tile_still_renders(tmp_path):
-    # Edge (10,10)-(700,10) at z9: midpoint x=355 lies in tile (1,0), but the
+    # Edge (10,10)-(700,10) at MAXZ: midpoint x=355 lies in tile (1,0), but the
     # segment crosses tile (0,0). Pins neighbor-bucket union correctness: a
     # midpoint-only bucket lookup would miss this edge for tile (0,0).
     level = {"px": np.array([10]), "py": np.array([10]),
              "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
     edges = {"x0": np.array([10]), "y0": np.array([10]),
              "x1": np.array([700]), "y1": np.array([10])}
-    render_zoom(level, 9, tmp_path, bloom=False, edges=edges)
-    ntiles = 1 << 9
-    img = np.asarray(Image.open(tmp_path / "9" / "0" / f"{ntiles - 1}.png")).astype(int)
+    render_zoom(level, MAXZ, tmp_path, bloom=False, edges=edges)
+    ntiles = 1 << MAXZ
+    img = np.asarray(Image.open(tmp_path / str(MAXZ) / "0" / f"{ntiles - 1}.png")).astype(int)
     assert img[(TILE - 1) - 10, 200].max() >= 3   # edge drawn inside tile (0,0)
