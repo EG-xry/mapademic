@@ -1,4 +1,5 @@
 """Aggregate web coords at zoom 9, pyramid-reduce, write styled PNG tiles."""
+import json
 import os
 from pathlib import Path
 
@@ -7,15 +8,17 @@ import numpy as np
 from PIL import Image
 
 from pipeline.config import apply_resource_limits, data_dir
-from pipeline.palette import field_community_rgb
+from pipeline.palette import build_community_palette, community_rgb
 
 MAXZ = 9
 TILE = 256
 PIX = (2 ** MAXZ) * TILE  # 131072 virtual pixels per side at zoom 9
 
+SPLAT_RADIUS = {8: 1, 9: 2}   # citation-star disc radius in px at each zoom
+
 
 def aggregate_z9(webcoords_path: str, out_path: str, con) -> int:
-    """Per-pixel count + dominant (field, community). Returns occupied pixels."""
+    """Per-pixel count + dominant community. Returns occupied pixels."""
     apply_resource_limits(con)
     return con.execute(
         f"""
@@ -23,57 +26,85 @@ def aggregate_z9(webcoords_path: str, out_path: str, con) -> int:
             WITH binned AS (
                 SELECT least({PIX - 1}, CAST(floor(CAST(xw AS DOUBLE) * {PIX}) AS INT)) AS px,
                        least({PIX - 1}, CAST(floor(CAST(yw AS DOUBLE) * {PIX}) AS INT)) AS py,
-                       field, community
+                       community
                 FROM read_parquet('{webcoords_path}')
             ),
             grouped AS (
-                SELECT px, py, field, community, count(*) AS c
-                FROM binned GROUP BY px, py, field, community
+                SELECT px, py, community, count(*) AS c
+                FROM binned GROUP BY px, py, community
             ),
             ranked AS (
-                SELECT px, py, field, community, c,
+                SELECT px, py, community, c,
                        sum(c) OVER (PARTITION BY px, py) AS cnt,
                        row_number() OVER (PARTITION BY px, py
-                                          ORDER BY c DESC, community,
-                                                   field NULLS LAST) AS rn
+                                          ORDER BY c DESC, community) AS rn
                 FROM grouped
             )
-            SELECT px, py, CAST(cnt AS BIGINT) AS cnt, field, community
+            SELECT px, py, CAST(cnt AS BIGINT) AS cnt, community
             FROM ranked WHERE rn = 1
         ) TO '{out_path}' (FORMAT PARQUET)
         """
     ).fetchone()[0]
 
 
-def load_level9(pixels_path: str) -> dict:
+def load_level9(pixels_path: str, palette: dict[int, tuple]) -> dict:
     con = duckdb.connect()
-    # palette per DISTINCT (field, community) pair (~216k), then broadcast -
-    # avoids a python loop over all 8.6M pixels
-    pairs = con.execute(
-        f"""SELECT field, community, row_number() OVER () - 1 AS pi
-            FROM (SELECT DISTINCT field, community
-                  FROM read_parquet('{pixels_path}'))"""
-    ).fetchall()
-    pair_rgb = np.empty((len(pairs), 3), dtype=np.float32)
-    for field, community, pi in pairs:
-        pair_rgb[pi] = field_community_rgb(
-            None if field is None else str(field), int(community)
-        )
-    con.execute("CREATE TEMP TABLE pal (field VARCHAR, community INT, pi INT)")
-    con.executemany("INSERT INTO pal VALUES (?, ?, ?)", pairs)
     t = con.execute(
-        f"""SELECT p.px, p.py, p.cnt, pal.pi
-            FROM read_parquet('{pixels_path}') p
-            JOIN pal ON pal.community = p.community
-                    AND pal.field IS NOT DISTINCT FROM p.field
-            ORDER BY p.py, p.px"""
+        f"SELECT px, py, cnt, community FROM read_parquet('{pixels_path}')"
+        " ORDER BY py, px").fetchnumpy()
+    comm = t["community"].astype(np.int64)
+    uniq, inv = np.unique(comm, return_inverse=True)
+    lut = np.array([palette.get(int(c), (0.35, 0.35, 0.35)) for c in uniq],
+                   dtype=np.float32)
+    return {"px": t["px"].astype(np.int64), "py": t["py"].astype(np.int64),
+            "cnt": t["cnt"].astype(np.int64), "rgb": lut[inv]}
+
+
+def load_splats(con, web_path: str, palette: dict, min_cited: int) -> dict:
+    t = con.execute(
+        f"""SELECT least({PIX - 1}, CAST(floor(CAST(xw AS DOUBLE) * {PIX}) AS INT)) px,
+                   least({PIX - 1}, CAST(floor(CAST(yw AS DOUBLE) * {PIX}) AS INT)) py,
+                   community
+            FROM read_parquet('{web_path}')
+            WHERE cited_by_count >= {int(min_cited)} AND NOT is_ring"""
     ).fetchnumpy()
-    return {
-        "px": t["px"].astype(np.int64),
-        "py": t["py"].astype(np.int64),
-        "cnt": t["cnt"].astype(np.int64),
-        "rgb": pair_rgb[t["pi"].astype(np.int64)],
-    }
+    comm = t["community"].astype(np.int64)
+    rgb = np.array([palette.get(int(c), (0.6, 0.6, 0.6)) for c in comm],
+                   dtype=np.float32)
+    return {"px": t["px"].astype(np.int64), "py": t["py"].astype(np.int64),
+            "rgb": rgb}
+
+
+def write_legend(con, web_path: str, out_path: str, regions_path: str | None,
+                 min_members: int = 1000) -> int:
+    names = {}
+    if regions_path and Path(regions_path).exists():
+        names = {r["community"]: r["name"]
+                 for r in json.loads(Path(regions_path).read_text())
+                 if "community" in r}
+    rows = con.execute(
+        f"""WITH fc AS (SELECT community, field, count(*) c
+                        FROM read_parquet('{web_path}') GROUP BY 1, 2),
+             tot AS (SELECT community, sum(c) n FROM fc GROUP BY 1),
+             maj AS (SELECT community, field, row_number() OVER (
+                         PARTITION BY community ORDER BY c DESC, field NULLS LAST) rn
+                     FROM fc)
+            SELECT t.community, m.field, t.n FROM tot t
+            JOIN maj m ON m.community = t.community AND m.rn = 1
+            WHERE t.n >= {int(min_members)} ORDER BY t.n DESC"""
+    ).fetchall()
+    entries = []
+    for c, f, n in rows:
+        r, g, b = community_rgb(int(c), f, int(n), min_members)
+        entries.append({
+            "community": int(c), "name": names.get(int(c)),
+            "field": f, "members": int(n),
+            "color": "#%02x%02x%02x" % (int(r*255), int(g*255), int(b*255)),
+        })
+    tmp = str(out_path) + ".tmp"
+    Path(tmp).write_text(json.dumps(entries, ensure_ascii=False, indent=1))
+    os.replace(tmp, out_path)
+    return len(entries)
 
 
 def reduce_level(level: dict) -> dict:
@@ -121,7 +152,8 @@ BLOOM = np.array([[0.06, 0.12, 0.06], [0.12, 0.0, 0.12], [0.06, 0.12, 0.06]],
                  dtype=np.float32)
 
 
-def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool) -> int:
+def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool,
+                splats: dict | None = None) -> int:
     """Write XYZ PNG tiles for one zoom; skip existing. Returns tiles written."""
     ntiles = 1 << z
     px, py = level["px"], level["py"]  # already in zoom-z pixel space
@@ -141,6 +173,22 @@ def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool) -> int:
         iy_up = py[sel] - yu * TILE
         iy = (TILE - 1) - iy_up                      # flip rows inside the tile
         img[iy, ix] = color[sel]
+        if splats is not None and z in SPLAT_RADIUS:
+            shift = MAXZ - z
+            spx, spy = splats["px"] >> shift, splats["py"] >> shift
+            ssel = (spx // TILE == x) & (spy // TILE == yu)
+            rad = SPLAT_RADIUS[z]
+            for sx, sy_up, srgb in zip(spx[ssel] - x * TILE,
+                                       spy[ssel] - yu * TILE,
+                                       splats["rgb"][ssel]):
+                sy = (TILE - 1) - sy_up
+                for dy in range(-rad, rad + 1):
+                    for dx in range(-rad, rad + 1):
+                        if dx*dx + dy*dy > rad*rad:
+                            continue
+                        yy, xx = sy + dy, sx + dx
+                        if 0 <= yy < TILE and 0 <= xx < TILE:
+                            img[yy, xx] = np.maximum(img[yy, xx], srgb)
         if bloom:
             base = img.copy()
             for dy in (-1, 0, 1):
@@ -171,6 +219,8 @@ def add_parser(parser) -> None:
     parser.add_argument("--out", default=None)
     parser.add_argument("--force-aggregate", action="store_true",
                          help="re-aggregate pixels_z9.parquet even if it looks fresh")
+    parser.add_argument("--splat-min-cited", type=int, default=60000,
+                         help="cited_by_count threshold for z8-9 citation splats (~p99.9)")
 
 
 def run(args) -> int:
@@ -182,17 +232,31 @@ def run(args) -> int:
         and Path(web).exists()
         and os.path.getmtime(web) > os.path.getmtime(pixels)
     )
+    if Path(pixels).exists() and not stale:
+        cols = {r[0] for r in duckdb.connect().execute(
+            f"DESCRIBE SELECT * FROM read_parquet('{pixels}')").fetchall()}
+        if "field" in cols:            # old schema cached before Task 4
+            stale = True
     if args.force_aggregate or not Path(pixels).exists() or stale:
         n = aggregate_z9(web, pixels, duckdb.connect())
         print(f"aggregated {n:,} occupied z9 pixels", flush=True)
     else:
         print("reusing cached pixels_z9.parquet (delete it or re-run webcoords to force)",
               flush=True)
+    con = duckdb.connect()
+    pal = build_community_palette(con, web)
     zooms = sorted(_parse_zooms(args.zooms), reverse=True)  # deep -> shallow
-    level = load_level9(pixels)
+    level = load_level9(pixels, pal)
+    splats = (load_splats(con, web, pal, args.splat_min_cited)
+              if any(z in SPLAT_RADIUS for z in zooms) else None)
+    index_dir = data_dir() / "index"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    n_legend = write_legend(con, web, str(index_dir / "legend.json"),
+                            str(data_dir() / "regions.json"))
+    print(f"legend: {n_legend} communities written", flush=True)
     for z in range(MAXZ, -1, -1):
         if z in zooms:
-            w = render_zoom(level, z, out, bloom=(z >= 8))
+            w = render_zoom(level, z, out, bloom=(z >= 8), splats=splats)
             print(f"zoom {z}: {w} tiles written", flush=True)
         if z > 0:
             level = reduce_level(level)
