@@ -209,3 +209,31 @@ def test_legend_json(tmp_path):
                         "field": "Medicine", "members": 1500,
                         "color": entries[0]["color"]}]
     assert entries[0]["color"].startswith("#") and len(entries[0]["color"]) == 7
+
+
+def test_render_zoom_bakes_faint_edges_at_z9(tmp_path):
+    level = {"px": np.array([10]), "py": np.array([10]),
+             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
+    edges = {"x0": np.array([10]), "y0": np.array([10]),
+             "x1": np.array([110]), "y1": np.array([10])}
+    render_zoom(level, 9, tmp_path, bloom=False, edges=edges)
+    # z9: yu = py // TILE = 0, ntiles = 1 << 9 = 512, ty = (ntiles-1) - yu = 511
+    # (brief's literal "255.png" assumed ntiles=256; corrected per Task 6 brief's
+    # own instruction to recompute the y-flip when a literal is mathematically
+    # wrong -- see test_render_zoom_draws_splat_disc which already derives the
+    # same z9/yu=0 tile as ntiles - 1, not 255).
+    img = np.asarray(Image.open(tmp_path / "9" / "0" / "511.png")).astype(int)
+    mid = img[(TILE - 1) - 10, 60]              # a pixel along the edge
+    assert 3 <= mid.max() <= 40                 # faint but present
+    assert img[(TILE - 1) - 10, 10, 0] > 200    # node still bright red
+
+
+def test_no_edges_below_z8(tmp_path):
+    level = {"px": np.array([0]), "py": np.array([0]),
+             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
+    edges = {"x0": np.array([0]), "y0": np.array([0]),
+             "x1": np.array([200 << 2]), "y1": np.array([0])}
+    render_zoom(level, 7, tmp_path, bloom=False, edges=edges)
+    ntiles = 1 << 7
+    img = np.asarray(Image.open(tmp_path / "7" / "0" / f"{ntiles - 1}.png")).astype(int)
+    assert img[TILE - 1, 30].max() == 0         # nothing drawn along the line
