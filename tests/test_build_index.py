@@ -11,7 +11,7 @@ def write_web(path, rows):
         f"('{i}', '{n}', {x}, {y}, 1, 20, {c}, 'I', 'Biology')"
         for i, n, x, y, c in rows
     )
-    duckdb.sql(f"COPY (SELECT * FROM (VALUES {vals}) t(id, display_name, xw, yw,"
+    duckdb.sql(f"COPY (SELECT id, display_name, xw, yw, community, works_count, cited_by_count, institution, field, FALSE AS is_ring FROM (VALUES {vals}) t(id, display_name, xw, yw,"
                f" community, works_count, cited_by_count, institution, field))"
                f" TO '{path}' (FORMAT PARQUET)")
 
@@ -40,7 +40,7 @@ def test_label_tiles_ranked_and_capped(tmp_path):
 
 def test_label_tiles_200_cap(tmp_path):
     web = tmp_path / "w.parquet"
-    # 250 researchers in one z8/z9 tile -> capped at 200 there, uncapped at z6/z7
+    # 250 researchers in one z8/z9 tile -> capped at 200 at z8, not capped at z9 (cap 1000)
     rows = [(f"C{i}", f"Name{i}", 0.25, 0.25, 5000 - i) for i in range(250)]
     write_web(web, rows)
     out = tmp_path / "index"
@@ -49,7 +49,7 @@ def test_label_tiles_200_cap(tmp_path):
     assert len(z8["l"]) == 200                      # capped at z8
     assert z8["l"][0][0] == "Name0"                 # highest cited first
     z9 = json.loads((out / "labels/9/128/383.json").read_text())
-    assert len(z9["l"]) == 200                       # capped at z9 too
+    assert len(z9["l"]) == 250                       # not capped at z9 (cap 1000)
 
 
 def test_search_shards_cover_everyone(tmp_path):
@@ -64,3 +64,18 @@ def test_search_shards_cover_everyone(tmp_path):
     assert [e[1] for e in al] == ["alan turing", "Alice Zhang"]  # cited desc
     other = json.loads((out / "search/_.json").read_text())
     assert other[0][1] == "李明"
+
+
+def test_z9_cap_and_ring_excluded_from_labels(tmp_path):
+    web = tmp_path / "web.parquet"
+    duckdb.sql(
+        "COPY (SELECT 'A' || range::VARCHAR id, 'name' || range::VARCHAR display_name,"
+        " 0.5 xw, 0.5 yw, 1 community, 20 works_count,"
+        " (2000000 - range)::INT cited_by_count, 'i' institution, 'Medicine' field,"
+        " (range = 0) is_ring FROM range(1200))"
+        f" TO '{web}' (FORMAT PARQUET)")
+    n = build_label_tiles(str(web), tmp_path / "index")
+    z9 = json.loads((tmp_path / "index" / "labels" / "9" / "256" / "255.json").read_text())
+    assert len(z9["l"]) == 1000
+    names = {e[0] for e in z9["l"]}
+    assert "name0" not in names          # the ring node (highest cited) is excluded

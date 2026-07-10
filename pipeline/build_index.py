@@ -10,7 +10,7 @@ import duckdb
 
 from pipeline.config import apply_resource_limits, data_dir
 
-LABEL_ZOOMS = {6: 50, 7: 50, 8: 200, 9: 200}   # zoom -> per-tile capacity
+LABEL_ZOOMS = {6: 50, 7: 50, 8: 200, 9: 1000}   # zoom -> per-tile capacity
 
 
 def normalize(name: str) -> str:
@@ -40,7 +40,7 @@ def build_label_tiles(web: str, out_dir: Path) -> int:
                                         least({ntiles - 1}, CAST(floor(CAST(yw AS DOUBLE) * {ntiles}) AS INT))
                            ORDER BY cited_by_count DESC, id
                        ) AS rn
-                FROM read_parquet('{web}')
+                FROM read_parquet('{web}') WHERE NOT is_ring
             ) WHERE rn <= {cap}
             ORDER BY tx, ty_up, cited_by_count DESC, id
             """
