@@ -1,4 +1,5 @@
 """Aggregate web coords at zoom 9, pyramid-reduce, write styled PNG tiles."""
+import os
 from pathlib import Path
 
 import duckdb
@@ -33,7 +34,8 @@ def aggregate_z9(webcoords_path: str, out_path: str, con) -> int:
                 SELECT px, py, field, community, c,
                        sum(c) OVER (PARTITION BY px, py) AS cnt,
                        row_number() OVER (PARTITION BY px, py
-                                          ORDER BY c DESC, community) AS rn
+                                          ORDER BY c DESC, community,
+                                                   field NULLS LAST) AS rn
                 FROM grouped
             )
             SELECT px, py, CAST(cnt AS BIGINT) AS cnt, field, community
@@ -63,7 +65,8 @@ def load_level9(pixels_path: str) -> dict:
         f"""SELECT p.px, p.py, p.cnt, pal.pi
             FROM read_parquet('{pixels_path}') p
             JOIN pal ON pal.community = p.community
-                    AND pal.field IS NOT DISTINCT FROM p.field"""
+                    AND pal.field IS NOT DISTINCT FROM p.field
+            ORDER BY p.py, p.px"""
     ).fetchnumpy()
     return {
         "px": t["px"].astype(np.int64),
@@ -75,6 +78,11 @@ def load_level9(pixels_path: str) -> dict:
 
 def reduce_level(level: dict) -> dict:
     """2x2 -> 1: counts summed, rgb of the heaviest child (dominant approx)."""
+    if len(level["px"]) == 0:
+        return {
+            "px": np.empty(0, np.int64), "py": np.empty(0, np.int64),
+            "cnt": np.empty(0, np.int64), "rgb": np.empty((0, 3), np.float32),
+        }
     px, py = level["px"] >> 1, level["py"] >> 1
     key = px * 2**31 + py  # unique combined key (px, py < 2**17)
     order = np.argsort(key, kind="stable")
@@ -138,7 +146,9 @@ def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool) -> int:
                                      max(0, -dx):TILE + min(0, -dx) or TILE]
         arr = (np.clip(img, 0, 1) * 255).astype(np.uint8)
         path.parent.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(arr).save(path, optimize=True)
+        tmp = path.parent / (path.name + ".tmp")
+        Image.fromarray(arr).save(tmp, optimize=True, format="PNG")
+        os.replace(tmp, path)                        # atomic: no truncated PNG on crash
         written += 1
     return written
 
@@ -162,7 +172,7 @@ def run(args) -> int:
         n = aggregate_z9(web, pixels, duckdb.connect())
         print(f"aggregated {n:,} occupied z9 pixels", flush=True)
     zooms = sorted(_parse_zooms(args.zooms), reverse=True)  # deep -> shallow
-    level, at = load_level9(pixels), MAXZ
+    level = load_level9(pixels)
     for z in range(MAXZ, -1, -1):
         if z in zooms:
             w = render_zoom(level, z, out, bloom=(z >= 8))

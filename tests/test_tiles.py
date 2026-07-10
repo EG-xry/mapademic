@@ -63,6 +63,17 @@ def test_pyramid_counts_conserved(tiny_web, tmp_path):
     assert len(level["cnt"]) == 2
 
 
+def test_reduce_level_empty_returns_empty():
+    empty = {
+        "px": np.empty(0, np.int64), "py": np.empty(0, np.int64),
+        "cnt": np.empty(0, np.int64), "rgb": np.empty((0, 3), np.float32),
+    }
+    out = reduce_level(empty)                   # must not crash on idx[0]
+    assert len(out["px"]) == 0 and len(out["cnt"]) == 0
+    assert out["rgb"].shape == (0, 3)
+    assert out["px"].dtype == np.int64 and out["rgb"].dtype == np.float32
+
+
 def test_render_writes_expected_tiles_and_is_idempotent(tiny_web, tmp_path):
     pixels = str(tmp_path / "pixels_z9.parquet")
     aggregate_z9(tiny_web, pixels, duckdb.connect())
