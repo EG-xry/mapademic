@@ -463,10 +463,12 @@ async function fetchIdBucket(bucket) {
 }
 
 // nodes: [{id, name}] in path order. Returns an aligned array where each entry
-// is either {xw, yw, ghost, name} or null (skipped: no resolved neighbor on
-// one side). Missing authors get a ghost position at the midpoint of the
-// nearest resolved neighbor on each side; if there's no resolved neighbor on
-// one side (including being at either end of the path) the node is skipped.
+// is either {xw, yw, ghost, name} or null (skipped: no resolved anchor on one
+// side). Missing authors get ghost positions interpolated proportionally along
+// the segment between the nearest resolved anchor on each side (a run of k
+// unresolved nodes spreads out at t = 1/(k+1), 2/(k+1), ... instead of
+// stacking at the midpoint); if there's no resolved anchor on one side
+// (including being at either end of the path) the node is skipped.
 async function resolvePathCoords(nodes) {
   const buckets = await Promise.all(nodes.map(n => fetchIdBucket(idBucketNum(n.id))));
   const hits = nodes.map((n, i) => {
@@ -476,12 +478,15 @@ async function resolvePathCoords(nodes) {
   });
   return nodes.map((n, i) => {
     if (hits[i]) return { ...hits[i], ghost: false, name: n.name };
-    let prev = null;
-    for (let j = i - 1; j >= 0; j--) if (hits[j]) { prev = hits[j]; break; }
-    let next = null;
-    for (let j = i + 1; j < nodes.length; j++) if (hits[j]) { next = hits[j]; break; }
-    if (prev && next) {
-      return { xw: (prev.xw + next.xw) / 2, yw: (prev.yw + next.yw) / 2,
+    let prevIdx = -1;
+    for (let j = i - 1; j >= 0; j--) if (hits[j]) { prevIdx = j; break; }
+    let nextIdx = -1;
+    for (let j = i + 1; j < nodes.length; j++) if (hits[j]) { nextIdx = j; break; }
+    if (prevIdx >= 0 && nextIdx >= 0) {
+      const prev = hits[prevIdx], next = hits[nextIdx];
+      const t = (i - prevIdx) / (nextIdx - prevIdx);
+      return { xw: prev.xw + (next.xw - prev.xw) * t,
+               yw: prev.yw + (next.yw - prev.yw) * t,
                ghost: true, name: n.name };
     }
     return null;
@@ -490,8 +495,10 @@ async function resolvePathCoords(nodes) {
 
 let pathEventSource = null;
 let pathMarkers = [];
+let pathGen = 0;                     // invalidates stale in-flight renders (labelGen pattern)
 
 function clearPath() {
+  pathGen++;                         // any in-flight renderPath is now stale
   if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
   pathMarkers.forEach(m => m.remove());
   pathMarkers = [];
@@ -503,6 +510,7 @@ function clearPath() {
 connectClear.addEventListener("click", clearPath);
 
 async function renderPath(pathSteps, hops) {
+  const gen = pathGen;               // stale once clearPath / a newer Go bumps it
   // /api/path with edges=coauthor should only ever return author ids, but
   // filter defensively in case a work-type node (id starting "W") interleaves.
   const nodes = pathSteps
@@ -511,6 +519,7 @@ async function renderPath(pathSteps, hops) {
   if (nodes.length === 0) { setPathStatus("no author path"); return; }
 
   const resolved = await resolvePathCoords(nodes);
+  if (gen !== pathGen) return;       // a newer Go/Clear owns the overlay now
   const points = resolved.filter(Boolean);
   if (points.length < 2) { setPathStatus(`${hops} hops (too few resolved to draw)`); return; }
 
@@ -553,6 +562,7 @@ async function renderPath(pathSteps, hops) {
 connectGo.addEventListener("click", () => {
   if (!connectA || !connectB) { setPathStatus("select both authors"); return; }
   clearPath();    // starting a new Go clears any previous path first
+  pathGen++;      // this Go owns the overlay from here (clearPath also bumps)
   const idA = stripId(connectA.id), idB = stripId(connectB.id);
   setPathStatus("searching…");
   pathEventSource = new EventSource(
