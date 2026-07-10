@@ -153,34 +153,32 @@ def load_edges(path: str) -> dict:
     return {k: t[k].astype(np.int64) for k in ("x0", "y0", "x1", "y1")}
 
 
-def _bucket_edges(edges: dict, z: int) -> dict:
-    """Group edge indices by the shifted-z tile of their midpoint, replicated
-    into neighbouring tiles within this zoom's longest-edge tile-radius, so
-    a per-tile edge lookup is a single dict.get instead of a full-array scan
-    (14M+ edges x up to 512x512 tiles at z9 otherwise)."""
+def _bucket_edges(edges: dict, z: int) -> tuple[dict, int]:
+    """Group edge indices by the shifted-z tile of their midpoint, each edge
+    stored exactly ONCE (no replication into neighbours: at 14M+ edges the
+    replicated variant peaked at tens of GB). Returns (buckets, radius); at
+    render time a tile unions its neighbour buckets within `radius`, which is
+    derived from HALF the max edge length at this zoom - any point on a
+    segment is at most len/2 from the midpoint. Still avoids rescanning all
+    edges for each of up to 512x512 tiles at z9."""
     shift = MAXZ - z
     ex0, ey0 = edges["x0"] >> shift, edges["y0"] >> shift
     ex1, ey1 = edges["x1"] >> shift, edges["y1"] >> shift
     n = len(ex0)
     if n == 0:
-        return {}
+        return {}, 0
     max_len = int(max(np.abs(ex1 - ex0).max(), np.abs(ey1 - ey0).max()))
-    radius = max_len // TILE + 1
+    radius = (max_len // 2) // TILE + 1
     mx, my = ((ex0 + ex1) // 2) // TILE, ((ey0 + ey1) // 2) // TILE
-    offs = np.arange(-radius, radius + 1)
-    doff_x, doff_y = np.meshgrid(offs, offs, indexing="ij")
-    doff_x, doff_y = doff_x.ravel(), doff_y.ravel()             # (k,)
-    tx_rep = (mx[:, None] + doff_x[None, :]).ravel()            # (n*k,)
-    ty_rep = (my[:, None] + doff_y[None, :]).ravel()
-    idx_rep = np.repeat(np.arange(n, dtype=np.int64), len(doff_x))
-    key = tx_rep.astype(np.int64) * (1 << 20) + ty_rep.astype(np.int64)
-    order = np.argsort(key, kind="stable")
-    key_s, idx_s = key[order], idx_rep[order]
-    tx_s, ty_s = tx_rep[order], ty_rep[order]
+    key = mx * (1 << 20) + my
+    order = np.argsort(key, kind="stable")     # idx array == order (idx was arange)
+    key_s = key[order]
+    mx_s, my_s = mx[order], my[order]
     boundaries = np.flatnonzero(np.diff(key_s)) + 1
     starts = np.concatenate(([0], boundaries))
-    groups = np.split(idx_s, boundaries)
-    return {(int(tx_s[s]), int(ty_s[s])): g for s, g in zip(starts, groups)}
+    groups = np.split(order, boundaries)
+    buckets = {(int(mx_s[s]), int(my_s[s])): g for s, g in zip(starts, groups)}
+    return buckets, radius
 
 
 def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool,
@@ -191,8 +189,8 @@ def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool,
     bright = _brightness(level["cnt"])
     color = level["rgb"] * bright[:, None]
     tx, ty_up = px // TILE, py // TILE
-    edge_buckets = (_bucket_edges(edges, z)
-                    if edges is not None and z >= EDGE_MINZ else None)
+    edge_buckets, edge_radius = ((None, 0) if edges is None or z < EDGE_MINZ
+                                 else _bucket_edges(edges, z))
     written = 0
     for t in np.unique(tx * ntiles + ty_up):
         x, yu = int(t // ntiles), int(t % ntiles)
@@ -203,7 +201,11 @@ def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool,
         sel = (tx == x) & (ty_up == yu)
         img = np.zeros((TILE, TILE, 3), dtype=np.float32)
         if edge_buckets is not None:
-            idxs = edge_buckets.get((x, yu))
+            hits = [edge_buckets[(bx, by)]
+                    for bx in range(x - edge_radius, x + edge_radius + 1)
+                    for by in range(yu - edge_radius, yu + edge_radius + 1)
+                    if (bx, by) in edge_buckets]
+            idxs = np.concatenate(hits) if hits else None
             if idxs is not None and len(idxs):
                 shift = MAXZ - z
                 ex0, ey0 = edges["x0"][idxs] >> shift, edges["y0"][idxs] >> shift
@@ -276,7 +278,9 @@ def add_parser(parser) -> None:
                          help="cited_by_count threshold for z8-9 citation splats (~p99.9)")
     parser.add_argument("--edges", nargs="?", const="__default__", default=None,
                          help="bake faint coauthor edges into z>=%d tiles;"
-                              " bare flag uses data/edges_px.parquet" % EDGE_MINZ)
+                              " bare flag uses data/edges_px.parquet;"
+                              " already-rendered tiles are skipped, so delete the"
+                              " z8/z9 tile dirs first to re-bake" % EDGE_MINZ)
 
 
 def run(args) -> int:

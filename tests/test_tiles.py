@@ -237,3 +237,17 @@ def test_no_edges_below_z8(tmp_path):
     ntiles = 1 << 7
     img = np.asarray(Image.open(tmp_path / "7" / "0" / f"{ntiles - 1}.png")).astype(int)
     assert img[TILE - 1, 30].max() == 0         # nothing drawn along the line
+
+
+def test_edge_with_midpoint_in_other_tile_still_renders(tmp_path):
+    # Edge (10,10)-(700,10) at z9: midpoint x=355 lies in tile (1,0), but the
+    # segment crosses tile (0,0). Pins neighbor-bucket union correctness: a
+    # midpoint-only bucket lookup would miss this edge for tile (0,0).
+    level = {"px": np.array([10]), "py": np.array([10]),
+             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
+    edges = {"x0": np.array([10]), "y0": np.array([10]),
+             "x1": np.array([700]), "y1": np.array([10])}
+    render_zoom(level, 9, tmp_path, bloom=False, edges=edges)
+    ntiles = 1 << 9
+    img = np.asarray(Image.open(tmp_path / "9" / "0" / f"{ntiles - 1}.png")).astype(int)
+    assert img[(TILE - 1) - 10, 200].max() >= 3   # edge drawn inside tile (0,0)
