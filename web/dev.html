@@ -5,11 +5,32 @@
   <title>mapademic dev preview</title>
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
-  <style>html, body, #map { margin: 0; height: 100%; background: #000; }</style>
+  <style>
+    html, body, #map { margin: 0; height: 100%; background: #000; }
+    .lbl { color: #fff; font-family: system-ui, sans-serif;
+           text-shadow: 0 0 4px #000, 0 0 8px #000; pointer-events: none;
+           white-space: nowrap; }
+    .region { color: #9ab; font: 600 15px system-ui; letter-spacing: .08em;
+              text-transform: uppercase; text-shadow: 0 0 6px #000;
+              pointer-events: none; opacity: .85; }
+    #tip { position: fixed; display: none; background: #111c; color: #eee;
+           font: 12px system-ui; padding: 4px 8px; border-radius: 4px;
+           pointer-events: none; z-index: 10; }
+    #legend { position: fixed; right: 10px; top: 10px; background: #0b0b0bd9;
+              color: #ddd; font: 12px system-ui; border-radius: 6px;
+              max-height: 70vh; overflow-y: auto; z-index: 9; width: 230px; }
+    #legend summary { cursor: pointer; padding: 6px 10px; font-weight: 600; }
+    #legend .row { display: flex; gap: 6px; align-items: center; padding: 2px 10px; }
+    #legend .sw { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+    #legend .n { color: #888; margin-left: auto; }
+  </style>
 </head>
 <body>
 <div id="map"></div>
+<div id="tip"></div>
+<details id="legend" open><summary>Legend</summary><div id="legend-rows"></div></details>
 <script>
+const HIT_ZOOM = 10;                 // hover/click active at or past this zoom
 const map = new maplibregl.Map({
   container: "map",
   style: {
@@ -28,26 +49,114 @@ const map = new maplibregl.Map({
 });
 map.addControl(new maplibregl.NavigationControl());
 
+const tileCache = new Map();         // "z/x/y" -> {l:[...]} or null
+async function fetchTile(z, x, y) {
+  const k = `${z}/${x}/${y}`;
+  if (!tileCache.has(k)) {
+    tileCache.set(k, fetch(`/data/index/labels/${k}.json`)
+      .then(r => r.ok ? r.json() : null).catch(() => null));
+    if (tileCache.size > 600) tileCache.delete(tileCache.keys().next().value);
+  }
+  return tileCache.get(k);
+}
+function visibleTiles(lz) {
+  const n = 1 << lz, b = map.getBounds();
+  const m0 = maplibregl.MercatorCoordinate.fromLngLat(b.getNorthWest());
+  const m1 = maplibregl.MercatorCoordinate.fromLngLat(b.getSouthEast());
+  const tiles = [];
+  const x0 = Math.max(0, Math.floor(m0.x * n)), x1 = Math.min(n - 1, Math.floor(m1.x * n));
+  const y0 = Math.max(0, Math.floor(m0.y * n)), y1 = Math.min(n - 1, Math.floor(m1.y * n));
+  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) tiles.push([x, y]);
+  return tiles;
+}
+const toLngLat = (xw, yw) => new maplibregl.MercatorCoordinate(xw, 1 - yw, 0).toLngLat();
+
+let markers = [];
 async function drawLabels() {
-  const z = Math.round(map.getZoom());
-  if (z < 6) return document.querySelectorAll(".lbl").forEach(e => e.remove());
-  // naive: fetch the center tile's labels and render the top 10 as DOM pins
-  const lz = Math.min(9, Math.round(map.getZoom()));
-  const n = 1 << lz, c = map.getCenter();
-  const merc = maplibregl.MercatorCoordinate.fromLngLat(c);
-  const tx = Math.floor(merc.x * n), ty = Math.floor(merc.y * n);
-  const r = await fetch(`/data/index/labels/${lz}/${tx}/${ty}.json`);
-  document.querySelectorAll(".lbl").forEach(e => e.remove());
-  if (!r.ok) return;
-  (await r.json()).l.slice(0, 10).forEach(([name, id, xw, yw]) => {
-    const ll = new maplibregl.MercatorCoordinate(xw, 1 - yw, 0).toLngLat();
+  const z = map.getZoom();
+  markers.forEach(m => m.remove()); markers = [];
+  if (z < 5.5) return;
+  const lz = Math.max(6, Math.min(9, Math.round(z)));
+  const lists = await Promise.all(visibleTiles(lz).map(([x, y]) => fetchTile(lz, x, y)));
+  const entries = lists.filter(Boolean).flatMap(t => t.l);
+  entries.sort((a, b) => b[4] - a[4]);          // by citations desc
+  const placed = [];                            // screen-space rects
+  const cap = 60;
+  for (const [name, id, xw, yw, cited] of entries) {
+    if (markers.length >= cap) break;
+    const pt = map.project(toLngLat(xw, yw));
+    if (pt.x < -50 || pt.y < -20 || pt.x > innerWidth + 50 || pt.y > innerHeight + 20) continue;
+    const size = 11 + Math.min(6, Math.log10(1 + cited));       // 11-17 px
+    const w = name.length * size * 0.58, h = size + 6;
+    if (placed.some(r => Math.abs(r.x - pt.x) * 2 < r.w + w
+                      && Math.abs(r.y - pt.y) * 2 < r.h + h)) continue;
+    placed.push({ x: pt.x, y: pt.y, w, h });
     const el = document.createElement("div");
     el.className = "lbl"; el.textContent = name;
-    el.style.cssText = "color:#fff;font:12px sans-serif;text-shadow:0 0 4px #000";
-    new maplibregl.Marker({ element: el }).setLngLat(ll).addTo(map);
-  });
+    el.style.fontSize = size + "px";
+    markers.push(new maplibregl.Marker({ element: el })
+      .setLngLat(toLngLat(xw, yw)).addTo(map));
+  }
 }
-map.on("moveend", drawLabels);
+
+let regions = [];
+fetch("/data/regions.json").then(r => r.json()).then(j => { regions = j; drawRegions(); });
+let regionMarkers = [];
+function drawRegions() {
+  regionMarkers.forEach(m => m.remove()); regionMarkers = [];
+  const z = map.getZoom();
+  for (const r of regions) {
+    if (z < r.zmin || z > r.zmax + 1) continue;
+    const el = document.createElement("div");
+    el.className = "region"; el.textContent = r.name;
+    regionMarkers.push(new maplibregl.Marker({ element: el })
+      .setLngLat(toLngLat(r.xw, r.yw)).addTo(map));
+  }
+}
+
+fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).then(entries => {
+  const box = document.getElementById("legend-rows");
+  for (const e of entries.slice(0, 25)) {
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = `<span class="sw" style="background:${e.color}"></span>` +
+      `<span>${e.name || e.field || "Community " + e.community}</span>` +
+      `<span class="n">${(e.members / 1e6).toFixed(1)}M</span>`;
+    box.appendChild(row);
+  }
+});
+
+const tip = document.getElementById("tip");
+async function hitTest(pt) {
+  if (map.getZoom() < HIT_ZOOM) return null;
+  const merc = maplibregl.MercatorCoordinate.fromLngLat(map.unproject(pt));
+  const xw = merc.x, yw = 1 - merc.y, n = 1 << 9;
+  const t = await fetchTile(9, Math.floor(xw * n), Math.floor(yw * n));
+  if (!t) return null;
+  let best = null, bestD = 14;                  // px radius
+  for (const e of t.l) {
+    const p = map.project(toLngLat(e[2], e[3]));
+    const d = Math.hypot(p.x - pt.x, p.y - pt.y);
+    if (d < bestD) { bestD = d; best = e; }
+  }
+  return best;
+}
+map.on("mousemove", async ev => {
+  const hit = await hitTest(ev.point);
+  map.getCanvas().style.cursor = hit ? "pointer" : "";
+  if (hit) {
+    tip.style.display = "block";
+    tip.style.left = (ev.point.x + 14) + "px";
+    tip.style.top = (ev.point.y + 14) + "px";
+    tip.textContent = `${hit[0]} - ${hit[4].toLocaleString()} citations`;
+  } else tip.style.display = "none";
+});
+map.on("click", async ev => {
+  const hit = await hitTest(ev.point);
+  if (hit) window.open(hit[1], "_blank", "noopener");
+});
+map.on("load", () => { drawLabels(); drawRegions(); });
+map.on("moveend", () => { drawLabels(); drawRegions(); });
+map.on("zoomend", () => { drawLabels(); drawRegions(); });
 </script>
 </body>
 </html>
