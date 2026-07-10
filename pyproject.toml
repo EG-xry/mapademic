@@ -3,7 +3,7 @@ name = "mapademic"
 version = "0.1.0"
 description = "A zoomable map of the academic world (OpenAlex coauthorship graph)"
 requires-python = ">=3.11"
-dependencies = ["duckdb>=1.0"]
+dependencies = ["duckdb>=1.0", "numpy>=1.26", "pillow>=10"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
