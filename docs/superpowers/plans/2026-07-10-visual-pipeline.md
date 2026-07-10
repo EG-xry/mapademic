@@ -1253,6 +1253,21 @@ git commit -m "feat: index stage - label/hit tiles and search shards; preview la
 
 ---
 
+## Run log
+
+- webcoords: 8,587,906 points, median-center, s=78902, r2max=2.918.
+- tiles aggregate: 8,559,913 occupied z9 pixels (near-1:1 with researchers).
+- **Full pyramid zooms 0-9: 118,166 PNG tiles, 606MB** (z9 84,527; z8 23,959;
+  z7 6,809; z6 1,987; z0-5 ~884). Comfortably under R2's 10GB free tier.
+- **Zoom-10 decision: DEFERRED, affordable.** 606MB at z9 means a partial z10
+  over dense cores fits easily; not built here (out of plan scope). Decide in
+  Plan 4 if deeper crispness is wanted.
+- Styling (Task 4 QA gate, Eric-approved): richer/deeper palette (sat >=0.72,
+  lightness 0.40-0.58), brightness curve floor 0.05 / gamma 1.25 / ceil 1.0.
+  Verified: overview shows field continents; z9 resolves individual
+  researchers as star-dots (Hinton's 5x5 z9 window = 6,004 distinct dots);
+  low-zoom center tint clears at depth.
+
 ## Out of scope for this plan
 
 - Zoom 10 (decided after Task 5's measurement)
