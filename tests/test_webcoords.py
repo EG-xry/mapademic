@@ -38,6 +38,13 @@ def test_all_points_inside_margin(coords_file, tmp_path):
         f"SELECT least(min(xw), min(yw)), greatest(max(xw), max(yw)) FROM '{out}'"
     ).fetchone()
     assert lo >= 0.02 - 1e-9 and hi <= 0.98 + 1e-9
+    schema = {
+        name: typ
+        for name, typ, *_ in duckdb.sql(
+            f"DESCRIBE SELECT xw, yw FROM '{out}'"
+        ).fetchall()
+    }
+    assert schema == {"xw": "DOUBLE", "yw": "DOUBLE"}
 
 
 def test_radius_order_preserved_and_angles_kept(coords_file, tmp_path):
