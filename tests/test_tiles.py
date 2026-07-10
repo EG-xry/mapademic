@@ -88,10 +88,15 @@ def test_render_writes_expected_tiles_and_is_idempotent(tiny_web, tmp_path):
     img = np.asarray(Image.open(out / "1/1/0.png"))
     assert img.shape == (256, 256, 3) and img.max() > 0
     assert render_zoom(level, 1, out, bloom=False) == 0   # resume: all skipped
-    # GOLDEN pixel: the dense pixel (cnt=3, dominant Biology/community 1) has
-    # rank 2/2 -> brightness 1.0, so its RGB equals the raw palette color.
+    # GOLDEN pixel: the dense pixel (cnt=3, dominant Biology/community 1) is the
+    # max-count pixel -> rank 1.0 -> brightness == BRIGHT_CEIL, so its RGB equals
+    # the palette color scaled by the ceiling. Mirror the render's float32 path.
     from pipeline.palette import field_community_rgb
-    expected = tuple(int(c * 255) for c in field_community_rgb("Biology", 1))  # trunc, matching astype(uint8)
+    from pipeline.tiles import BRIGHT_CEIL
+    base = np.array(field_community_rgb("Biology", 1), dtype=np.float32)
+    expected = tuple(
+        (np.clip(base * np.float32(BRIGHT_CEIL), 0, 1) * 255).astype(np.uint8)
+    )
     dense = np.asarray(Image.open(out / "1/0/1.png"))
     ys, xs = np.nonzero(dense.sum(axis=2))
     assert tuple(dense[ys[0], xs[0]]) == expected

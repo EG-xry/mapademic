@@ -104,10 +104,17 @@ def reduce_level(level: dict) -> dict:
     return out
 
 
+# Styling constants (tuned at the Task 4 QA gate).
+BRIGHT_FLOOR = 0.05   # sparse outer/halo pixels nearly vanish -> no bright ring,
+BRIGHT_CEIL = 1.0     #   darker gaps between clusters -> structure reads
+BRIGHT_GAMMA = 1.25   # >1 dims low/mid density, keeps dense cores bright (contrast)
+
+
 def _brightness(cnt: np.ndarray) -> np.ndarray:
     vals = np.log1p(cnt.astype(np.float64))
     ranks = np.searchsorted(np.sort(vals), vals, side="right") / len(vals)
-    return (0.15 + 0.85 * ranks).astype(np.float32)
+    shaped = ranks ** BRIGHT_GAMMA
+    return (BRIGHT_FLOOR + (BRIGHT_CEIL - BRIGHT_FLOOR) * shaped).astype(np.float32)
 
 
 BLOOM = np.array([[0.06, 0.12, 0.06], [0.12, 0.0, 0.12], [0.06, 0.12, 0.06]],
