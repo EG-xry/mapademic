@@ -59,6 +59,39 @@ def field_community_rgb(field: str | None, community: int) -> tuple[float, float
     return colorsys.hls_to_rgb(hue / 360.0, light, sat)
 
 
+def community_rgb(community: int, majority_field: str | None,
+                  members: int, min_members: int = 1000) -> tuple[float, float, float]:
+    """Community base RGB in [0,1]; deterministic. Big communities take their
+    majority field's hue family; the tail is dim grey dust."""
+    h = splitmix64(int(community))
+    j1 = ((h & 0xFFFF) / 0xFFFF) * 2 - 1
+    j2 = (((h >> 16) & 0xFFFF) / 0xFFFF) * 2 - 1
+    if members < min_members or majority_field is None \
+            or majority_field not in FIELD_HUES:
+        return colorsys.hls_to_rgb(0.0, 0.30 + 0.06 * j1, 0.03)
+    hue = (FIELD_HUES[majority_field] + 12.0 * j1) % 360.0
+    sat = min(1.0, max(0.85, 0.925 + 0.075 * j2))
+    light = min(0.56, max(0.44, 0.50 + 0.06 * j2))
+    return colorsys.hls_to_rgb(hue / 360.0, light, sat)
+
+
+def build_community_palette(con, web_path: str,
+                            min_members: int = 1000) -> dict[int, tuple]:
+    rows = con.execute(
+        f"""WITH fc AS (SELECT community, field, count(*) c
+                        FROM read_parquet('{web_path}') GROUP BY 1, 2),
+             tot AS (SELECT community, sum(c) n FROM fc GROUP BY 1),
+             maj AS (SELECT community, field,
+                            row_number() OVER (PARTITION BY community
+                                ORDER BY c DESC, field NULLS LAST) rn
+                     FROM fc)
+            SELECT t.community, m.field, t.n
+            FROM tot t JOIN maj m ON m.community = t.community AND m.rn = 1"""
+    ).fetchall()
+    return {int(c): community_rgb(int(c), f, int(n), min_members)
+            for c, f, n in rows}
+
+
 def add_parser(parser) -> None:  # not a CLI stage; keeps import-shape uniform
     raise SystemExit("palette is a library module, not a stage")
 
