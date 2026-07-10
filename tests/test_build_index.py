@@ -22,6 +22,15 @@ def write_web(path, rows):
                f" TO '{path}' (FORMAT PARQUET)")
 
 
+def assert_search_shards_lossless(out_dir, rows):
+    """Union of all search-shard entries equals the input; no id duplicated."""
+    seen = []
+    for p in (out_dir / "search").glob("*.json"):
+        for e in json.loads(p.read_text()):
+            seen.append(e[2])                    # author id
+    assert sorted(seen) == sorted(r[0] for r in rows)
+
+
 def test_normalize():
     assert normalize("Géraldine  O'Brien-Smith") == "geraldine o brien smith"
     assert normalize("李明") == "李明"          # non-latin kept verbatim (lowercased)
@@ -155,6 +164,7 @@ def test_search_shards_hot_split(tmp_path, monkeypatch):
     abd = json.loads((out / "search/abd.json").read_text())
     assert len(abd) == 20
     assert all(e[0].startswith("abd") for e in abd)
+    assert_search_shards_lossless(out, rows)
 
 
 def test_search_shards_hot_split_parent_written_even_when_empty(tmp_path, monkeypatch):
@@ -167,6 +177,7 @@ def test_search_shards_hot_split_parent_written_even_when_empty(tmp_path, monkey
     assert (out / "search/abc.json").exists()
     ab = json.loads((out / "search/ab.json").read_text())
     assert ab == []                             # no exact-2-char names, but still written
+    assert_search_shards_lossless(out, rows)
 
 
 def test_search_shards_not_split_below_threshold(tmp_path):
@@ -175,3 +186,57 @@ def test_search_shards_not_split_below_threshold(tmp_path):
     out = tmp_path / "index"
     build_search_shards(str(web), out)
     assert not (out / "search/ali.json").exists()  # small bucket: no 3-char split
+
+
+def test_search_shards_recursive_split_to_max_prefix(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_index, "SHARD_SPLIT_BYTES", 500)
+    rows = [(f"C{i}", f"Abcderesearcher Number{i:03d}", 0.1, 0.1, 500 - i) for i in range(40)]
+    rows.append(("E2", "Ab", 0.2, 0.2, 5))      # exactly-2-char normalized name
+    rows.append(("E3", "Abc", 0.2, 0.2, 5))     # exactly-3-char
+    rows.append(("E4", "Abcd", 0.2, 0.2, 5))    # exactly-4-char
+    web = tmp_path / "w.parquet"
+    write_web(web, rows)
+    out = tmp_path / "index"
+    n = build_search_shards(str(web), out)
+    assert n == len(rows)
+    # every prefix level 2..5 written; exactly-K-char names stay at level K
+    ab = json.loads((out / "search/ab.json").read_text())
+    assert [e[1] for e in ab] == ["Ab"]
+    abc = json.loads((out / "search/abc.json").read_text())
+    assert [e[1] for e in abc] == ["Abc"]
+    abcd = json.loads((out / "search/abcd.json").read_text())
+    assert [e[1] for e in abcd] == ["Abcd"]
+    abcde = json.loads((out / "search/abcde.json").read_text())
+    assert len(abcde) == 40                     # oversized but capped at MAX_PREFIX_LEN
+    assert not (out / "search/abcder.json").exists()
+    assert_search_shards_lossless(out, rows)
+
+
+def test_search_shards_catchall_codepoint_split(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_index, "SHARD_SPLIT_BYTES", 500)
+    rows = [(f"L{i}", f"李研究者{i:03d}号", 0.1, 0.1, 100 - i) for i in range(20)]
+    rows.append(("W0", "王五", 0.2, 0.2, 50))
+    rows.append(("X0", "!!!", 0.3, 0.3, 1))     # normalizes to empty -> stays in _
+    web = tmp_path / "w.parquet"
+    write_web(web, rows)
+    out = tmp_path / "index"
+    n = build_search_shards(str(web), out)
+    assert n == len(rows)
+    li = json.loads((out / f"search/_{ord('李') % 32}.json").read_text())
+    assert len(li) == 20
+    wang = json.loads((out / f"search/_{ord('王') % 32}.json").read_text())
+    assert [e[2] for e in wang] == ["W0"]
+    catch = json.loads((out / "search/_.json").read_text())  # parent always written
+    assert [e[2] for e in catch] == ["X0"]      # empty-norm entry stays in _
+    assert_search_shards_lossless(out, rows)
+
+
+def test_search_shards_catchall_not_split_below_threshold(tmp_path):
+    web = tmp_path / "w.parquet"
+    rows = [("A3", "李明", 0.5, 0.5, 5)]
+    write_web(web, rows)
+    out = tmp_path / "index"
+    build_search_shards(str(web), out)
+    assert (out / "search/_.json").exists()
+    assert not (out / f"search/_{ord('李') % 32}.json").exists()
+    assert_search_shards_lossless(out, rows)

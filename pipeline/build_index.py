@@ -1,6 +1,9 @@
 """Label/hit tiles (zooms 6-9) and prefix search shards. Zero backend.
 
-Search shard fallback order (viewer): 3-char shard -> 2-char shard -> "_".
+Search shard fallback order (viewer): try prefix shards from
+min(len(normalized concatenated name), 5) chars down to 2 chars, then the
+codepoint shard `_<ord(first char of normalized name) mod 32>`, then `_`.
+(The docstring doubles as argparse help, so no percent signs here.)
 """
 import json
 import os
@@ -14,7 +17,8 @@ import duckdb
 from pipeline.config import apply_resource_limits, data_dir
 
 LABEL_ZOOMS = {6: 50, 7: 50, 8: 200, 9: 4000}   # zoom -> per-tile capacity
-SHARD_SPLIT_BYTES = 4_000_000                   # 2-char shards larger than this get 3-char split
+SHARD_SPLIT_BYTES = 4_000_000                   # shards larger than this split by one more prefix char
+MAX_PREFIX_LEN = 5                              # deepest prefix-shard key length
 
 
 def normalize(name: str) -> str:
@@ -71,6 +75,57 @@ def _write_json_atomic(path: Path, obj) -> None:
     os.replace(tmp, path)
 
 
+def _shard_bytes(entries) -> int:
+    return len(json.dumps(entries, ensure_ascii=False).encode("utf-8"))
+
+
+def _split_prefix_shard(key: str, entries: list, out: dict) -> None:
+    """Recursively split an alpha-ascii prefix shard by one more prefix char.
+
+    A split parent is always written (possibly small) so the viewer fallback
+    chain is deterministic. Entries whose concatenated name is exactly
+    len(key) chars, or whose next-char prefix is not alpha-ascii, stay at
+    the parent level.
+    """
+    k = len(key)
+    if _shard_bytes(entries) <= SHARD_SPLIT_BYTES or k >= MAX_PREFIX_LEN:
+        out[key] = entries
+        return
+    sub = defaultdict(list)
+    parent = []
+    for e in entries:
+        concat = e[0].replace(" ", "")
+        child = concat[:k + 1]
+        if len(concat) > k and child.isascii() and child.isalpha():
+            sub[child].append(e)
+        else:
+            parent.append(e)
+    out[key] = parent                           # always written: viewer fallback
+    for child_key, child_entries in sub.items():
+        _split_prefix_shard(child_key, child_entries, out)
+
+
+def _split_catchall_shard(entries: list, out: dict) -> None:
+    """Split the `_` catch-all by first-char codepoint when oversized.
+
+    Entries go to `_<ord(first char of normalized name) % 32>` (JS mirror:
+    "_" + (norm.codePointAt(0) % 32)); names that normalize to empty stay
+    in `_`, which is always written.
+    """
+    if _shard_bytes(entries) <= SHARD_SPLIT_BYTES:
+        out["_"] = entries
+        return
+    sub = defaultdict(list)
+    parent = []
+    for e in entries:
+        if e[0]:
+            sub[f"_{ord(e[0][0]) % 32}"].append(e)
+        else:
+            parent.append(e)
+    out["_"] = parent                           # always written: viewer fallback
+    out.update(sub)
+
+
 def build_search_shards(web: str, out_dir: Path) -> int:
     search_dir = out_dir / "search"
     if search_dir.exists():
@@ -87,27 +142,18 @@ def build_search_shards(web: str, out_dir: Path) -> int:
         head = norm.replace(" ", "")[:2]
         key = head if len(head) == 2 and head.isascii() and head.isalpha() else "_"
         shards[key].append([norm, name, aid, round(xw, 6), round(yw, 6), int(cited)])
-    sdir = out_dir / "search"
-    sdir.mkdir(parents=True, exist_ok=True)
+    final = {}
     total = 0
     for key, entries in shards.items():
         total += len(entries)
-        size = len(json.dumps(entries, ensure_ascii=False).encode("utf-8"))
-        if key != "_" and size > SHARD_SPLIT_BYTES:
-            sub = defaultdict(list)
-            parent = []
-            for e in entries:
-                concat = e[0].replace(" ", "")
-                head3 = concat[:3]
-                if len(concat) >= 3 and head3.isascii() and head3.isalpha():
-                    sub[head3].append(e)
-                else:
-                    parent.append(e)
-            for subkey, subentries in sub.items():
-                _write_json_atomic(sdir / f"{subkey}.json", subentries)
-            _write_json_atomic(sdir / f"{key}.json", parent)  # always written: viewer fallback
+        if key == "_":
+            _split_catchall_shard(entries, final)
         else:
-            _write_json_atomic(sdir / f"{key}.json", entries)
+            _split_prefix_shard(key, entries, final)
+    sdir = out_dir / "search"
+    sdir.mkdir(parents=True, exist_ok=True)
+    for key, entries in final.items():
+        _write_json_atomic(sdir / f"{key}.json", entries)
     return total
 
 
