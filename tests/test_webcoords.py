@@ -138,3 +138,41 @@ def test_rescatter_deterministic(ringed_file, tmp_path):
     ra = duckdb.sql(f"SELECT id, xw, yw FROM '{a}' ORDER BY id").fetchall()
     rb = duckdb.sql(f"SELECT id, xw, yw FROM '{b}' ORDER BY id").fetchall()
     assert ra == rb
+
+
+@pytest.fixture
+def two_blob_file(tmp_path):
+    # two 1000-member communities, blobs centered at (+-10, 0), radius <= 1
+    rows = []
+    for k in range(1000):
+        dx, dy = math.cos(k) * (k % 10) / 10, math.sin(k) * (k % 10) / 10
+        rows.append((f"L{k}", -10 + dx, dy, 1))
+        rows.append((f"R{k}", 10 + dx, dy, 2))
+    p = tmp_path / "coords.parquet"
+    write_coords_comm(p, rows)
+    return str(p)
+
+
+def test_spread_moves_centroids_apart(two_blob_file, tmp_path):
+    a, b = str(tmp_path / "a.parquet"), str(tmp_path / "b.parquet")
+    build_webcoords(two_blob_file, a, spread=1.0)
+    build_webcoords(two_blob_file, b, spread=1.6)
+    def gap(p):
+        return duckdb.sql(
+            f"""SELECT abs(avg(xw) FILTER (community=1)
+                       - avg(xw) FILTER (community=2)) FROM '{p}'"""
+        ).fetchone()[0]
+    def blob_radius(p):
+        return duckdb.sql(
+            f"""SELECT max(sqrt((xw - cxw)*(xw - cxw) + (yw - cyw)*(yw - cyw)))
+                FROM (SELECT *, avg(xw) OVER (PARTITION BY community) cxw,
+                              avg(yw) OVER (PARTITION BY community) cyw
+                      FROM '{p}') WHERE community = 1"""
+        ).fetchone()[0]
+    # relative separation (centroid gap / blob size) must grow with spread
+    assert gap(b) / blob_radius(b) > gap(a) / blob_radius(a) * 1.2
+    # and everything still inside the margin box
+    lo, hi = duckdb.sql(
+        f"SELECT least(min(xw),min(yw)), greatest(max(xw),max(yw)) FROM '{b}'"
+    ).fetchone()
+    assert lo >= 0.02 - 1e-9 and hi <= 0.98 + 1e-9

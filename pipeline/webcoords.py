@@ -19,14 +19,14 @@ def build_webcoords(coords_path: str, out_path: str, spread: float = 1.35,
     ).fetchone()
     # median radius as the asinh scale; guard degenerate all-at-center inputs
     s = con.execute(
-        f"""SELECT greatest(median(sqrt((x-{cx})*(x-{cx}) + (y-{cy})*(y-{cy}))), 1e-9)
+        f"""SELECT greatest(median(sqrt((x-({cx}))*(x-({cx})) + (y-({cy}))*(y-({cy})))), 1e-9)
             FROM read_parquet('{coords_path}')"""
     ).fetchone()[0]
     con.execute(
         f"""CREATE TEMP TABLE polar AS
             SELECT *,
-                   sqrt((x-{cx})*(x-{cx}) + (y-{cy})*(y-{cy})) / {s} AS rs,
-                   atan2(y-{cy}, x-{cx}) AS theta,
+                   sqrt((x-({cx}))*(x-({cx})) + (y-({cy}))*(y-({cy}))) / {s} AS rs,
+                   atan2(y-({cy}), x-({cx})) AS theta,
                    count(*) OVER (PARTITION BY community) AS comm_n
             FROM read_parquet('{coords_path}')"""
     )
@@ -47,7 +47,7 @@ def build_webcoords(coords_path: str, out_path: str, spread: float = 1.35,
     con.execute(
         f"""CREATE TEMP TABLE placed AS
             SELECT id, display_name, community, works_count, cited_by_count,
-                   institution, field, {ring_pred} AS is_ring,
+                   institution, field, {ring_pred} AS is_ring, comm_n,
                    CASE WHEN {ring_pred}
                         THEN (0.86 + 0.12 * ((hash(id) % 100000) / 100000.0))
                         ELSE least(a / {a2max}, 1.0) END AS ru,
@@ -56,14 +56,40 @@ def build_webcoords(coords_path: str, out_path: str, spread: float = 1.35,
                         ELSE theta END AS th
             FROM au"""
     )
+    con.execute(
+        f"""CREATE TEMP TABLE core AS
+            SELECT *, ru * cos(th) AS ex, ru * sin(th) AS ey
+            FROM placed WHERE NOT is_ring"""
+    )
+    con.execute(
+        f"""CREATE TEMP TABLE shifted AS
+            SELECT *,
+                   ex + CASE WHEN comm_n >= 1000
+                        THEN ({spread} - 1.0) * avg(ex) OVER (PARTITION BY community)
+                        ELSE 0.0 END AS sx,
+                   ey + CASE WHEN comm_n >= 1000
+                        THEN ({spread} - 1.0) * avg(ey) OVER (PARTITION BY community)
+                        ELSE 0.0 END AS sy
+            FROM core"""
+    )
+    smax = con.execute(
+        "SELECT greatest(max(sqrt(sx*sx + sy*sy)), 1e-9) FROM shifted"
+    ).fetchone()[0]
     n = con.execute(
         f"""COPY (
+              SELECT id, display_name,
+                     0.5 + {half} * sx / {smax} AS xw,
+                     0.5 + {half} * sy / {smax} AS yw,
+                     community, works_count, cited_by_count, institution,
+                     field, is_ring
+              FROM shifted
+              UNION ALL
               SELECT id, display_name,
                      0.5 + {half} * ru * cos(th) AS xw,
                      0.5 + {half} * ru * sin(th) AS yw,
                      community, works_count, cited_by_count, institution,
                      field, is_ring
-              FROM placed
+              FROM placed WHERE is_ring
             ) TO '{out_path}' (FORMAT PARQUET)"""
     ).fetchone()[0]
     ring_n = con.execute("SELECT count(*) FROM placed WHERE is_ring").fetchone()[0]
