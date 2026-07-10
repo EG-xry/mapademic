@@ -46,19 +46,77 @@
       70%  { box-shadow: 0 0 0 14px #7fae8e00; }
       100% { box-shadow: 0 0 0 0 #7fae8e00; }
     }
+    /* ---- Task 7: Connect / path overlay ---- */
+    #search-top { display: flex; gap: 6px; align-items: stretch; }
+    #search-top #search-input { width: auto; flex: 1; min-width: 0; }
+    #connect-toggle { background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
+                       border-radius: 6px; padding: 6px 10px; font: 12px system-ui;
+                       cursor: pointer; white-space: nowrap; }
+    #connect-toggle:hover { border-color: #7fae8e; }
+    #connect-toggle.active { border-color: #7fae8e; color: #7fae8e; }
+    #connect-panel { margin-top: 6px; display: none; flex-direction: column; gap: 6px; }
+    #connect-panel.open { display: flex; }
+    .connect-row { position: relative; }
+    .connect-row input { width: 100%; box-sizing: border-box; background: #0b0b0bd9;
+                          color: #ddd; border: 1px solid #333; border-radius: 6px;
+                          padding: 6px 10px; font: 13px system-ui; outline: none; }
+    .connect-row input:focus { border-color: #7fae8e; }
+    .connect-dropdown { position: absolute; left: 0; top: 100%; margin-top: 4px;
+                         width: 100%; background: #0b0b0bd9; border-radius: 6px;
+                         max-height: 220px; overflow-y: auto; display: none; z-index: 10; }
+    .connect-dropdown.open { display: block; }
+    .connect-dropdown .row { padding: 6px 10px; cursor: pointer; display: flex;
+                              justify-content: space-between; gap: 8px; color: #ddd; }
+    .connect-dropdown .row:hover, .connect-dropdown .row.active { background: #ffffff1a; }
+    .connect-dropdown .row .n { color: #888; }
+    .connect-dropdown .row.empty { color: #888; cursor: default; }
+    .connect-actions { display: flex; gap: 6px; }
+    .connect-actions button { flex: 1; background: #0b0b0bd9; color: #ddd;
+                               border: 1px solid #333; border-radius: 6px;
+                               padding: 6px 10px; font: 12px system-ui; cursor: pointer; }
+    .connect-actions button:hover { border-color: #7fae8e; }
+    #connect-status { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
+                       border-radius: 6px; padding: 4px 10px; min-height: 14px; }
+    .path-node { display: flex; flex-direction: column; align-items: center;
+                 pointer-events: none; }
+    .path-dot { width: 10px; height: 10px; border-radius: 50%;
+                background: #7fae8e; border: 2px solid #7fae8e; box-sizing: border-box; }
+    .path-node.ghost .path-dot { background: transparent; }
+    .path-label { color: #fff; font: 12px system-ui; text-shadow: 0 0 4px #000, 0 0 8px #000;
+                  white-space: nowrap; margin-top: 2px; }
   </style>
 </head>
 <body>
 <div id="map"></div>
 <div id="tip"></div>
 <div id="search">
-  <input id="search-input" type="text" placeholder="Search authors…" autocomplete="off">
+  <div id="search-top">
+    <input id="search-input" type="text" placeholder="Search authors…" autocomplete="off">
+    <button id="connect-toggle" type="button">Connect</button>
+  </div>
   <div id="search-dropdown"></div>
+  <div id="connect-panel">
+    <div class="connect-row">
+      <input id="connect-a-input" type="text" placeholder="Author A…" autocomplete="off">
+      <div id="connect-a-dropdown" class="connect-dropdown"></div>
+    </div>
+    <div class="connect-row">
+      <input id="connect-b-input" type="text" placeholder="Author B…" autocomplete="off">
+      <div id="connect-b-dropdown" class="connect-dropdown"></div>
+    </div>
+    <div class="connect-actions">
+      <button id="connect-go" type="button">Go</button>
+      <button id="connect-clear" type="button">Clear</button>
+    </div>
+    <div id="connect-status"></div>
+  </div>
 </div>
 <details id="legend" open><summary>Legend</summary><div id="legend-rows"></div></details>
 <script>
 const HIT_ZOOM = 10;                 // hover/click active at or past this zoom
 const HIT_RADIUS = 14;               // px hit-test radius around the cursor
+// degree-of-separation backend (Task 7). Render URL goes here when deployed.
+const API_BASE = "http://localhost:8000";
 const map = new maplibregl.Map({
   container: "map",
   style: {
@@ -270,6 +328,253 @@ searchInput.addEventListener("keydown", ev => {
 });
 
 searchInput.addEventListener("blur", () => setTimeout(closeSearchDropdown, 100));
+
+// ---- degree-of-separation path overlay (Task 7) ----
+// Reuses the Task 6 lookup helpers (normalize/lookupSearchShard/rankSearchEntries)
+// but keeps its own dropdown state per instance rather than reusing the global
+// searchInput/searchDropdown/searchResults state above, since Connect needs two
+// independent lookups (A and B) live at once.
+function createAuthorLookup(inputEl, dropdownEl, onSelect) {
+  let results = [], active = -1, gen = 0, timer = null;
+
+  function render() {
+    dropdownEl.innerHTML = "";
+    if (results.length === 0) {
+      const row = document.createElement("div");
+      row.className = "row empty";
+      row.textContent = "no matches";
+      dropdownEl.appendChild(row);
+    } else {
+      results.forEach((e, i) => {
+        const row = document.createElement("div");
+        row.className = "row" + (i === active ? " active" : "");
+        const name = document.createElement("span");
+        name.textContent = e[1];
+        const n = document.createElement("span");
+        n.className = "n"; n.textContent = e[5].toLocaleString();
+        row.append(name, n);
+        row.addEventListener("mousedown", ev => { ev.preventDefault(); select(e); });
+        dropdownEl.appendChild(row);
+      });
+    }
+    dropdownEl.classList.add("open");
+  }
+
+  function close() {
+    dropdownEl.classList.remove("open");
+    dropdownEl.innerHTML = "";
+    results = []; active = -1;
+  }
+
+  function select(e) {
+    const [, name, id, xw, yw] = e;   // entry shape: [norm, display_name, id, xw, yw, cited]
+    inputEl.value = name;
+    close();
+    inputEl.blur();
+    onSelect({ id, name, xw, yw });
+  }
+
+  async function run(query) {
+    const g = ++gen;
+    const norm = normalize(query);
+    if (!norm) { close(); return; }
+    const entries = await lookupSearchShard(norm);
+    if (g !== gen) return;
+    results = rankSearchEntries(entries, norm);
+    active = -1;
+    render();
+  }
+
+  inputEl.addEventListener("input", () => {
+    onSelect(null);            // typing invalidates any prior selection
+    clearTimeout(timer);
+    const query = inputEl.value;
+    timer = setTimeout(() => run(query), 150);
+  });
+  inputEl.addEventListener("keydown", ev => {
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      if (results.length) { active = (active + 1) % results.length; render(); }
+    } else if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      if (results.length) {
+        active = (active <= 0 ? results.length : active) - 1;
+        render();
+      }
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      const pick = results[active >= 0 ? active : 0];
+      if (pick) select(pick);
+    } else if (ev.key === "Escape") {
+      inputEl.value = "";
+      clearTimeout(timer);
+      gen++;
+      close();
+      onSelect(null);
+    }
+  });
+  inputEl.addEventListener("blur", () => setTimeout(close, 100));
+}
+
+const connectToggle = document.getElementById("connect-toggle");
+const connectPanel = document.getElementById("connect-panel");
+const connectAInput = document.getElementById("connect-a-input");
+const connectADropdown = document.getElementById("connect-a-dropdown");
+const connectBInput = document.getElementById("connect-b-input");
+const connectBDropdown = document.getElementById("connect-b-dropdown");
+const connectGo = document.getElementById("connect-go");
+const connectClear = document.getElementById("connect-clear");
+const connectStatus = document.getElementById("connect-status");
+
+let connectA = null, connectB = null;    // {id, name, xw, yw} once selected
+createAuthorLookup(connectAInput, connectADropdown, sel => { connectA = sel; });
+createAuthorLookup(connectBInput, connectBDropdown, sel => { connectB = sel; });
+
+function setPathStatus(text) { connectStatus.textContent = text || ""; }
+
+connectToggle.addEventListener("click", () => {
+  const on = connectPanel.classList.toggle("open");
+  connectToggle.classList.toggle("active", on);
+});
+
+// /api/path expects the bare OpenAlex id ("A5108093963"); the map's own data
+// (search entries, id-bucket shards) stores the full "https://openalex.org/..."
+// form, so every id touched by the path feature is normalized through this.
+function stripId(id) { return String(id).replace(/^https?:\/\/openalex\.org\//, ""); }
+function idBucketNum(id) {
+  const digits = stripId(id).replace(/\D/g, "");
+  return digits ? parseInt(digits, 10) % 1000 : 0;
+}
+
+const idBucketCache = new Map();     // bucket number -> Promise<Map<bareId,[xw,yw]>|null>
+async function fetchIdBucket(bucket) {
+  if (!idBucketCache.has(bucket)) {
+    idBucketCache.set(bucket, fetch(`/data/index/ids/${bucket}.json`)
+      .then(r => r.ok ? r.json() : null)
+      .then(raw => {
+        if (!raw) return null;
+        const m = new Map();
+        for (const [k, v] of Object.entries(raw)) m.set(stripId(k), v);
+        return m;
+      })
+      .catch(() => null));
+  }
+  return idBucketCache.get(bucket);
+}
+
+// nodes: [{id, name}] in path order. Returns an aligned array where each entry
+// is either {xw, yw, ghost, name} or null (skipped: no resolved neighbor on
+// one side). Missing authors get a ghost position at the midpoint of the
+// nearest resolved neighbor on each side; if there's no resolved neighbor on
+// one side (including being at either end of the path) the node is skipped.
+async function resolvePathCoords(nodes) {
+  const buckets = await Promise.all(nodes.map(n => fetchIdBucket(idBucketNum(n.id))));
+  const hits = nodes.map((n, i) => {
+    const m = buckets[i];
+    const hit = m ? m.get(stripId(n.id)) : null;
+    return hit ? { xw: hit[0], yw: hit[1] } : null;
+  });
+  return nodes.map((n, i) => {
+    if (hits[i]) return { ...hits[i], ghost: false, name: n.name };
+    let prev = null;
+    for (let j = i - 1; j >= 0; j--) if (hits[j]) { prev = hits[j]; break; }
+    let next = null;
+    for (let j = i + 1; j < nodes.length; j++) if (hits[j]) { next = hits[j]; break; }
+    if (prev && next) {
+      return { xw: (prev.xw + next.xw) / 2, yw: (prev.yw + next.yw) / 2,
+               ghost: true, name: n.name };
+    }
+    return null;
+  });
+}
+
+let pathEventSource = null;
+let pathMarkers = [];
+
+function clearPath() {
+  if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
+  pathMarkers.forEach(m => m.remove());
+  pathMarkers = [];
+  if (map.getLayer("path-line")) map.removeLayer("path-line");
+  if (map.getSource("path")) map.removeSource("path");
+  map.setPaintProperty("dots", "raster-opacity", 1.0);
+  setPathStatus("");
+}
+connectClear.addEventListener("click", clearPath);
+
+async function renderPath(pathSteps, hops) {
+  // /api/path with edges=coauthor should only ever return author ids, but
+  // filter defensively in case a work-type node (id starting "W") interleaves.
+  const nodes = pathSteps
+    .filter(s => !String(s.author_id).startsWith("W"))
+    .map(s => ({ id: s.author_id, name: s.author_name }));
+  if (nodes.length === 0) { setPathStatus("no author path"); return; }
+
+  const resolved = await resolvePathCoords(nodes);
+  const points = resolved.filter(Boolean);
+  if (points.length < 2) { setPathStatus(`${hops} hops (too few resolved to draw)`); return; }
+
+  const coords = points.map(p => toLngLat(p.xw, p.yw).toArray());
+  map.addSource("path", {
+    type: "geojson",
+    data: { type: "Feature", geometry: { type: "LineString", coordinates: coords } },
+  });
+  map.addLayer({
+    id: "path-line", type: "line", source: "path",
+    paint: {
+      "line-color": "#7fae8e", "line-width": 2.5,
+      "line-blur": 1.5, "line-opacity": 0.9,
+    },
+  });
+
+  pathMarkers = points.map(p => {
+    const el = document.createElement("div");
+    el.className = "path-node" + (p.ghost ? " ghost" : "");
+    const dot = document.createElement("div");
+    dot.className = "path-dot";
+    const label = document.createElement("div");
+    label.className = "path-label";
+    label.textContent = p.name;
+    el.append(dot, label);
+    return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
+  });
+
+  map.setPaintProperty("dots", "raster-opacity", 0.45);
+
+  const bounds = coords.reduce(
+    (b, c) => b.extend(c),
+    new maplibregl.LngLatBounds(coords[0], coords[0])
+  );
+  map.fitBounds(bounds, { padding: 60, maxZoom: 11 });
+
+  setPathStatus(`${hops} hops`);
+}
+
+connectGo.addEventListener("click", () => {
+  if (!connectA || !connectB) { setPathStatus("select both authors"); return; }
+  clearPath();    // starting a new Go clears any previous path first
+  const idA = stripId(connectA.id), idB = stripId(connectB.id);
+  setPathStatus("searching…");
+  pathEventSource = new EventSource(
+    `${API_BASE}/api/path?from=${encodeURIComponent(idA)}&to=${encodeURIComponent(idB)}&edges=coauthor`
+  );
+  pathEventSource.addEventListener("progress", ev => {
+    try { setPathStatus(JSON.parse(ev.data).message); } catch { /* ignore malformed frame */ }
+  });
+  pathEventSource.addEventListener("result", ev => {
+    let data;
+    try { data = JSON.parse(ev.data); } catch { return; }
+    if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
+    if (!data.found) { setPathStatus(data.reason || "no path found"); return; }
+    renderPath(data.path, data.hops);
+  });
+  pathEventSource.addEventListener("app_error", ev => {
+    let msg = "error";
+    try { msg = JSON.parse(ev.data).message || msg; } catch { /* ignore malformed frame */ }
+    setPathStatus(msg);
+    if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
+  });
+});
 
 // Greedy screen-rect collision test shared by drawLabels and drawRegions.
 // `placed` holds {x, y, w, h} rects already committed for this redraw.
