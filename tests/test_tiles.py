@@ -278,6 +278,28 @@ def test_render_zoom_draws_both_edge_sets_at_maxz(tmp_path):
     assert reg.max() > 0 and w1.max() > 0        # both edge sets rendered
 
 
+def test_overlapping_edge_sets_share_single_glow_ceiling(tmp_path):
+    # 3 regular copies (3*0.08=0.24) + 1 w1 copy (0.05) on the SAME pixels sum
+    # to 0.29 accumulated alpha; a shared ceiling clips the combined buffer to
+    # 0.25 -> pixel == 0.25*EDGE_RGB. Per-set clipping would give 0.29*EDGE_RGB.
+    from pipeline.tiles import EDGE_RGB
+    level = {"px": np.array([200]), "py": np.array([200]),
+             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
+    edges = {"x0": np.array([10] * 3), "y0": np.array([10] * 3),
+             "x1": np.array([110] * 3), "y1": np.array([10] * 3)}
+    edges_w1 = {"x0": np.array([10]), "y0": np.array([10]),
+                "x1": np.array([110]), "y1": np.array([10])}
+    render_zoom(level, MAXZ, tmp_path, bloom=False, edges=edges, edges_w1=edges_w1)
+    ntiles = 1 << MAXZ
+    img = np.asarray(Image.open(tmp_path / str(MAXZ) / "0" / f"{ntiles - 1}.png"))
+    expected = tuple((np.clip(np.float32(0.25) * EDGE_RGB, 0, 1) * 255)
+                     .astype(np.uint8))
+    assert tuple(img[(TILE - 1) - 10, 60]) == expected
+    # combined brightness never exceeds the single ceiling on any channel
+    line = img[(TILE - 1) - 10, 10:111].astype(int)
+    assert (line <= np.array(expected)[None, :]).all()
+
+
 def test_edge_with_midpoint_in_other_tile_still_renders(tmp_path):
     # Edge (10,10)-(700,10) at MAXZ: midpoint x=355 lies in tile (1,0), but the
     # segment crosses tile (0,0). Pins neighbor-bucket union correctness: a

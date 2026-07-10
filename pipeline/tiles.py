@@ -184,10 +184,13 @@ def _bucket_edges(edges: dict, z: int) -> tuple[dict, int]:
     return buckets, radius
 
 
-def _draw_edges_into(img: np.ndarray, edges: dict, z: int, x: int, yu: int,
-                     buckets: dict, radius: int, alpha: float) -> None:
-    """Rasterize edges near tile (x, yu) additively into `img`, clipped at 0.25
-    accumulated alpha before applying EDGE_RGB. Shared by both edge sets."""
+def _accumulate_edges(acc: np.ndarray, edges: dict, z: int, x: int, yu: int,
+                      buckets: dict, radius: int, alpha: float) -> None:
+    """Rasterize edges near tile (x, yu) additively into the shared alpha
+    buffer `acc` (alpha per sample; no clip or color here). Both edge sets add
+    into ONE buffer so the 0.25 glow ceiling is shared - overlapping layers
+    cannot stack past a single ceiling. render_zoom clips the combined buffer
+    once and applies EDGE_RGB once."""
     hits = [buckets[(bx, by)]
             for bx in range(x - radius, x + radius + 1)
             for by in range(yu - radius, yu + radius + 1)
@@ -204,14 +207,12 @@ def _draw_edges_into(img: np.ndarray, edges: dict, z: int, x: int, yu: int,
             & (np.maximum(ex0, ex1) >= tx0)
             & (np.minimum(ey0, ey1) < ty0 + TILE)
             & (np.maximum(ey0, ey1) >= ty0))
-    acc = np.zeros((TILE, TILE), dtype=np.float32)
     for a0, b0, a1, b1 in zip(ex0[esel], ey0[esel], ex1[esel], ey1[esel]):
         ns = max(2, int(max(abs(a1 - a0), abs(b1 - b0))) + 1)
         xs = np.linspace(a0, a1, ns).round().astype(np.int64) - tx0
         ys_up = np.linspace(b0, b1, ns).round().astype(np.int64) - ty0
         keep = (xs >= 0) & (xs < TILE) & (ys_up >= 0) & (ys_up < TILE)
         np.add.at(acc, ((TILE - 1) - ys_up[keep], xs[keep]), alpha)
-    img += np.clip(acc, 0, 0.25)[:, :, None] * EDGE_RGB
 
 
 def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool,
@@ -236,10 +237,16 @@ def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool,
             continue
         sel = (tx == x) & (ty_up == yu)
         img = np.zeros((TILE, TILE, 3), dtype=np.float32)
-        if w1_buckets is not None:
-            _draw_edges_into(img, edges_w1, z, x, yu, w1_buckets, w1_radius, W1_ALPHA)
-        if edge_buckets is not None:
-            _draw_edges_into(img, edges, z, x, yu, edge_buckets, edge_radius, EDGE_ALPHA)
+        if w1_buckets is not None or edge_buckets is not None:
+            acc = np.zeros((TILE, TILE), dtype=np.float32)
+            if w1_buckets is not None:
+                _accumulate_edges(acc, edges_w1, z, x, yu, w1_buckets, w1_radius,
+                                  W1_ALPHA)
+            if edge_buckets is not None:
+                _accumulate_edges(acc, edges, z, x, yu, edge_buckets, edge_radius,
+                                  EDGE_ALPHA)
+            # single shared ceiling across both edge layers, color applied once
+            img += np.clip(acc, 0, 0.25)[:, :, None] * EDGE_RGB
         ix = px[sel] - x * TILE
         iy_up = py[sel] - yu * TILE
         iy = (TILE - 1) - iy_up                      # flip rows inside the tile
