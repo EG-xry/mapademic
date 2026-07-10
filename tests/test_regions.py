@@ -113,3 +113,57 @@ def test_zoom_bands_and_full_field_set(tmp_path):
     assert r["yw"] == pytest.approx(0.5, abs=1e-9)
     assert r["xw"] == pytest.approx(0.01, abs=1e-9)
     assert r["spread"] >= 0.0
+
+
+def make_shared_best_topic_fixture(tmp_path):
+    """Two communities share the same #1 distinctive topic ('Shared'). The
+    bigger (community 1) should keep it; the smaller (community 2) is forced to
+    its 2nd-best distinctive topic ('Beta'). A large 'Common'-only community
+    inflates the corpus so 'Shared' out-scores singleton topics."""
+    web = tmp_path / "coords_web.parquet"
+    web_rows = []
+    topic_rows = []
+
+    def add(comm, n, topic, base_x):
+        for j in range(n):
+            aid = f"C{comm}_{topic}_{j}"
+            web_rows.append((aid, base_x + 0.001 * j, 0.5, comm))
+            topic_rows.append((aid, topic))
+
+    add(10, 20, "Common", 0.10)   # biggest; ubiquitous -> low distinctiveness
+    add(1, 4, "Shared", 0.20)     # community 1 (5 members): #1 = Shared
+    add(1, 1, "Common", 0.25)
+    add(2, 3, "Shared", 0.30)     # community 2 (4 members): #1 = Shared, #2 = Beta
+    add(2, 1, "Beta", 0.35)
+
+    vals = ", ".join(
+        f"('{i}', 'N', {x}, {y}, {c}, 20, 100, 'I', 'Biology')"
+        for i, x, y, c in web_rows
+    )
+    duckdb.sql(f"COPY (SELECT * FROM (VALUES {vals}) t(id, display_name, xw, yw,"
+               f" community, works_count, cited_by_count, institution, field))"
+               f" TO '{web}' (FORMAT PARQUET)")
+    authors = tmp_path / "authors" / "updated_date=2026-01-01"
+    authors.mkdir(parents=True)
+    tvals = ", ".join(
+        f"('{i}', [{{'display_name': '{t}'}}])" for i, t in topic_rows
+    )
+    duckdb.sql(f"COPY (SELECT * FROM (VALUES {tvals}) t(id, topics))"
+               f" TO '{authors / 'part_0000.parquet'}' (FORMAT PARQUET)")
+    return str(web), str(tmp_path / "authors" / "*" / "*.parquet")
+
+
+def test_shared_best_topic_forces_unique_names(tmp_path):
+    web, authors = make_shared_best_topic_fixture(tmp_path)
+    out = tmp_path / "regions.json"
+    n = build_regions(web, authors, str(out), top_n=100, keep=100)
+    regions = json.loads(out.read_text())
+    assert n == len(regions) == 3
+    by_comm = {r["community"]: r for r in regions}
+    # bigger community keeps the shared best topic
+    assert by_comm[1]["name"] == "Shared"
+    # smaller community, blocked, falls to its 2nd-best distinctive topic
+    assert by_comm[2]["name"] == "Beta"
+    # no two output names are equal
+    names = [r["name"] for r in regions]
+    assert len(names) == len(set(names))

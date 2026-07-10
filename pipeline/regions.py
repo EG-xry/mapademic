@@ -9,6 +9,34 @@ from pipeline.config import apply_resource_limits, data_dir
 
 DEFAULT_AUTHORS = "/Volumes/Untitled/mapademic/snapshot/authors/*/*.parquet"
 
+# distinctive-topic candidates kept per community for greedy unique naming
+CANDIDATES_PER_COMMUNITY = 5
+
+
+def _assign_unique_names(comm_rows, candidates):
+    """Greedy: in community size-rank order (biggest first), each community
+    takes its highest-scoring candidate topic not already claimed by a bigger
+    community. If all candidates are taken, fall back to a rank-suffixed name so
+    every kept region gets a distinct label. Deterministic given ordered input."""
+    taken: set = set()
+    names: dict = {}
+    for community, _members, _xw, _yw, _spread, rank in comm_rows:
+        chosen = None
+        for topic in candidates.get(community, []):
+            if topic not in taken:
+                chosen = topic
+                break
+        if chosen is None:
+            base = (candidates.get(community) or ["Unnamed"])[0] or "Unnamed"
+            suffix = rank
+            chosen = f"{base} ({suffix})"
+            while chosen in taken:               # base+rank is already unique per
+                suffix += 1                      # community; loop only guards the
+                chosen = f"{base} ({suffix})"    # astronomically-unlikely collision
+        taken.add(chosen)
+        names[community] = chosen
+    return names
+
 
 def build_regions(webcoords_path: str, authors_glob: str, out_path: str,
                   top_n: int = 300, keep: int = 120) -> int:
@@ -19,9 +47,11 @@ def build_regions(webcoords_path: str, authors_glob: str, out_path: str,
         )
     con = duckdb.connect()
     apply_resource_limits(con)
+    # top_n communities by size define the distinctiveness scope; rank them and
+    # keep the biggest `keep` for output.
     con.execute(
         f"""
-        CREATE TEMP TABLE named AS
+        CREATE TEMP TABLE comms AS
         WITH top_comms AS (
             SELECT community, count(*) AS members,
                    avg(xw) AS xw, avg(yw) AS yw,
@@ -30,12 +60,21 @@ def build_regions(webcoords_path: str, authors_glob: str, out_path: str,
             GROUP BY community
             ORDER BY members DESC, community
             LIMIT {int(top_n)}
-        ),
-        member_topics AS (
+        )
+        SELECT community, members, xw, yw, spread,
+               row_number() OVER (ORDER BY members DESC, community) AS rank
+        FROM top_comms
+        """
+    )
+    # per-community distinctive-topic ranking over the top_n scope
+    con.execute(
+        f"""
+        CREATE TEMP TABLE best AS
+        WITH member_topics AS (
             SELECT w.community, a.topics[1].display_name AS topic
             FROM read_parquet('{webcoords_path}') w
             JOIN read_parquet('{authors_glob}') a ON a.id = w.id
-            JOIN top_comms tc ON tc.community = w.community
+            JOIN comms c ON c.community = w.community
             WHERE a.topics[1].display_name IS NOT NULL
         ),
         topic_global AS (
@@ -47,32 +86,34 @@ def build_regions(webcoords_path: str, authors_glob: str, out_path: str,
                                  / tg.g) AS score
             FROM member_topics mt JOIN topic_global tg ON tg.topic = mt.topic
             GROUP BY mt.community, mt.topic, tg.g
-        ),
-        best AS (
-            SELECT community, topic,
-                   row_number() OVER (PARTITION BY community
-                                      ORDER BY score DESC, c DESC, topic) AS rn
-            FROM scored
         )
-        SELECT tc.community, b.topic AS name, tc.members, tc.xw, tc.yw,
-               tc.spread,
-               row_number() OVER (ORDER BY tc.members DESC, tc.community) AS rank
-        FROM top_comms tc
-        JOIN best b ON b.community = tc.community AND b.rn = 1
-        ORDER BY rank
-        LIMIT {int(keep)}
+        SELECT community, topic,
+               row_number() OVER (PARTITION BY community
+                                  ORDER BY score DESC, c DESC, topic) AS rn
+        FROM scored
         """
     )
-    rows = con.execute("SELECT * FROM named").fetchall()
-    cols = [d[0] for d in con.description]
+    comm_rows = con.execute(
+        f"SELECT community, members, xw, yw, spread, rank FROM comms "
+        f"WHERE rank <= {int(keep)} ORDER BY rank"
+    ).fetchall()
+    cand_rows = con.execute(
+        f"""SELECT c.rank, b.community, b.topic
+            FROM best b JOIN comms c ON c.community = b.community
+            WHERE c.rank <= {int(keep)}
+              AND b.rn <= {int(CANDIDATES_PER_COMMUNITY)}
+            ORDER BY c.rank, b.rn"""
+    ).fetchall()
+    candidates: dict = {}
+    for _rank, community, topic in cand_rows:
+        candidates.setdefault(community, []).append(topic)
+    names = _assign_unique_names(comm_rows, candidates)
     regions = []
-    for row in rows:
-        r = dict(zip(cols, row))
-        rank = r["rank"]
+    for community, members, xw, yw, spread, rank in comm_rows:
         regions.append({
-            "name": r["name"], "xw": r["xw"], "yw": r["yw"],
-            "spread": r["spread"], "members": r["members"], "rank": rank,
-            "community": r["community"],
+            "name": names[community], "xw": xw, "yw": yw,
+            "spread": spread, "members": members, "rank": rank,
+            "community": community,
             "zmin": 2 if rank <= 30 else 4,
             "zmax": 4 if rank <= 30 else 6,
         })
