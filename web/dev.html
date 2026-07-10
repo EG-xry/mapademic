@@ -84,6 +84,27 @@
     .path-node.ghost .path-dot { background: transparent; }
     .path-label { color: #fff; font: 12px system-ui; text-shadow: 0 0 4px #000, 0 0 8px #000;
                   white-space: nowrap; margin-top: 2px; }
+    /* ---- Task 1 (night-polish): display settings panel ---- */
+    #display-gear { position: fixed; right: 10px; bottom: 46px; z-index: 9;
+                     width: 30px; height: 30px; background: #0b0b0bd9; color: #ddd;
+                     border: 1px solid #333; border-radius: 6px; cursor: pointer;
+                     font: 15px system-ui; line-height: 1; }
+    #display-gear:hover { border-color: #7fae8e; }
+    #display-panel { position: fixed; right: 10px; bottom: 82px; background: #0b0b0bd9;
+                      color: #ddd; font: 12px system-ui; border-radius: 6px;
+                      width: 230px; z-index: 9; display: none; }
+    #display-panel.open { display: block; }
+    #display-panel .dp-body { padding: 4px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+    #display-panel .dp-row { display: flex; flex-direction: column; gap: 2px; }
+    #display-panel .dp-row-head { display: flex; justify-content: space-between; align-items: center; }
+    #display-panel .dp-row-head .n { color: #888; }
+    #display-panel input[type="range"] { width: 100%; }
+    #display-panel .dp-radios { display: flex; gap: 10px; }
+    #display-panel .dp-radios label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+    #display-panel .dp-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    #display-reset { background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
+                      border-radius: 6px; padding: 6px 10px; font: 12px system-ui; cursor: pointer; }
+    #display-reset:hover { border-color: #7fae8e; }
   </style>
 </head>
 <body>
@@ -112,6 +133,36 @@
   </div>
 </div>
 <details id="legend" open><summary>Legend</summary><div id="legend-rows"></div></details>
+<button id="display-gear" type="button" aria-label="Display settings" aria-expanded="false">&#9881;</button>
+<div id="display-panel" role="region" aria-label="Display settings">
+  <div class="dp-body">
+    <div class="dp-row">
+      <div class="dp-row-head"><label for="dp-brightness">Brightness</label><span id="dp-brightness-n" class="n"></span></div>
+      <input id="dp-brightness" type="range" min="0.6" max="1.0" step="0.02" value="1.0">
+    </div>
+    <div class="dp-row">
+      <div class="dp-row-head"><label for="dp-contrast">Contrast</label><span id="dp-contrast-n" class="n"></span></div>
+      <input id="dp-contrast" type="range" min="-0.4" max="0.4" step="0.04" value="0">
+    </div>
+    <div class="dp-row">
+      <div class="dp-row-head"><label for="dp-saturation">Saturation</label><span id="dp-saturation-n" class="n"></span></div>
+      <input id="dp-saturation" type="range" min="-0.6" max="0.6" step="0.06" value="0">
+    </div>
+    <div class="dp-row">
+      <div class="dp-row-head"><span>Label density</span></div>
+      <div class="dp-radios" role="radiogroup" aria-label="Label density">
+        <label><input type="radio" name="dp-density" value="0.5"> 0.5x</label>
+        <label><input type="radio" name="dp-density" value="1" checked> 1x</label>
+        <label><input type="radio" name="dp-density" value="2"> 2x</label>
+      </div>
+    </div>
+    <label class="dp-check">
+      <input id="dp-regions" type="checkbox" checked>
+      Region names
+    </label>
+    <button id="display-reset" type="button">Reset</button>
+  </div>
+</div>
 <script>
 const HIT_ZOOM = 10;                 // hover/click active at or past this zoom
 const HIT_RADIUS = 14;               // px hit-test radius around the cursor
@@ -593,6 +644,100 @@ function collides(placed, x, y, w, h) {
                        && Math.abs(r.y - y) * 2 < r.h + h);
 }
 
+// ---- Task 1 (night-polish): display settings panel ----
+// Sliders only ever touch brightness/contrast/saturation; raster-opacity stays
+// owned by renderPath/clearPath (path-mode dimming) so the two stay orthogonal.
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true };
+const DISPLAY_KEY = "mapademic.display";
+
+function loadDisplaySettings() {
+  try {
+    const raw = localStorage.getItem(DISPLAY_KEY);
+    if (!raw) return { ...DISPLAY_DEFAULTS };
+    return { ...DISPLAY_DEFAULTS, ...JSON.parse(raw) };
+  } catch {
+    return { ...DISPLAY_DEFAULTS };
+  }
+}
+let displaySettings = loadDisplaySettings();
+
+function saveDisplaySettings() {
+  try { localStorage.setItem(DISPLAY_KEY, JSON.stringify(displaySettings)); } catch { /* ignore storage errors */ }
+}
+
+function applyDisplayPaint() {
+  map.setPaintProperty("dots", "raster-brightness-max", displaySettings.brightness);
+  map.setPaintProperty("dots", "raster-contrast", displaySettings.contrast);
+  map.setPaintProperty("dots", "raster-saturation", displaySettings.saturation);
+}
+
+const dpGear = document.getElementById("display-gear");
+const dpPanel = document.getElementById("display-panel");
+const dpBrightness = document.getElementById("dp-brightness");
+const dpBrightnessN = document.getElementById("dp-brightness-n");
+const dpContrast = document.getElementById("dp-contrast");
+const dpContrastN = document.getElementById("dp-contrast-n");
+const dpSaturation = document.getElementById("dp-saturation");
+const dpSaturationN = document.getElementById("dp-saturation-n");
+const dpDensityRadios = document.querySelectorAll('input[name="dp-density"]');
+const dpRegions = document.getElementById("dp-regions");
+const dpReset = document.getElementById("display-reset");
+
+function syncDisplayUI() {
+  dpBrightness.value = displaySettings.brightness;
+  dpBrightnessN.textContent = displaySettings.brightness.toFixed(2);
+  dpContrast.value = displaySettings.contrast;
+  dpContrastN.textContent = displaySettings.contrast.toFixed(2);
+  dpSaturation.value = displaySettings.saturation;
+  dpSaturationN.textContent = displaySettings.saturation.toFixed(2);
+  dpDensityRadios.forEach(r => { r.checked = Number(r.value) === displaySettings.labelDensity; });
+  dpRegions.checked = displaySettings.regionNames;
+}
+syncDisplayUI();
+
+dpGear.addEventListener("click", () => {
+  const open = dpPanel.classList.toggle("open");
+  dpGear.setAttribute("aria-expanded", String(open));
+});
+
+dpBrightness.addEventListener("input", () => {
+  displaySettings.brightness = Number(dpBrightness.value);
+  dpBrightnessN.textContent = displaySettings.brightness.toFixed(2);
+  map.setPaintProperty("dots", "raster-brightness-max", displaySettings.brightness);
+  saveDisplaySettings();
+});
+dpContrast.addEventListener("input", () => {
+  displaySettings.contrast = Number(dpContrast.value);
+  dpContrastN.textContent = displaySettings.contrast.toFixed(2);
+  map.setPaintProperty("dots", "raster-contrast", displaySettings.contrast);
+  saveDisplaySettings();
+});
+dpSaturation.addEventListener("input", () => {
+  displaySettings.saturation = Number(dpSaturation.value);
+  dpSaturationN.textContent = displaySettings.saturation.toFixed(2);
+  map.setPaintProperty("dots", "raster-saturation", displaySettings.saturation);
+  saveDisplaySettings();
+});
+dpDensityRadios.forEach(r => r.addEventListener("change", () => {
+  if (!r.checked) return;
+  displaySettings.labelDensity = Number(r.value);
+  saveDisplaySettings();
+  drawLabels();
+}));
+dpRegions.addEventListener("change", () => {
+  displaySettings.regionNames = dpRegions.checked;
+  saveDisplaySettings();
+  drawRegions();
+});
+dpReset.addEventListener("click", () => {
+  displaySettings = { ...DISPLAY_DEFAULTS };
+  try { localStorage.removeItem(DISPLAY_KEY); } catch { /* ignore storage errors */ }
+  syncDisplayUI();
+  applyDisplayPaint();
+  drawLabels();
+  drawRegions();
+});
+
 let markers = [];
 let labelGen = 0;                    // invalidates stale in-flight redraws
 async function drawLabels() {
@@ -606,7 +751,8 @@ async function drawLabels() {
   const entries = lists.filter(Boolean).flatMap(t => t.l);
   entries.sort((a, b) => b[4] - a[4]);          // by citations desc
   const placed = [];                            // screen-space rects
-  const cap = z >= 10 ? 150 : 60;
+  const baseCap = z >= 10 ? 150 : 60;
+  const cap = Math.round(baseCap * displaySettings.labelDensity);
   for (const [name, id, xw, yw, cited] of entries) {
     if (markers.length >= cap) break;
     const pt = map.project(toLngLat(xw, yw));
@@ -629,6 +775,7 @@ fetch("/data/regions.json").then(r => r.ok ? r.json() : []).catch(() => [])
 let regionMarkers = [];
 function drawRegions() {
   regionMarkers.forEach(m => m.remove()); regionMarkers = [];
+  if (!displaySettings.regionNames) return;
   const z = map.getZoom();
   if (z > 8) return;
   const sorted = [...regions].sort((a, b) => a.rank - b.rank);   // rank 1 first
@@ -708,7 +855,7 @@ map.on("click", async ev => {
   const url = String(hit[1]).startsWith("http") ? hit[1] : "https://openalex.org/" + hit[1];
   window.open(url, "_blank", "noopener");
 });
-map.on("load", () => { drawLabels(); drawRegions(); });
+map.on("load", () => { applyDisplayPaint(); drawLabels(); drawRegions(); });
 map.on("moveend", () => { drawLabels(); drawRegions(); });
 map.on("zoomend", () => { drawLabels(); drawRegions(); });
 </script>
