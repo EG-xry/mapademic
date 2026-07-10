@@ -163,7 +163,7 @@ def test_styled_pixels_deterministic(tiny_web, tmp_path):
     assert np.array_equal(ia, ib)              # golden-by-self: bytes-level stability
 
 
-def test_splats_drawn_at_z9_only_above_threshold(tmp_path):
+def test_splats_only_above_threshold(tmp_path):
     con = duckdb.connect()
     web = tmp_path / "web.parquet"
     duckdb.sql(

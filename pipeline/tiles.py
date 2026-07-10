@@ -162,7 +162,7 @@ def _bucket_edges(edges: dict, z: int) -> tuple[dict, int]:
     render time a tile unions its neighbour buckets within `radius`, which is
     derived from HALF the max edge length at this zoom - any point on a
     segment is at most len/2 from the midpoint. Still avoids rescanning all
-    edges for each of up to 512x512 tiles at z9."""
+    edges for each of up to 1024x1024 tiles at z10."""
     shift = MAXZ - z
     ex0, ey0 = edges["x0"] >> shift, edges["y0"] >> shift
     ex1, ey1 = edges["x1"] >> shift, edges["y1"] >> shift
@@ -271,7 +271,7 @@ def _parse_zooms(spec: str) -> list[int]:
 
 
 def add_parser(parser) -> None:
-    parser.add_argument("--zooms", default="0-9", help="e.g. 0-5 for the QA gate")
+    parser.add_argument("--zooms", default=f"0-{MAXZ}", help="e.g. 0-5 for the QA gate")
     parser.add_argument("--web", default=None)
     parser.add_argument("--out", default=None)
     parser.add_argument("--force-aggregate", action="store_true",
@@ -279,10 +279,10 @@ def add_parser(parser) -> None:
     parser.add_argument("--splat-min-cited", type=int, default=60000,
                          help="cited_by_count threshold for z9-10 citation splats (~p99.9)")
     parser.add_argument("--edges", nargs="?", const="__default__", default=None,
-                         help="bake faint coauthor edges into z>=%d tiles;"
+                         help=f"bake faint coauthor edges into z>={EDGE_MINZ} tiles;"
                               " bare flag uses data/edges_px.parquet;"
                               " already-rendered tiles are skipped, so delete the"
-                              " z8/z9 tile dirs first to re-bake" % EDGE_MINZ)
+                              f" z{EDGE_MINZ}-z{MAXZ} tile dirs first to re-bake")
 
 
 def run(args) -> int:

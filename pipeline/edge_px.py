@@ -1,4 +1,4 @@
-"""Precompute drawable coauthor edges in z9 pixel space (for tile baking)."""
+"""Precompute drawable coauthor edges in max-zoom (z10) pixel space (for tile baking)."""
 import duckdb
 
 from pipeline.config import apply_resource_limits, data_dir
