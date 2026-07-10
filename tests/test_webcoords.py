@@ -176,3 +176,75 @@ def test_spread_moves_centroids_apart(two_blob_file, tmp_path):
         f"SELECT least(min(xw),min(yw)), greatest(max(xw),max(yw)) FROM '{b}'"
     ).fetchone()
     assert lo >= 0.02 - 1e-9 and hi <= 0.98 + 1e-9
+
+
+@pytest.fixture
+def blob_and_embedded_small_comm_file(tmp_path):
+    # community 1: 1000-member blob centered at (+10, 0) -> qualifies for spread
+    # community 2: 200-member blob near the center, well within the core
+    # radius; also size >= default ring_comm_max=100 so the ring rule can't
+    # touch it either way
+    rows = []
+    for k in range(1000):
+        dx, dy = math.cos(k) * (k % 10) / 10, math.sin(k) * (k % 10) / 10
+        rows.append((f"B{k}", 10 + dx, dy, 1))
+    for k in range(200):
+        dx, dy = math.cos(k) * (k % 5) / 20, math.sin(k) * (k % 5) / 20
+        rows.append((f"S{k}", 1.0 + dx, 1.0 + dy, 2))
+    p = tmp_path / "coords.parquet"
+    write_coords_comm(p, rows)
+    return str(p)
+
+
+def test_small_core_community_not_displaced(blob_and_embedded_small_comm_file, tmp_path):
+    a, b = str(tmp_path / "a.parquet"), str(tmp_path / "b.parquet")
+    build_webcoords(blob_and_embedded_small_comm_file, a, spread=1.0)
+    build_webcoords(blob_and_embedded_small_comm_file, b, spread=1.6)
+
+    def centroid_ratio_and_theta(p, community, maxr):
+        cxw, cyw = duckdb.sql(
+            f"SELECT avg(xw), avg(yw) FROM '{p}' WHERE community = {community}"
+        ).fetchone()
+        r = math.hypot(cxw - 0.5, cyw - 0.5)
+        theta = math.atan2(cyw - 0.5, cxw - 0.5)
+        return r / maxr, theta
+
+    def maxr(p):
+        (v,) = duckdb.sql(
+            f"""SELECT max(sqrt((xw-0.5)*(xw-0.5)+(yw-0.5)*(yw-0.5))) FROM '{p}'
+                WHERE NOT is_ring"""
+        ).fetchone()
+        return v
+
+    small_ratio_a, small_theta_a = centroid_ratio_and_theta(a, 2, maxr(a))
+    small_ratio_b, small_theta_b = centroid_ratio_and_theta(b, 2, maxr(b))
+    big_ratio_a, _ = centroid_ratio_and_theta(a, 1, maxr(a))
+    big_ratio_b, _ = centroid_ratio_and_theta(b, 1, maxr(b))
+
+    # the small community isn't shifted - only globally rescaled - so its
+    # centroid direction from center is unchanged
+    assert small_theta_b == pytest.approx(small_theta_a, abs=1e-6)
+    # ... and its relative radius doesn't grow with spread
+    assert small_ratio_b <= small_ratio_a * 1.01
+    # while the big (shifted) community's relative radius does grow
+    assert big_ratio_b > big_ratio_a * 1.05
+
+
+@pytest.fixture
+def negative_median_file(tmp_path):
+    # x/y medians clearly negative; a few spread-out points keep the median
+    # from landing exactly on any single row's coordinate
+    rows = [("N0", -50, -30), ("N1", -49, -31), ("N2", -51, -29),
+            ("N3", -48, -30), ("N4", -52, -30), ("N5", -50, -28),
+            ("N6", -50, -32), ("F1", -500, -30), ("F2", -50, -400)]
+    p = tmp_path / "coords.parquet"
+    write_coords(p, rows)
+    return str(p)
+
+
+def test_negative_median_center_does_not_crash(negative_median_file, tmp_path):
+    out = str(tmp_path / "coords_web.parquet")
+    stats = build_webcoords(negative_median_file, out, spread=1.0, ring_comm_max=0)
+    assert stats["n"] == len(
+        duckdb.sql(f"SELECT * FROM '{negative_median_file}'").fetchall()
+    )
