@@ -72,12 +72,15 @@ function visibleTiles(lz) {
 const toLngLat = (xw, yw) => new maplibregl.MercatorCoordinate(xw, 1 - yw, 0).toLngLat();
 
 let markers = [];
+let labelGen = 0;                    // invalidates stale in-flight redraws
 async function drawLabels() {
+  const gen = ++labelGen;
   const z = map.getZoom();
-  markers.forEach(m => m.remove()); markers = [];
-  if (z < 5.5) return;
+  if (z < 5.5) { markers.forEach(m => m.remove()); markers = []; return; }
   const lz = Math.max(6, Math.min(9, Math.round(z)));
   const lists = await Promise.all(visibleTiles(lz).map(([x, y]) => fetchTile(lz, x, y)));
+  if (gen !== labelGen) return;      // a newer call owns the markers now
+  markers.forEach(m => m.remove()); markers = [];
   const entries = lists.filter(Boolean).flatMap(t => t.l);
   entries.sort((a, b) => b[4] - a[4]);          // by citations desc
   const placed = [];                            // screen-space rects
@@ -100,7 +103,8 @@ async function drawLabels() {
 }
 
 let regions = [];
-fetch("/data/regions.json").then(r => r.json()).then(j => { regions = j; drawRegions(); });
+fetch("/data/regions.json").then(r => r.ok ? r.json() : []).catch(() => [])
+  .then(j => { regions = j; drawRegions(); });
 let regionMarkers = [];
 function drawRegions() {
   regionMarkers.forEach(m => m.remove()); regionMarkers = [];
@@ -114,16 +118,21 @@ function drawRegions() {
   }
 }
 
-fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).then(entries => {
-  const box = document.getElementById("legend-rows");
-  for (const e of entries.slice(0, 25)) {
-    const row = document.createElement("div"); row.className = "row";
-    row.innerHTML = `<span class="sw" style="background:${e.color}"></span>` +
-      `<span>${e.name || e.field || "Community " + e.community}</span>` +
-      `<span class="n">${(e.members / 1e6).toFixed(1)}M</span>`;
-    box.appendChild(row);
-  }
-});
+fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
+  .then(entries => {
+    const box = document.getElementById("legend-rows");
+    for (const e of entries.slice(0, 25)) {
+      const row = document.createElement("div"); row.className = "row";
+      const sw = document.createElement("span");
+      sw.className = "sw"; sw.style.background = e.color;
+      const label = document.createElement("span");
+      label.textContent = e.name || e.field || "Community " + e.community;
+      const n = document.createElement("span");
+      n.className = "n"; n.textContent = (e.members / 1e6).toFixed(1) + "M";
+      row.append(sw, label, n);
+      box.appendChild(row);
+    }
+  });
 
 const tip = document.getElementById("tip");
 async function hitTest(pt) {
@@ -152,7 +161,9 @@ map.on("mousemove", async ev => {
 });
 map.on("click", async ev => {
   const hit = await hitTest(ev.point);
-  if (hit) window.open(hit[1], "_blank", "noopener");
+  if (!hit) return;
+  const url = String(hit[1]).startsWith("http") ? hit[1] : "https://openalex.org/" + hit[1];
+  window.open(url, "_blank", "noopener");
 });
 map.on("load", () => { drawLabels(); drawRegions(); });
 map.on("moveend", () => { drawLabels(); drawRegions(); });
