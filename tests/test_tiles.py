@@ -238,6 +238,46 @@ def test_no_edges_below_z8(tmp_path):
     assert img[TILE - 1, 30].max() == 0         # nothing drawn along the line
 
 
+def test_render_zoom_draws_w1_edges_at_maxz(tmp_path):
+    level = {"px": np.array([10]), "py": np.array([10]),
+             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
+    edges_w1 = {"x0": np.array([10]), "y0": np.array([10]),
+                "x1": np.array([110]), "y1": np.array([10])}
+    render_zoom(level, MAXZ, tmp_path, bloom=False, edges_w1=edges_w1)
+    ntiles = 1 << MAXZ
+    img = np.asarray(Image.open(tmp_path / str(MAXZ) / "0" / f"{ntiles - 1}.png")).astype(int)
+    mid = img[(TILE - 1) - 10, 60]              # a pixel along the w1 edge
+    assert 1 <= mid.max() <= 15                 # faint (W1_ALPHA=0.05 < EDGE_ALPHA=0.08)
+    assert img[(TILE - 1) - 10, 10, 0] > 200    # node still bright red
+
+
+def test_w1_edges_not_drawn_below_maxz(tmp_path):
+    level = {"px": np.array([10]), "py": np.array([10]),
+             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
+    edges_w1 = {"x0": np.array([10]), "y0": np.array([10]),
+                "x1": np.array([110]), "y1": np.array([10])}
+    render_zoom(level, MAXZ - 1, tmp_path, bloom=False, edges_w1=edges_w1)
+    ntiles = 1 << (MAXZ - 1)
+    img = np.asarray(Image.open(tmp_path / str(MAXZ - 1) / "0" / f"{ntiles - 1}.png")).astype(int)
+    mid = img[(TILE - 1) - 5, 30]                # where the shifted edge midpoint would land
+    assert mid.max() == 0                        # w1 edges draw only at z == MAXZ
+
+
+def test_render_zoom_draws_both_edge_sets_at_maxz(tmp_path):
+    level = {"px": np.array([10]), "py": np.array([10]),
+             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
+    edges = {"x0": np.array([10]), "y0": np.array([30]),
+             "x1": np.array([110]), "y1": np.array([30])}
+    edges_w1 = {"x0": np.array([10]), "y0": np.array([10]),
+                "x1": np.array([110]), "y1": np.array([10])}
+    render_zoom(level, MAXZ, tmp_path, bloom=False, edges=edges, edges_w1=edges_w1)
+    ntiles = 1 << MAXZ
+    img = np.asarray(Image.open(tmp_path / str(MAXZ) / "0" / f"{ntiles - 1}.png")).astype(int)
+    reg = img[(TILE - 1) - 30, 60]
+    w1 = img[(TILE - 1) - 10, 60]
+    assert reg.max() > 0 and w1.max() > 0        # both edge sets rendered
+
+
 def test_edge_with_midpoint_in_other_tile_still_renders(tmp_path):
     # Edge (10,10)-(700,10) at MAXZ: midpoint x=355 lies in tile (1,0), but the
     # segment crosses tile (0,0). Pins neighbor-bucket union correctness: a

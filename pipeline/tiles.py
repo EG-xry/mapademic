@@ -147,6 +147,7 @@ BLOOM = np.array([[0.06, 0.12, 0.06], [0.12, 0.0, 0.12], [0.06, 0.12, 0.06]],
 EDGE_ALPHA = 0.08
 EDGE_RGB = np.array([0.45, 0.50, 0.60], dtype=np.float32)  # cool grey
 EDGE_MINZ = 8
+W1_ALPHA = 0.05  # weight-1 edges, drawn only at z == MAXZ
 
 
 def load_edges(path: str) -> dict:
@@ -183,8 +184,39 @@ def _bucket_edges(edges: dict, z: int) -> tuple[dict, int]:
     return buckets, radius
 
 
+def _draw_edges_into(img: np.ndarray, edges: dict, z: int, x: int, yu: int,
+                     buckets: dict, radius: int, alpha: float) -> None:
+    """Rasterize edges near tile (x, yu) additively into `img`, clipped at 0.25
+    accumulated alpha before applying EDGE_RGB. Shared by both edge sets."""
+    hits = [buckets[(bx, by)]
+            for bx in range(x - radius, x + radius + 1)
+            for by in range(yu - radius, yu + radius + 1)
+            if (bx, by) in buckets]
+    idxs = np.concatenate(hits) if hits else None
+    if idxs is None or not len(idxs):
+        return
+    shift = MAXZ - z
+    ex0, ey0 = edges["x0"][idxs] >> shift, edges["y0"][idxs] >> shift
+    ex1, ey1 = edges["x1"][idxs] >> shift, edges["y1"][idxs] >> shift
+    # edges whose bbox intersects this tile
+    tx0, ty0 = x * TILE, yu * TILE
+    esel = ((np.minimum(ex0, ex1) < tx0 + TILE)
+            & (np.maximum(ex0, ex1) >= tx0)
+            & (np.minimum(ey0, ey1) < ty0 + TILE)
+            & (np.maximum(ey0, ey1) >= ty0))
+    acc = np.zeros((TILE, TILE), dtype=np.float32)
+    for a0, b0, a1, b1 in zip(ex0[esel], ey0[esel], ex1[esel], ey1[esel]):
+        ns = max(2, int(max(abs(a1 - a0), abs(b1 - b0))) + 1)
+        xs = np.linspace(a0, a1, ns).round().astype(np.int64) - tx0
+        ys_up = np.linspace(b0, b1, ns).round().astype(np.int64) - ty0
+        keep = (xs >= 0) & (xs < TILE) & (ys_up >= 0) & (ys_up < TILE)
+        np.add.at(acc, ((TILE - 1) - ys_up[keep], xs[keep]), alpha)
+    img += np.clip(acc, 0, 0.25)[:, :, None] * EDGE_RGB
+
+
 def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool,
-                splats: dict | None = None, edges: dict | None = None) -> int:
+                splats: dict | None = None, edges: dict | None = None,
+                edges_w1: dict | None = None) -> int:
     """Write XYZ PNG tiles for one zoom; skip existing. Returns tiles written."""
     ntiles = 1 << z
     px, py = level["px"], level["py"]  # already in zoom-z pixel space
@@ -193,6 +225,8 @@ def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool,
     tx, ty_up = px // TILE, py // TILE
     edge_buckets, edge_radius = ((None, 0) if edges is None or z < EDGE_MINZ
                                  else _bucket_edges(edges, z))
+    w1_buckets, w1_radius = ((None, 0) if edges_w1 is None or z != MAXZ
+                             else _bucket_edges(edges_w1, z))
     written = 0
     for t in np.unique(tx * ntiles + ty_up):
         x, yu = int(t // ntiles), int(t % ntiles)
@@ -202,30 +236,10 @@ def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool,
             continue
         sel = (tx == x) & (ty_up == yu)
         img = np.zeros((TILE, TILE, 3), dtype=np.float32)
+        if w1_buckets is not None:
+            _draw_edges_into(img, edges_w1, z, x, yu, w1_buckets, w1_radius, W1_ALPHA)
         if edge_buckets is not None:
-            hits = [edge_buckets[(bx, by)]
-                    for bx in range(x - edge_radius, x + edge_radius + 1)
-                    for by in range(yu - edge_radius, yu + edge_radius + 1)
-                    if (bx, by) in edge_buckets]
-            idxs = np.concatenate(hits) if hits else None
-            if idxs is not None and len(idxs):
-                shift = MAXZ - z
-                ex0, ey0 = edges["x0"][idxs] >> shift, edges["y0"][idxs] >> shift
-                ex1, ey1 = edges["x1"][idxs] >> shift, edges["y1"][idxs] >> shift
-                # edges whose bbox intersects this tile
-                tx0, ty0 = x * TILE, yu * TILE
-                esel = ((np.minimum(ex0, ex1) < tx0 + TILE)
-                        & (np.maximum(ex0, ex1) >= tx0)
-                        & (np.minimum(ey0, ey1) < ty0 + TILE)
-                        & (np.maximum(ey0, ey1) >= ty0))
-                acc = np.zeros((TILE, TILE), dtype=np.float32)
-                for a0, b0, a1, b1 in zip(ex0[esel], ey0[esel], ex1[esel], ey1[esel]):
-                    ns = max(2, int(max(abs(a1 - a0), abs(b1 - b0))) + 1)
-                    xs = np.linspace(a0, a1, ns).round().astype(np.int64) - tx0
-                    ys_up = np.linspace(b0, b1, ns).round().astype(np.int64) - ty0
-                    keep = (xs >= 0) & (xs < TILE) & (ys_up >= 0) & (ys_up < TILE)
-                    np.add.at(acc, ((TILE - 1) - ys_up[keep], xs[keep]), EDGE_ALPHA)
-                img += np.clip(acc, 0, 0.25)[:, :, None] * EDGE_RGB
+            _draw_edges_into(img, edges, z, x, yu, edge_buckets, edge_radius, EDGE_ALPHA)
         ix = px[sel] - x * TILE
         iy_up = py[sel] - yu * TILE
         iy = (TILE - 1) - iy_up                      # flip rows inside the tile
@@ -283,6 +297,11 @@ def add_parser(parser) -> None:
                               " bare flag uses data/edges_px.parquet;"
                               " already-rendered tiles are skipped, so delete the"
                               f" z{EDGE_MINZ}-z{MAXZ} tile dirs first to re-bake")
+    parser.add_argument("--edges-w1", nargs="?", const="__default__", default=None,
+                         help=f"bake faint weight-1 coauthor edges into z{MAXZ} tiles"
+                              " only; bare flag uses data/edges_px_w1.parquet;"
+                              " already-rendered tiles are skipped, so delete the"
+                              f" z{MAXZ} tile dir first to re-bake")
 
 
 def run(args) -> int:
@@ -318,6 +337,12 @@ def run(args) -> int:
                  if args.edges == "__default__" else args.edges)
         edges = load_edges(epath)
         print(f"baking {len(edges['x0']):,} edges into z>={EDGE_MINZ} tiles", flush=True)
+    edges_w1 = None
+    if args.edges_w1:
+        w1path = (str(data_dir() / "edges_px_w1.parquet")
+                  if args.edges_w1 == "__default__" else args.edges_w1)
+        edges_w1 = load_edges(w1path)
+        print(f"baking {len(edges_w1['x0']):,} weight-1 edges into z{MAXZ} tiles", flush=True)
     index_dir = data_dir() / "index"
     index_dir.mkdir(parents=True, exist_ok=True)
     n_legend = write_legend(stats, str(index_dir / "legend.json"),
@@ -325,7 +350,8 @@ def run(args) -> int:
     print(f"legend: {n_legend} communities written", flush=True)
     for z in range(MAXZ, -1, -1):
         if z in zooms:
-            w = render_zoom(level, z, out, bloom=(z >= MAXZ - 1), splats=splats, edges=edges)
+            w = render_zoom(level, z, out, bloom=(z >= MAXZ - 1), splats=splats,
+                            edges=edges, edges_w1=edges_w1)
             print(f"zoom {z}: {w} tiles written", flush=True)
         if z > 0:
             level = reduce_level(level)
