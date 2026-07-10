@@ -9,7 +9,7 @@ Design spec: `docs/superpowers/specs/2026-07-05-mapademic-design.md`
 
 ## Pipeline
 
-    download -> extract -> filter -> edges -> [Anvil: layout -> communities] -> tiles -> index -> web/
+    download -> extract -> filter -> edges -> prep -> webcoords -> tiles -> regions -> index -> edgepx -> web/
 
 Run stages via `python -m pipeline <stage>`. Data checkpoints live under
 `$MAPADEMIC_DATA` (default `./data`, git-ignored).

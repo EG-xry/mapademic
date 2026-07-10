@@ -1,6 +1,4 @@
 """Precompute drawable coauthor edges in z9 pixel space (for tile baking)."""
-from pathlib import Path
-
 import duckdb
 
 from pipeline.config import apply_resource_limits, data_dir
