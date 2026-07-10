@@ -75,8 +75,9 @@ def community_rgb(community: int, majority_field: str | None,
     return colorsys.hls_to_rgb(hue / 360.0, light, sat)
 
 
-def build_community_palette(con, web_path: str,
-                            min_members: int = 1000) -> dict[int, tuple]:
+def load_community_stats(con, web_path: str) -> list[tuple[int, str | None, int]]:
+    """Per-community (majority_field, member_count), one parquet scan.
+    Deterministic order: members DESC, community ASC."""
     rows = con.execute(
         f"""WITH fc AS (SELECT community, field, count(*) c
                         FROM read_parquet('{web_path}') GROUP BY 1, 2),
@@ -86,10 +87,16 @@ def build_community_palette(con, web_path: str,
                                 ORDER BY c DESC, field NULLS LAST) rn
                      FROM fc)
             SELECT t.community, m.field, t.n
-            FROM tot t JOIN maj m ON m.community = t.community AND m.rn = 1"""
+            FROM tot t JOIN maj m ON m.community = t.community AND m.rn = 1
+            ORDER BY t.n DESC, t.community"""
     ).fetchall()
-    return {int(c): community_rgb(int(c), f, int(n), min_members)
-            for c, f, n in rows}
+    return [(int(c), f, int(n)) for c, f, n in rows]
+
+
+def build_community_palette(con, web_path: str,
+                            min_members: int = 1000) -> dict[int, tuple]:
+    stats = load_community_stats(con, web_path)
+    return {c: community_rgb(c, f, n, min_members) for c, f, n in stats}
 
 
 def add_parser(parser) -> None:  # not a CLI stage; keeps import-shape uniform

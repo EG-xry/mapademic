@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from pipeline.palette import load_community_stats
 from pipeline.tiles import (MAXZ, PIX, TILE, aggregate_z9, load_level9,
                             load_splats, reduce_level, render_zoom,
                             write_legend)
@@ -192,7 +193,6 @@ def test_render_zoom_draws_splat_disc(tmp_path):
 
 
 def test_legend_json(tmp_path):
-    con = duckdb.connect()
     web = tmp_path / "web.parquet"
     duckdb.sql(
         "COPY (SELECT 'A' || range::VARCHAR id, 'n' display_name, 0.5 xw,"
@@ -202,7 +202,8 @@ def test_legend_json(tmp_path):
     regions = tmp_path / "regions.json"
     regions.write_text(json.dumps([{"community": 1, "name": "Cardiology"}]))
     out = tmp_path / "legend.json"
-    write_legend(con, str(web), str(out), str(regions), min_members=1000)
+    stats = load_community_stats(duckdb.connect(), str(web))
+    write_legend(stats, str(out), str(regions), min_members=1000)
     entries = json.loads(out.read_text())
     assert entries == [{"community": 1, "name": "Cardiology",
                         "field": "Medicine", "members": 1500,

@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 
 from pipeline.config import apply_resource_limits, data_dir
-from pipeline.palette import build_community_palette, community_rgb
+from pipeline.palette import community_rgb, load_community_stats
 
 MAXZ = 9
 TILE = 256
@@ -75,30 +75,21 @@ def load_splats(con, web_path: str, palette: dict, min_cited: int) -> dict:
             "rgb": rgb}
 
 
-def write_legend(con, web_path: str, out_path: str, regions_path: str | None,
-                 min_members: int = 1000) -> int:
+def write_legend(stats: list[tuple[int, str | None, int]], out_path: str,
+                 regions_path: str | None, min_members: int = 1000) -> int:
     names = {}
     if regions_path and Path(regions_path).exists():
         names = {r["community"]: r["name"]
                  for r in json.loads(Path(regions_path).read_text())
                  if "community" in r}
-    rows = con.execute(
-        f"""WITH fc AS (SELECT community, field, count(*) c
-                        FROM read_parquet('{web_path}') GROUP BY 1, 2),
-             tot AS (SELECT community, sum(c) n FROM fc GROUP BY 1),
-             maj AS (SELECT community, field, row_number() OVER (
-                         PARTITION BY community ORDER BY c DESC, field NULLS LAST) rn
-                     FROM fc)
-            SELECT t.community, m.field, t.n FROM tot t
-            JOIN maj m ON m.community = t.community AND m.rn = 1
-            WHERE t.n >= {int(min_members)} ORDER BY t.n DESC"""
-    ).fetchall()
     entries = []
-    for c, f, n in rows:
-        r, g, b = community_rgb(int(c), f, int(n), min_members)
+    for c, f, n in stats:              # stats already ordered members DESC, community
+        if n < min_members:
+            continue
+        r, g, b = community_rgb(c, f, n, min_members)
         entries.append({
-            "community": int(c), "name": names.get(int(c)),
-            "field": f, "members": int(n),
+            "community": c, "name": names.get(c),
+            "field": f, "members": n,
             "color": "#%02x%02x%02x" % (int(r*255), int(g*255), int(b*255)),
         })
     tmp = str(out_path) + ".tmp"
@@ -244,14 +235,15 @@ def run(args) -> int:
         print("reusing cached pixels_z9.parquet (delete it or re-run webcoords to force)",
               flush=True)
     con = duckdb.connect()
-    pal = build_community_palette(con, web)
+    stats = load_community_stats(con, web)          # single parquet scan feeds both
+    pal = {c: community_rgb(c, f, n) for c, f, n in stats}
     zooms = sorted(_parse_zooms(args.zooms), reverse=True)  # deep -> shallow
     level = load_level9(pixels, pal)
     splats = (load_splats(con, web, pal, args.splat_min_cited)
               if any(z in SPLAT_RADIUS for z in zooms) else None)
     index_dir = data_dir() / "index"
     index_dir.mkdir(parents=True, exist_ok=True)
-    n_legend = write_legend(con, web, str(index_dir / "legend.json"),
+    n_legend = write_legend(stats, str(index_dir / "legend.json"),
                             str(data_dir() / "regions.json"))
     print(f"legend: {n_legend} communities written", flush=True)
     for z in range(MAXZ, -1, -1):
