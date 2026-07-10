@@ -40,7 +40,7 @@ def test_label_tiles_ranked_and_capped(tmp_path):
 
 def test_label_tiles_200_cap(tmp_path):
     web = tmp_path / "w.parquet"
-    # 250 researchers in one z8/z9 tile -> capped at 200 at z8, not capped at z9 (cap 1000)
+    # 250 researchers in one z8/z9 tile -> capped at 200 at z8, not capped at z9 (cap 4000)
     rows = [(f"C{i}", f"Name{i}", 0.25, 0.25, 5000 - i) for i in range(250)]
     write_web(web, rows)
     out = tmp_path / "index"
@@ -49,7 +49,7 @@ def test_label_tiles_200_cap(tmp_path):
     assert len(z8["l"]) == 200                      # capped at z8
     assert z8["l"][0][0] == "Name0"                 # highest cited first
     z9 = json.loads((out / "labels/9/128/383.json").read_text())
-    assert len(z9["l"]) == 250                       # not capped at z9 (cap 1000)
+    assert len(z9["l"]) == 250                       # not capped at z9 (cap 4000)
 
 
 def test_search_shards_cover_everyone(tmp_path):
@@ -76,6 +76,6 @@ def test_z9_cap_and_ring_excluded_from_labels(tmp_path):
         f" TO '{web}' (FORMAT PARQUET)")
     n = build_label_tiles(str(web), tmp_path / "index")
     z9 = json.loads((tmp_path / "index" / "labels" / "9" / "256" / "255.json").read_text())
-    assert len(z9["l"]) == 1000
+    assert len(z9["l"]) == 1199          # cap raised to 4000; all non-ring rows fit
     names = {e[0] for e in z9["l"]}
     assert "name0" not in names          # the ring node (highest cited) is excluded

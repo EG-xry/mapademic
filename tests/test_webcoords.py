@@ -110,7 +110,7 @@ def test_ring_nodes_rescattered_into_annulus(ringed_file, tmp_path):
     ).fetchall()
     for ru, is_ring in (r1, r2):
         assert is_ring is True
-        assert 0.86 - 1e-9 <= ru <= 0.98 + 1e-9
+        assert 0.60 - 1e-9 <= ru <= 0.98 + 1e-9
 
 
 def test_embedded_small_community_not_rescattered(ringed_file, tmp_path):

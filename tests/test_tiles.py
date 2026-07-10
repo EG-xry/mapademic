@@ -203,6 +203,7 @@ def test_legend_json(tmp_path):
     regions.write_text(json.dumps([{"community": 1, "name": "Cardiology"}]))
     out = tmp_path / "legend.json"
     stats = load_community_stats(duckdb.connect(), str(web))
+    assert stats == [(1, "Medicine", 1500, 0.5, 0.5)]   # 5-tuple: adds centroid
     write_legend(stats, str(out), str(regions), min_members=1000)
     entries = json.loads(out.read_text())
     assert entries == [{"community": 1, "name": "Cardiology",

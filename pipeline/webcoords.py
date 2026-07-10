@@ -49,7 +49,7 @@ def build_webcoords(coords_path: str, out_path: str, spread: float = 1.35,
             SELECT id, display_name, community, works_count, cited_by_count,
                    institution, field, {ring_pred} AS is_ring, comm_n,
                    CASE WHEN {ring_pred}
-                        THEN (0.86 + 0.12 * ((hash(id) % 100000) / 100000.0))
+                        THEN (0.60 + 0.38 * ((hash(id) % 100000) / 100000.0))
                         ELSE least(a / {a2max}, 1.0) END AS ru,
                    CASE WHEN {ring_pred}
                         THEN 2 * pi() * ((hash(id || '/t') % 100000) / 100000.0)

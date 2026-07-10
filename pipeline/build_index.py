@@ -10,7 +10,7 @@ import duckdb
 
 from pipeline.config import apply_resource_limits, data_dir
 
-LABEL_ZOOMS = {6: 50, 7: 50, 8: 200, 9: 1000}   # zoom -> per-tile capacity
+LABEL_ZOOMS = {6: 50, 7: 50, 8: 200, 9: 4000}   # zoom -> per-tile capacity
 
 
 def normalize(name: str) -> str:

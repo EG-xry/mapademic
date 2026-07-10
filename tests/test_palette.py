@@ -1,4 +1,5 @@
-from pipeline.palette import FIELD_HUES, field_community_rgb, build_community_palette, community_rgb
+from pipeline.palette import (FIELD_HUES, field_community_rgb, build_community_palette,
+                              community_rgb, load_community_stats)
 
 
 def test_all_fields_covered():
@@ -33,26 +34,48 @@ def test_rgb_in_unit_range():
             assert all(0.0 <= c <= 1.0 for c in field_community_rgb(field, comm))
 
 
-def test_big_community_uses_majority_field_hue_family():
+def hue_dist(a, b):
+    d = abs(a - b) % 360.0
+    return min(d, 360.0 - d)
+
+
+def test_big_community_hue_follows_centroid_angle():
     import colorsys
-    r, g, b = community_rgb(7, "Medicine", 500000)
+    # centroid due +x of map center -> theta 0 -> hue within the 8 deg wobble of 0/360
+    r, g, b = community_rgb(7, 500000, 0.9, 0.5)
     h, l, s = colorsys.rgb_to_hls(r, g, b)
-    assert s >= 0.80
-    hue_deg = (h * 360.0) % 360.0
-    dist = min(abs(hue_deg - 0.0), 360.0 - abs(hue_deg - 0.0))
-    assert dist <= 12.0 + 1e-6            # Medicine anchor is 0.0
-    assert community_rgb(7, "Medicine", 500000) == (r, g, b)  # deterministic
+    assert hue_dist(h * 360.0, 0.0) <= 8.0 + 1e-6
+    # centroid due +y -> theta pi/2 -> hue near 90
+    r2, g2, b2 = community_rgb(8, 500000, 0.5, 0.9)
+    h2, l2, s2 = colorsys.rgb_to_hls(r2, g2, b2)
+    assert hue_dist(h2 * 360.0, 90.0) <= 8.0 + 1e-6
 
 
-def test_small_or_fieldless_community_is_dim_grey():
+def test_big_community_deterministic():
+    assert community_rgb(7, 500000, 0.9, 0.5) == community_rgb(7, 500000, 0.9, 0.5)
+
+
+def test_big_community_sat_light_bounds():
     import colorsys
-    for rgb in (community_rgb(3, "Medicine", 50), community_rgb(3, None, 10**6)):
+    for comm in (0, 1, 7, 42, 999999):
+        for cx, cy in ((0.9, 0.5), (0.5, 0.9), (0.1, 0.2), (0.5, 0.5)):
+            rgb = community_rgb(comm, 10**6, cx, cy)
+            assert all(0.0 <= c <= 1.0 for c in rgb)
+            h, l, s = colorsys.rgb_to_hls(*rgb)
+            assert 0.62 - 1e-6 <= s <= 0.78 + 1e-6
+            assert 0.50 - 1e-6 <= l <= 0.66 + 1e-6
+
+
+def test_small_community_is_dim_grey():
+    import colorsys
+    for rgb in (community_rgb(3, 50, 0.9, 0.5), community_rgb(11, 999, 0.2, 0.8)):
         h, l, s = colorsys.rgb_to_hls(*rgb)
         assert s <= 0.05 and l <= 0.40
 
 
-def test_same_field_communities_differ():
-    assert community_rgb(1, "Medicine", 10**6) != community_rgb(2, "Medicine", 10**6)
+def test_cohabiting_communities_differ():
+    # same centroid -> same hue family, but jitter separates lightness/sat
+    assert community_rgb(1, 10**6, 0.7, 0.5) != community_rgb(2, 10**6, 0.7, 0.5)
 
 
 def test_build_community_palette_covers_all(tmp_path):
@@ -98,11 +121,18 @@ def test_build_community_palette_majority_tie_and_null(tmp_path):
         " 0.5 AS xw, 0.5 AS yw, 3 AS community, 20 AS works_count,"
         " 10 AS cited_by_count, 'i' AS institution, NULL AS field, FALSE AS is_ring FROM range(800))"
         f" TO '{p}' (FORMAT PARQUET)")
-    pal = build_community_palette(duckdb.connect(), p, min_members=1000)
-    assert set(pal) == {1, 2, 3}
+    con = duckdb.connect()
+    stats = load_community_stats(con, p)
+    fields = {c: f for c, f, n, cx, cy in stats}
+    # Majority field is legend/tooltip metadata; color no longer depends on it.
     # Community 1: 600 Medicine + 400 Chemistry -> Medicine majority
-    assert pal[1] == community_rgb(1, 'Medicine', 1000)
+    assert fields[1] == "Medicine"
     # Community 2: 500 Chemistry + 500 Physics and Astronomy (tie) -> Chemistry wins (alphabetic tie-break)
-    assert pal[2] == community_rgb(2, 'Chemistry', 1000)
-    # Community 3: 200 Medicine + 800 NULL -> NULL majority (grey)
-    assert pal[3] == community_rgb(3, None, 1000)
+    assert fields[2] == "Chemistry"
+    # Community 3: 200 Medicine + 800 NULL -> NULL majority
+    assert fields[3] is None
+    # Palette maps through the new angle-based community_rgb (all centroids at 0.5, 0.5)
+    pal = build_community_palette(con, p, min_members=1000)
+    assert set(pal) == {1, 2, 3}
+    for c, f, n, cx, cy in stats:
+        assert pal[c] == community_rgb(c, n, cx, cy, min_members=1000)

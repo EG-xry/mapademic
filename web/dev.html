@@ -85,7 +85,7 @@ async function drawLabels() {
   const entries = lists.filter(Boolean).flatMap(t => t.l);
   entries.sort((a, b) => b[4] - a[4]);          // by citations desc
   const placed = [];                            // screen-space rects
-  const cap = 60;
+  const cap = z >= 10 ? 150 : 60;
   for (const [name, id, xw, yw, cited] of entries) {
     if (markers.length >= cap) break;
     const pt = map.project(toLngLat(xw, yw));

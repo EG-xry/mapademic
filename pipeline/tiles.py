@@ -75,7 +75,7 @@ def load_splats(con, web_path: str, palette: dict, min_cited: int) -> dict:
             "rgb": rgb}
 
 
-def write_legend(stats: list[tuple[int, str | None, int]], out_path: str,
+def write_legend(stats: list[tuple[int, str | None, int, float, float]], out_path: str,
                  regions_path: str | None, min_members: int = 1000) -> int:
     names = {}
     if regions_path and Path(regions_path).exists():
@@ -83,10 +83,10 @@ def write_legend(stats: list[tuple[int, str | None, int]], out_path: str,
                  for r in json.loads(Path(regions_path).read_text())
                  if "community" in r}
     entries = []
-    for c, f, n in stats:              # stats already ordered members DESC, community
+    for c, f, n, cx, cy in stats:       # stats already ordered members DESC, community
         if n < min_members:
             continue
-        r, g, b = community_rgb(c, f, n, min_members)
+        r, g, b = community_rgb(c, n, cx, cy, min_members)
         entries.append({
             "community": c, "name": names.get(c),
             "field": f, "members": n,
@@ -142,7 +142,7 @@ def _brightness(cnt: np.ndarray) -> np.ndarray:
 BLOOM = np.array([[0.06, 0.12, 0.06], [0.12, 0.0, 0.12], [0.06, 0.12, 0.06]],
                  dtype=np.float32)
 
-EDGE_ALPHA = 0.045
+EDGE_ALPHA = 0.08
 EDGE_RGB = np.array([0.45, 0.50, 0.60], dtype=np.float32)  # cool grey
 EDGE_MINZ = 8
 
@@ -305,7 +305,7 @@ def run(args) -> int:
               flush=True)
     con = duckdb.connect()
     stats = load_community_stats(con, web)          # single parquet scan feeds both
-    pal = {c: community_rgb(c, f, n) for c, f, n in stats}
+    pal = {c: community_rgb(c, n, cx, cy) for c, f, n, cx, cy in stats}
     zooms = sorted(_parse_zooms(args.zooms), reverse=True)  # deep -> shallow
     level = load_level9(pixels, pal)
     splats = (load_splats(con, web, pal, args.splat_min_cited)
