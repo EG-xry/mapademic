@@ -16,7 +16,7 @@
 - World coordinates: `xw, yw` in [0,1] with a 2% margin (all points within [0.02, 0.98]); yw is "up" in data space; XYZ tile row is `ty = floor((1 - yw) * 2^z)` (y flips ONLY at tile addressing, in one helper used everywhere)
 - Max raster zoom **9** (2^9 = 512 tiles/side; 131,072 virtual pixels/side); zoom 10 is a POST-MEASUREMENT decision, not built in this plan
 - Radial transform: `r' = asinh(r/s)` with `s = median radius`; center = **median(x), median(y)** (mean is dragged by the sparse halo - caught during Task 1 implementation). DuckDB has no asinh: use `ln(v + sqrt(v*v + 1))`
-- Palette: 19 fixed field hue anchors + grey (NULL field); community shade jitter deterministic via splitmix64 - same (field, community) always yields the same RGB, test-pinned
+- Palette: **26** fixed field hue anchors + grey (NULL/unknown field); community shade jitter deterministic via splitmix64 - same (field, community) always yields the same RGB, test-pinned. (The real coords.parquet has 26 distinct non-null fields, not the 19 the spec sketched - discovered in Task 2; no aliasing, each real field is a direct key.)
 - Tile PNGs: 256x256 RGB, black background; empty tiles never written; per-zoom histogram-equalized brightness from log1p(count); 3x3 bloom kernel at zooms 8-9 only
 - All stages idempotent; `tiles` resumes by skipping existing tile files
 - Tests never touch `data/` - fixtures in tmp_path only; golden tests compare decoded pixel arrays, never PNG bytes (codec drift)
