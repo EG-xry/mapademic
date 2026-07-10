@@ -129,25 +129,31 @@ async function fetchSearchShard(key) {
   return p;
 }
 
-// Shard fallback chain per pipeline/build_index.py's _split_prefix_shard /
-// _split_catchall_shard contract. An ascii-alpha head of 2+ chars always
-// lives somewhere in the prefix-shard tree (never in `_`), so for those
-// queries we walk prefix lengths from min(5, len) down to 2, deepest first,
-// and stop at the first shard that exists (a 404 falls through to the next,
-// shorter, prefix). Anything else (short query, or a non-ascii-alpha first
-// char) goes straight to the codepoint shard, then the plain catch-all.
+// Shard fallback chain per pipeline/build_index.py's build_search_shards /
+// _split_prefix_shard / _split_catchall_shard contract. The build side
+// buckets each name by the first TWO chars of its concatenated normalized
+// form: `key = head if len(head) == 2 and head.isascii() and head.isalpha()
+// else "_"`, so a name lives in the prefix-shard tree only when BOTH of
+// its first two chars are ascii letters ("sørensen" -> "_", not "so...").
+// Mirror the same two-char gate here: for queries that pass it, walk
+// prefix lengths from min(5, len) down to 2, deepest first, and stop at
+// the first shard that exists (a 404 falls through to the next, shorter,
+// prefix). Queries that fail the gate, or that exhaust every prefix level
+// without finding a shard, fall through to the codepoint shard
+// `_<cp % 32>`, then the plain `_` catch-all.
 // Today's on-disk shards are still the old 2-char-only scheme (Task 8 adds
 // the 5..2 recursive split), so in practice every 3+ char attempt 404s and
 // this chain falls back to the 2-char shard -- exactly the behavior this
 // fallback is designed for.
 async function lookupSearchShard(norm) {
   const concat = norm.replace(/ /g, "");
-  if (concat.length >= 2 && /^[a-z]/.test(concat)) {
+  if (/^[a-z]{2}/.test(concat)) {
     for (let k = Math.min(5, concat.length); k >= 2; k--) {
       const entries = await fetchSearchShard(concat.slice(0, k));
       if (entries) return entries;
     }
-    return [];
+    // every prefix level 404ed: fall through to the catch-all chain below
+    // (belt and braces against future shard-scheme drift)
   }
   if (concat.length > 0) {
     const entries = await fetchSearchShard(`_${concat.codePointAt(0) % 32}`);
@@ -245,7 +251,11 @@ searchInput.addEventListener("keydown", ev => {
     if (searchResults.length) { searchActive = (searchActive + 1) % searchResults.length; renderSearchDropdown(); }
   } else if (ev.key === "ArrowUp") {
     ev.preventDefault();
-    if (searchResults.length) { searchActive = (searchActive - 1 + searchResults.length) % searchResults.length; renderSearchDropdown(); }
+    if (searchResults.length) {
+      // from no selection (-1), wrap to the last row
+      searchActive = (searchActive <= 0 ? searchResults.length : searchActive) - 1;
+      renderSearchDropdown();
+    }
   } else if (ev.key === "Enter") {
     ev.preventDefault();
     const pick = searchResults[searchActive >= 0 ? searchActive : 0];
