@@ -38,7 +38,7 @@ const map = new maplibregl.Map({
     version: 8,
     sources: {
       dots: { type: "raster", tiles: [location.origin + "/data/tiles/{z}/{x}/{y}.png"],
-              tileSize: 256, minzoom: 0, maxzoom: 9 }
+              tileSize: 256, minzoom: 0, maxzoom: 10 }
     },
     layers: [
       { id: "bg", type: "background", paint: { "background-color": "#000000" } },
@@ -46,7 +46,7 @@ const map = new maplibregl.Map({
         paint: { "raster-fade-duration": 150 } }
     ]
   },
-  center: [0, 0], zoom: 1, minZoom: 0, maxZoom: 12, renderWorldCopies: false
+  center: [0, 0], zoom: 1, minZoom: 0, maxZoom: 13, renderWorldCopies: false
 });
 map.addControl(new maplibregl.NavigationControl());
 
@@ -72,6 +72,13 @@ function visibleTiles(lz) {
 }
 const toLngLat = (xw, yw) => new maplibregl.MercatorCoordinate(xw, 1 - yw, 0).toLngLat();
 
+// Greedy screen-rect collision test shared by drawLabels and drawRegions.
+// `placed` holds {x, y, w, h} rects already committed for this redraw.
+function collides(placed, x, y, w, h) {
+  return placed.some(r => Math.abs(r.x - x) * 2 < r.w + w
+                       && Math.abs(r.y - y) * 2 < r.h + h);
+}
+
 let markers = [];
 let labelGen = 0;                    // invalidates stale in-flight redraws
 async function drawLabels() {
@@ -92,8 +99,7 @@ async function drawLabels() {
     if (pt.x < -50 || pt.y < -20 || pt.x > innerWidth + 50 || pt.y > innerHeight + 20) continue;
     const size = 11 + Math.min(6, Math.log10(1 + cited));       // 11-17 px
     const w = name.length * size * 0.58, h = size + 6;
-    if (placed.some(r => Math.abs(r.x - pt.x) * 2 < r.w + w
-                      && Math.abs(r.y - pt.y) * 2 < r.h + h)) continue;
+    if (collides(placed, pt.x, pt.y, w, h)) continue;
     placed.push({ x: pt.x, y: pt.y, w, h });
     const el = document.createElement("div");
     el.className = "lbl"; el.textContent = name;
@@ -110,10 +116,21 @@ let regionMarkers = [];
 function drawRegions() {
   regionMarkers.forEach(m => m.remove()); regionMarkers = [];
   const z = map.getZoom();
-  for (const r of regions) {
-    if (z < r.zmin || z > r.zmax + 1) continue;
+  if (z > 8) return;
+  const sorted = [...regions].sort((a, b) => a.rank - b.rank);   // rank 1 first
+  const placed = [];                                             // screen-space rects
+  for (const r of sorted) {
+    const zminByRank = 1.5 + 1.2 * Math.log10(r.rank);
+    if (z < zminByRank) continue;
+    const pt = map.project(toLngLat(r.xw, r.yw));
+    if (pt.x < -50 || pt.y < -20 || pt.x > innerWidth + 50 || pt.y > innerHeight + 20) continue;
+    const size = 13 + 6 * Math.min(1, r.members / 1_000_000);
+    const w = r.name.length * size * 0.62, h = size + 6;
+    if (collides(placed, pt.x, pt.y, w, h)) continue;
+    placed.push({ x: pt.x, y: pt.y, w, h });
     const el = document.createElement("div");
     el.className = "region"; el.textContent = r.name;
+    el.style.fontSize = size + "px";
     regionMarkers.push(new maplibregl.Marker({ element: el })
       .setLngLat(toLngLat(r.xw, r.yw)).addTo(map));
   }
