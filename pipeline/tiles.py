@@ -169,15 +169,25 @@ def add_parser(parser) -> None:
     parser.add_argument("--zooms", default="0-9", help="e.g. 0-5 for the QA gate")
     parser.add_argument("--web", default=None)
     parser.add_argument("--out", default=None)
+    parser.add_argument("--force-aggregate", action="store_true",
+                         help="re-aggregate pixels_z9.parquet even if it looks fresh")
 
 
 def run(args) -> int:
     web = args.web or str(data_dir() / "coords_web.parquet")
     out = Path(args.out) if args.out else data_dir() / "tiles"
     pixels = str(data_dir() / "pixels_z9.parquet")
-    if not Path(pixels).exists():
+    stale = (
+        Path(pixels).exists()
+        and Path(web).exists()
+        and os.path.getmtime(web) > os.path.getmtime(pixels)
+    )
+    if args.force_aggregate or not Path(pixels).exists() or stale:
         n = aggregate_z9(web, pixels, duckdb.connect())
         print(f"aggregated {n:,} occupied z9 pixels", flush=True)
+    else:
+        print("reusing cached pixels_z9.parquet (delete it or re-run webcoords to force)",
+              flush=True)
     zooms = sorted(_parse_zooms(args.zooms), reverse=True)  # deep -> shallow
     level = load_level9(pixels)
     for z in range(MAXZ, -1, -1):

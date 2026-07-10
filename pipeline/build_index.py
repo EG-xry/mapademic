@@ -1,5 +1,7 @@
 """Label/hit tiles (zooms 6-9) and prefix search shards. Zero backend."""
 import json
+import os
+import shutil
 import unicodedata
 from collections import defaultdict
 from pathlib import Path
@@ -19,6 +21,9 @@ def normalize(name: str) -> str:
 
 
 def build_label_tiles(web: str, out_dir: Path) -> int:
+    labels_dir = out_dir / "labels"
+    if labels_dir.exists():
+        shutil.rmtree(labels_dir)
     con = duckdb.connect()
     apply_resource_limits(con)
     written = 0
@@ -49,12 +54,17 @@ def build_label_tiles(web: str, out_dir: Path) -> int:
             ty = (ntiles - 1) - ty_up               # XYZ y-flip
             p = out_dir / "labels" / str(z) / str(tx) / f"{ty}.json"
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({"l": entries}, ensure_ascii=False))
+            tmp = p.parent / (p.name + ".tmp")
+            tmp.write_text(json.dumps({"l": entries}, ensure_ascii=False))
+            os.replace(tmp, p)
             written += 1
     return written
 
 
 def build_search_shards(web: str, out_dir: Path) -> int:
+    search_dir = out_dir / "search"
+    if search_dir.exists():
+        shutil.rmtree(search_dir)
     con = duckdb.connect()
     apply_resource_limits(con)
     shards = defaultdict(list)
@@ -71,7 +81,10 @@ def build_search_shards(web: str, out_dir: Path) -> int:
     sdir.mkdir(parents=True, exist_ok=True)
     total = 0
     for key, entries in shards.items():
-        (sdir / f"{key}.json").write_text(json.dumps(entries, ensure_ascii=False))
+        p = sdir / f"{key}.json"
+        tmp = sdir / f"{key}.json.tmp"
+        tmp.write_text(json.dumps(entries, ensure_ascii=False))
+        os.replace(tmp, p)
         total += len(entries)
     return total
 

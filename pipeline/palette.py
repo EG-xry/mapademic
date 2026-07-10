@@ -54,7 +54,7 @@ def field_community_rgb(field: str | None, community: int) -> tuple[float, float
     hue = (FIELD_HUES[field] + 9.0 * j1) % 360.0   # small hue wobble in-family
     # deep, saturated colors so the dense core stays vivid instead of washing
     # to white when rendered at full brightness (Task 4 QA tuning)
-    sat = min(1.0, max(0.72, 0.90 + 0.10 * j2))
+    sat = min(1.0, max(0.80, 0.90 + 0.10 * j2))
     light = min(0.58, max(0.40, 0.48 + 0.08 * j2))
     return colorsys.hls_to_rgb(hue / 360.0, light, sat)
 

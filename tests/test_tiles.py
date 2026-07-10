@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from pipeline.tiles import (MAXZ, PIX, aggregate_z9, load_level9,
+from pipeline.tiles import (MAXZ, PIX, TILE, aggregate_z9, load_level9,
                             reduce_level, render_zoom)
 
 # MAXZ == 9, PIX == 2**9 * 256 == 131072
@@ -100,6 +100,33 @@ def test_render_writes_expected_tiles_and_is_idempotent(tiny_web, tmp_path):
     dense = np.asarray(Image.open(out / "1/0/1.png"))
     ys, xs = np.nonzero(dense.sum(axis=2))
     assert tuple(dense[ys[0], xs[0]]) == expected
+
+
+def test_render_bloom_lights_up_neighbors(tmp_path):
+    # single occupied pixel, well inside a tile (avoid edge clipping)
+    level = {
+        "px": np.array([128], dtype=np.int64),
+        "py": np.array([128], dtype=np.int64),
+        "cnt": np.array([100], dtype=np.int64),
+        "rgb": np.array([[1.0, 1.0, 1.0]], dtype=np.float32),
+    }
+    out = tmp_path / "tiles"
+    n = render_zoom(level, MAXZ, out, bloom=True)
+    assert n == 1
+    ntiles = 1 << MAXZ
+    ty = (ntiles - 1) - (128 // TILE)   # XYZ y-flip for tile row
+    img = np.asarray(Image.open(out / str(MAXZ) / "0" / f"{ty}.png"))
+    # center pixel: ix = 128, iy = (TILE-1) - 128 = 127
+    cx, cy = 128, 127
+    center = int(img[cy, cx].sum())
+    assert center > 0
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dy == 0 and dx == 0:
+                continue
+            neighbor = int(img[cy + dy, cx + dx].sum())
+            assert neighbor > 0, f"neighbor ({dx},{dy}) should be lit by bloom"
+            assert neighbor < center, f"neighbor ({dx},{dy}) should be dimmer than center"
 
 
 def test_styled_pixels_deterministic(tiny_web, tmp_path):

@@ -32,10 +32,11 @@ async function drawLabels() {
   const z = Math.round(map.getZoom());
   if (z < 6) return document.querySelectorAll(".lbl").forEach(e => e.remove());
   // naive: fetch the center tile's labels and render the top 10 as DOM pins
-  const n = 1 << z, c = map.getCenter();
+  const lz = Math.min(9, Math.round(map.getZoom()));
+  const n = 1 << lz, c = map.getCenter();
   const merc = maplibregl.MercatorCoordinate.fromLngLat(c);
   const tx = Math.floor(merc.x * n), ty = Math.floor(merc.y * n);
-  const r = await fetch(`/data/index/labels/${z}/${tx}/${ty}.json`);
+  const r = await fetch(`/data/index/labels/${lz}/${tx}/${ty}.json`);
   document.querySelectorAll(".lbl").forEach(e => e.remove());
   if (!r.ok) return;
   (await r.json()).l.slice(0, 10).forEach(([name, id, xw, yw]) => {

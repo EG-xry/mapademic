@@ -1,6 +1,7 @@
 """Auto-name the largest communities from their members' dominant topics."""
 import glob as globmod
 import json
+import os
 from pathlib import Path
 
 import duckdb
@@ -117,7 +118,9 @@ def build_regions(webcoords_path: str, authors_glob: str, out_path: str,
             "zmin": 2 if rank <= 30 else 4,
             "zmax": 4 if rank <= 30 else 6,
         })
-    Path(out_path).write_text(json.dumps(regions, indent=1))
+    tmp = str(out_path) + ".tmp"
+    Path(tmp).write_text(json.dumps(regions, indent=1))
+    os.replace(tmp, out_path)
     return len(regions)
 
 
