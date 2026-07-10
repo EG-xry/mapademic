@@ -1,4 +1,7 @@
-"""Label/hit tiles (zooms 6-9) and prefix search shards. Zero backend."""
+"""Label/hit tiles (zooms 6-9) and prefix search shards. Zero backend.
+
+Search shard fallback order (viewer): 3-char shard -> 2-char shard -> "_".
+"""
 import json
 import os
 import shutil
@@ -11,6 +14,7 @@ import duckdb
 from pipeline.config import apply_resource_limits, data_dir
 
 LABEL_ZOOMS = {6: 50, 7: 50, 8: 200, 9: 4000}   # zoom -> per-tile capacity
+SHARD_SPLIT_BYTES = 4_000_000                   # 2-char shards larger than this get 3-char split
 
 
 def normalize(name: str) -> str:
@@ -61,6 +65,12 @@ def build_label_tiles(web: str, out_dir: Path) -> int:
     return written
 
 
+def _write_json_atomic(path: Path, obj) -> None:
+    tmp = path.parent / (path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False))
+    os.replace(tmp, path)
+
+
 def build_search_shards(web: str, out_dir: Path) -> int:
     search_dir = out_dir / "search"
     if search_dir.exists():
@@ -81,10 +91,45 @@ def build_search_shards(web: str, out_dir: Path) -> int:
     sdir.mkdir(parents=True, exist_ok=True)
     total = 0
     for key, entries in shards.items():
-        p = sdir / f"{key}.json"
-        tmp = sdir / f"{key}.json.tmp"
-        tmp.write_text(json.dumps(entries, ensure_ascii=False))
-        os.replace(tmp, p)
+        total += len(entries)
+        size = len(json.dumps(entries, ensure_ascii=False).encode("utf-8"))
+        if key != "_" and size > SHARD_SPLIT_BYTES:
+            sub = defaultdict(list)
+            parent = []
+            for e in entries:
+                concat = e[0].replace(" ", "")
+                head3 = concat[:3]
+                if len(concat) >= 3 and head3.isascii() and head3.isalpha():
+                    sub[head3].append(e)
+                else:
+                    parent.append(e)
+            for subkey, subentries in sub.items():
+                _write_json_atomic(sdir / f"{subkey}.json", subentries)
+            _write_json_atomic(sdir / f"{key}.json", parent)  # always written: viewer fallback
+        else:
+            _write_json_atomic(sdir / f"{key}.json", entries)
+    return total
+
+
+def build_id_shards(web: str, out_dir: Path) -> int:
+    ids_dir = out_dir / "ids"
+    if ids_dir.exists():
+        shutil.rmtree(ids_dir)
+    con = duckdb.connect()
+    apply_resource_limits(con)
+    buckets = defaultdict(dict)
+    rows = con.execute(
+        f"""SELECT id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw
+            FROM read_parquet('{web}')"""
+    ).fetchall()
+    for aid, xw, yw in rows:
+        digits = "".join(filter(str.isdigit, aid))
+        bucket = int(digits) % 1000 if digits else 0
+        buckets[bucket][aid] = [round(xw, 6), round(yw, 6)]
+    ids_dir.mkdir(parents=True, exist_ok=True)
+    total = 0
+    for bucket, entries in buckets.items():
+        _write_json_atomic(ids_dir / f"{bucket}.json", entries)
         total += len(entries)
     return total
 
@@ -99,5 +144,6 @@ def run(args) -> int:
     out = Path(args.out) if args.out else data_dir() / "index"
     t = build_label_tiles(web, out)
     s = build_search_shards(web, out)
-    print(f"{t:,} label tiles, {s:,} searchable names -> {out}")
+    i = build_id_shards(web, out)
+    print(f"{t:,} label tiles, {s:,} searchable names, {i:,} id-shard entries -> {out}")
     return 0

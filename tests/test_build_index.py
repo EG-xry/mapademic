@@ -2,7 +2,13 @@ import json
 
 import duckdb
 
-from pipeline.build_index import build_label_tiles, build_search_shards, normalize
+import pipeline.build_index as build_index
+from pipeline.build_index import (
+    build_id_shards,
+    build_label_tiles,
+    build_search_shards,
+    normalize,
+)
 
 
 def write_web(path, rows):
@@ -79,3 +85,93 @@ def test_z9_cap_and_ring_excluded_from_labels(tmp_path):
     assert len(z9["l"]) == 1199          # cap raised to 4000; all non-ring rows fit
     names = {e[0] for e in z9["l"]}
     assert "name0" not in names          # the ring node (highest cited) is excluded
+
+
+def test_id_shards_bucket_math_and_content(tmp_path):
+    web = tmp_path / "w.parquet"
+    write_web(web, [
+        ("https://openalex.org/A5108093963", "Geoffrey Hinton", 0.111111, 0.222222, 100),
+        ("https://openalex.org/A5072532913", "Noam Chomsky", 0.333333, 0.444444, 200),
+        ("https://openalex.org/AXXX", "No Digits Here", 0.5, 0.5, 1),
+    ])
+    out = tmp_path / "index"
+    n = build_id_shards(str(web), out)
+    assert n == 3
+    hinton = json.loads((out / "ids/963.json").read_text())  # 5108093963 % 1000
+    assert hinton["https://openalex.org/A5108093963"] == [0.111111, 0.222222]
+    chomsky = json.loads((out / "ids/913.json").read_text())  # 5072532913 % 1000
+    assert chomsky["https://openalex.org/A5072532913"] == [0.333333, 0.444444]
+    zero = json.loads((out / "ids/0.json").read_text())  # no digits -> bucket 0
+    assert zero["https://openalex.org/AXXX"] == [0.5, 0.5]
+
+
+def test_id_shards_include_ring_nodes(tmp_path):
+    web = tmp_path / "web.parquet"
+    duckdb.sql(
+        "COPY (SELECT * FROM (VALUES "
+        "('https://openalex.org/A1', 'Ring Node', 0.1, 0.1, 1, 20, 5, 'i', 'Biology', TRUE), "
+        "('https://openalex.org/A2', 'Normal Node', 0.2, 0.2, 1, 20, 5, 'i', 'Biology', FALSE)"
+        ") t(id, display_name, xw, yw, community, works_count, cited_by_count, institution, field, is_ring))"
+        f" TO '{web}' (FORMAT PARQUET)")
+    out = tmp_path / "index"
+    n = build_id_shards(str(web), out)
+    assert n == 2                        # ring node counted, unlike label tiles
+    ring_bucket = json.loads((out / "ids/1.json").read_text())
+    assert "https://openalex.org/A1" in ring_bucket
+
+
+def test_id_shards_clears_stale_dir(tmp_path):
+    web = tmp_path / "w.parquet"
+    write_web(web, [("https://openalex.org/A1", "One", 0.1, 0.1, 1)])
+    out = tmp_path / "index"
+    ids_dir = out / "ids"
+    ids_dir.mkdir(parents=True)
+    (ids_dir / "stale.json").write_text("{}")
+    build_id_shards(str(web), out)
+    assert not (ids_dir / "stale.json").exists()
+
+
+def test_search_shards_hot_split(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_index, "SHARD_SPLIT_BYTES", 2000)
+    rows = []
+    for i in range(20):
+        rows.append((f"C{i}", f"Abcresearcher Number{i:03d}", 0.1, 0.1, 100 - i))
+    for i in range(20):
+        rows.append((f"D{i}", f"Abdresearcher Number{i:03d}", 0.1, 0.1, 100 - i))
+    rows.append(("E0", "Ab", 0.2, 0.2, 5))  # exactly-2-char normalized name
+    web = tmp_path / "w.parquet"
+    write_web(web, rows)
+    out = tmp_path / "index"
+    n = build_search_shards(str(web), out)
+    assert n == len(rows)
+    assert (out / "search/abc.json").exists()
+    assert (out / "search/abd.json").exists()
+    assert (out / "search/ab.json").exists()   # 2-char shard always written
+    ab = json.loads((out / "search/ab.json").read_text())
+    assert [e[1] for e in ab] == ["Ab"]         # only the exact-2-char name stays
+    abc = json.loads((out / "search/abc.json").read_text())
+    assert len(abc) == 20
+    assert all(e[0].startswith("abc") for e in abc)
+    abd = json.loads((out / "search/abd.json").read_text())
+    assert len(abd) == 20
+    assert all(e[0].startswith("abd") for e in abd)
+
+
+def test_search_shards_hot_split_parent_written_even_when_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_index, "SHARD_SPLIT_BYTES", 2000)
+    rows = [(f"C{i}", f"Abcresearcher Number{i:03d}", 0.1, 0.1, 100 - i) for i in range(30)]
+    web = tmp_path / "w.parquet"
+    write_web(web, rows)
+    out = tmp_path / "index"
+    build_search_shards(str(web), out)
+    assert (out / "search/abc.json").exists()
+    ab = json.loads((out / "search/ab.json").read_text())
+    assert ab == []                             # no exact-2-char names, but still written
+
+
+def test_search_shards_not_split_below_threshold(tmp_path):
+    web = tmp_path / "w.parquet"
+    write_web(web, [("A1", "Alice Zhang", 0.3, 0.3, 10)])
+    out = tmp_path / "index"
+    build_search_shards(str(web), out)
+    assert not (out / "search/ali.json").exists()  # small bucket: no 3-char split
