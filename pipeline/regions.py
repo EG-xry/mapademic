@@ -28,7 +28,7 @@ def build_regions(webcoords_path: str, authors_glob: str, out_path: str,
                    sqrt(var_pop(xw) + var_pop(yw)) AS spread
             FROM read_parquet('{webcoords_path}')
             GROUP BY community
-            ORDER BY members DESC
+            ORDER BY members DESC, community
             LIMIT {int(top_n)}
         ),
         member_topics AS (
@@ -56,7 +56,7 @@ def build_regions(webcoords_path: str, authors_glob: str, out_path: str,
         )
         SELECT tc.community, b.topic AS name, tc.members, tc.xw, tc.yw,
                tc.spread,
-               row_number() OVER (ORDER BY tc.members DESC) AS rank
+               row_number() OVER (ORDER BY tc.members DESC, tc.community) AS rank
         FROM top_comms tc
         JOIN best b ON b.community = tc.community AND b.rn = 1
         ORDER BY rank
