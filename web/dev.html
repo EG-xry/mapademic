@@ -1043,6 +1043,7 @@ async function drawCoauthorRays(bareId, xw, yw) {
   if (!healthy) { setSearchStatus("coauthor backend offline"); return; }
 
   const coauthors = [];        // [{id, name}], populated from "expansion" events
+  const coauthorIds = new Set();   // dedupe across frames; don't rely on backend set semantics
   const es = new EventSource(
     `${API_BASE}/api/graph/expand?new_id=${encodeURIComponent(bareId)}&depth=1&top_k=25&edges=coauthor`
   );
@@ -1056,6 +1057,8 @@ async function drawCoauthorRays(bareId, xw, yw) {
       if (n.type !== "expansion") continue;        // origin/path node types, defensive
       if (String(n.id).startsWith("W")) continue;   // work node, defensive (edges=coauthor implies authors)
       if (n.id === bareId) continue;                // origin itself, defensive
+      if (coauthorIds.has(n.id)) continue;          // already collected in an earlier frame
+      coauthorIds.add(n.id);
       coauthors.push({ id: n.id, name: n.name });
     }
   });
@@ -1622,7 +1625,10 @@ document.addEventListener("keydown", ev => {
     } else if (document.activeElement === connectBInput && (connectB || connectBInput.value)) {
       ev.preventDefault(); ev.stopPropagation();
       connectBLookup.escape();
-    } else if (activeA) {
+    } else if (activeA || rayMarkers.length || map.getSource("coauthor-rays")) {
+      // Rays drawn via the info card's Coauthors button never set activeA,
+      // so this rung also fires on bare rays; searchHighlightEscape clears
+      // both (clearSearchHighlight no-ops when there's no highlight marker).
       ev.preventDefault(); ev.stopPropagation();
       searchHighlightEscape();
     }
