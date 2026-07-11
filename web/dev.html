@@ -476,16 +476,54 @@ async function lookupSearchShard(norm) {
   return (await fetchSearchShard("_")) || [];
 }
 
-// entry shape: [norm, display_name, id, xw, yw, cited]
-function rankSearchEntries(entries, norm) {
-  const starts = [], contains = [];
-  for (const e of entries) {
-    if (e[0].startsWith(norm)) starts.push(e);
-    else if (e[0].includes(norm)) contains.push(e);
+// tokenMatch(queryTokens, entryTokens): true if every query token, in order,
+// prefix-matches a distinct entry token as a subsequence over the entry's
+// tokens (greedy two-pointer: for each query token, advance the entry-token
+// cursor until a prefix match is found, then move past it; fail if the
+// entry tokens run out first). Order is preserved, not a bag-of-tokens
+// match: "terrence sejnowski" matches "terrence j sejnowski"; "j sejnowski"
+// matches; "sejnowski" alone matches (single token, any position);
+// "sejnowski terrence" does NOT match (wrong order).
+function tokenMatch(queryTokens, entryTokens) {
+  let j = 0;
+  for (const qt of queryTokens) {
+    while (j < entryTokens.length && !entryTokens[j].startsWith(qt)) j++;
+    if (j >= entryTokens.length) return false;
+    j++;
   }
-  starts.sort((a, b) => b[5] - a[5]);
-  contains.sort((a, b) => b[5] - a[5]);
-  return [...starts, ...contains].slice(0, 12);
+  return true;
+}
+
+// entry shape: [norm, display_name, id, xw, yw, cited]
+// Dedupes by id first -- Task 1's dual first/last-token search shards let
+// the same author's entry arrive twice once a lookup spans more than one
+// shard, so this is a cheap guard against showing/ranking a person twice.
+// Then buckets into three ranked groups: (1) entry norm starts with the
+// full query norm; (2) tokenMatch passed AND the first query token
+// prefix-matches the entry's first token; (3) any other tokenMatch hit.
+// cited desc within each group; top 12 overall.
+// NOTE: bare-surname queries (e.g. "sejnowski") only reach the right entry
+// once the production index is rebuilt with Task 1's last-token shards
+// (Task 5) -- lookupSearchShard today still only buckets by first token, so
+// tokenMatch here can be willing to match a surname-only query while the
+// shard lookup upstream never hands it the entry to test in the first place.
+function rankSearchEntries(entries, norm) {
+  const seen = new Set();
+  const queryTokens = norm.split(" ").filter(Boolean);
+  const g1 = [], g2 = [], g3 = [];
+  for (const e of entries) {
+    if (seen.has(e[2])) continue;
+    seen.add(e[2]);
+    if (e[0].startsWith(norm)) { g1.push(e); continue; }
+    const entryTokens = e[0].split(" ").filter(Boolean);
+    if (!tokenMatch(queryTokens, entryTokens)) continue;
+    if (entryTokens[0].startsWith(queryTokens[0])) g2.push(e);
+    else g3.push(e);
+  }
+  g1.sort((a, b) => b[5] - a[5]);
+  g2.sort((a, b) => b[5] - a[5]);
+  g3.sort((a, b) => b[5] - a[5]);
+  return [...g1, ...g2, ...g3].slice(0, 12);
 }
 
 const searchInput = document.getElementById("search-input");
