@@ -2113,7 +2113,12 @@ async function updateVectorPoints() {
         // for the tail/unknown/undefined case.
         "circle-color": ["get", "color"],
         "circle-opacity": 0.9,
-        "circle-stroke-width": 0.5,
+        // R14b perf: zoom-interpolated instead of a flat 0.5 -- at low zoom
+        // (vector-only mode's 300k-point field) a 0.5px stroke is sub-pixel
+        // and invisible anyway, but GL still pays for a second stroke draw
+        // per circle. 0 below z6, ramping to the original 0.5 by z8 where
+        // circles are large enough for the stroke to actually read.
+        "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 6, 0, 8, 0.5],
         "circle-stroke-color": "#0a0a0c",
       },
     }, beforeId);
@@ -2500,8 +2505,38 @@ async function hitTest(pt) {
   if (map.getZoom() >= HIT_ZOOM) return hitTestTiles(pt);
   return hitTestVector(pt);
 }
+// R14b perf: hitTestVector's queryRenderedFeatures runs synchronously on the
+// main thread against the live "vector-points" layer -- cheap for one call,
+// but mousemove can fire far faster than the tile/shard path's async+cached
+// hitTestTiles ever does, and vector-only mode's 300k circles make each call
+// non-trivial. Two gates, mousemove-only (click below still calls hitTest
+// directly -- a click should always resolve against the current cursor
+// position, not a throttled/gated one):
+//   (a) skip outright while the camera is moving (map.isMoving()) -- no
+//       hover during pan/zoom, and a mid-gesture hit would be stale by the
+//       time it's rendered anyway.
+//   (b) otherwise throttle to at most one query per ~90ms, leading edge --
+//       reuse the last result for mousemove events inside the window rather
+//       than re-querying. Tooltip position still tracks the raw cursor every
+//       frame (set from ev.point below); only which-feature-is-hit lags up
+//       to 90ms, which reads as instant.
+let lastVectorHitTestAt = 0;
+let lastVectorHit = null;
+function hitTestVectorGated(pt) {
+  if (map.isMoving()) return null;
+  const now = Date.now();
+  if (now - lastVectorHitTestAt >= 90) {
+    lastVectorHitTestAt = now;
+    lastVectorHit = hitTestVector(pt);
+  }
+  return lastVectorHit;
+}
+async function mousemoveHitTest(pt) {
+  if (map.getZoom() >= HIT_ZOOM) return hitTestTiles(pt);
+  return hitTestVectorGated(pt);
+}
 map.on("mousemove", async ev => {
-  const hit = await hitTest(ev.point);
+  const hit = await mousemoveHitTest(ev.point);
   map.getCanvas().style.cursor = hit ? "pointer" : "";
   if (hit) {
     tip.style.display = "block";
