@@ -18,6 +18,7 @@ shard files; the viewer dedupes by id client-side.
 (The docstring doubles as argparse help, so no percent signs here.)
 """
 import json
+import math
 import os
 import shutil
 import unicodedata
@@ -281,11 +282,80 @@ def _boundary_lines(arr: np.ndarray, grid: int) -> list:
     return lines
 
 
-def build_community_boundaries(web: str, out_path: str, grid: int = 1024, min_cell: int = 3) -> int:
-    """Dashed community-boundary polylines: majority-community raster over a
-    grid x grid grid (cells with < min_cell authors are empty), one 3x3
-    speckle-cleanup pass, then boundary edges between differing neighbors
-    run-length merged into a single MultiLineString feature."""
+def _assemble_polylines(segments: list) -> list:
+    """Chain 2-point segments that share an endpoint into connected
+    polylines. Simple dict-based endpoint join: greedily extends a chain's
+    head/tail with any unused segment touching that point. Choice among
+    3+-way junctions is arbitrary but deterministic; good enough for
+    boundary-line fragment filtering, not a general planar-graph solver."""
+    endpoint_map = defaultdict(list)
+    segs = [(tuple(a), tuple(b)) for a, b in segments]
+    for i, (p0, p1) in enumerate(segs):
+        endpoint_map[p0].append(i)
+        endpoint_map[p1].append(i)
+    used = [False] * len(segs)
+    polylines = []
+    for i in range(len(segs)):
+        if used[i]:
+            continue
+        used[i] = True
+        chain = [segs[i][0], segs[i][1]]
+        while True:
+            last = chain[-1]
+            nxt = next((j for j in endpoint_map[last] if not used[j]), None)
+            if nxt is None:
+                break
+            a, b = segs[nxt]
+            chain.append(b if a == last else a)
+            used[nxt] = True
+        while True:
+            first = chain[0]
+            nxt = next((j for j in endpoint_map[first] if not used[j]), None)
+            if nxt is None:
+                break
+            a, b = segs[nxt]
+            chain.insert(0, a if b == first else b)
+            used[nxt] = True
+        polylines.append([list(p) for p in chain])
+    return polylines
+
+
+def _polyline_length(points: list) -> float:
+    """Total euclidean length of a polyline (world-coord units)."""
+    return sum(
+        math.hypot(x1 - x0, y1 - y0)
+        for (x0, y0), (x1, y1) in zip(points, points[1:])
+    )
+
+
+def _chaikin_smooth(points: list, iterations: int = 2) -> list:
+    """Chaikin corner-cutting: each interior segment is cut at its 1/4 and
+    3/4 points, replacing sharp staircase corners with a smooth curve. The
+    first and last points are always kept exactly (open polyline). A
+    2-point polyline has no corner to cut and is returned unchanged."""
+    pts = [tuple(p) for p in points]
+    for _ in range(iterations):
+        if len(pts) < 3:
+            break
+        new_pts = [pts[0]]
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            new_pts.append((0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1))
+            new_pts.append((0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1))
+        new_pts.append(pts[-1])
+        pts = new_pts
+    return [[round(x, 6), round(y, 6)] for x, y in pts]
+
+
+def build_community_boundaries(web: str, out_path: str, grid: int = 512, min_cell: int = 6,
+                                smooth_passes: int = 3, min_len: float = 0.02) -> int:
+    """Curved community-boundary polylines: majority-community raster over a
+    grid x grid grid (cells with < min_cell authors are empty), smooth_passes
+    rounds of the 3x3 majority-filter speckle cleanup, then boundary edges
+    between differing neighbors run-length merged, chained into connected
+    polylines by shared endpoint, fragments shorter than min_len (world
+    units) dropped, and survivors passed through 2 iterations of Chaikin
+    corner-cutting so the raster staircase reads as an organic curve.
+    Returns the number of surviving polylines."""
     con = duckdb.connect()
     apply_resource_limits(con)
     rows = con.execute(
@@ -315,14 +385,18 @@ def build_community_boundaries(web: str, out_path: str, grid: int = 1024, min_ce
     arr = np.full((grid, grid), -1, dtype=np.int32)
     for cx, cy, community in rows:
         arr[cx, cy] = community
-    arr = _smooth_majority(arr)
-    lines = _boundary_lines(arr, grid)
+    for _ in range(smooth_passes):
+        arr = _smooth_majority(arr)
+    segments = _boundary_lines(arr, grid)
+    polylines = _assemble_polylines(segments)
+    polylines = [p for p in polylines if _polyline_length(p) >= min_len]
+    polylines = [_chaikin_smooth(p) for p in polylines]
     geojson = {
         "type": "FeatureCollection",
         "features": [{
             "type": "Feature",
             "properties": {},
-            "geometry": {"type": "MultiLineString", "coordinates": lines},
+            "geometry": {"type": "MultiLineString", "coordinates": polylines},
         }],
     }
     _write_json_atomic(Path(out_path), geojson)
@@ -330,7 +404,7 @@ def build_community_boundaries(web: str, out_path: str, grid: int = 1024, min_ce
     if size > BOUNDARIES_MAX_BYTES:
         print(f"note: boundaries.json is {size:,} bytes (target < {BOUNDARIES_MAX_BYTES:,}); "
               f"consider raising min_cell (currently {min_cell})")
-    return len(lines)
+    return len(polylines)
 
 
 def build_community_shards(web: str, out_dir: Path, top_n: int = 20000, min_members: int = 1000) -> int:

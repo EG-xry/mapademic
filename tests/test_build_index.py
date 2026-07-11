@@ -426,6 +426,62 @@ def test_boundaries_speckle_under_min_cell_produces_none(tmp_path):
     assert geo["features"][0]["geometry"]["coordinates"] == []
 
 
+def test_boundaries_fragment_filter_drops_small_blob_keeps_long_boundary(tmp_path):
+    web = tmp_path / "web.parquet"
+    grid = 20
+    rows = []
+    aid = 0
+    # Long straight boundary: populate the two columns adjacent to the split
+    # (cx=9 community 0, cx=10 community 1) across every row, so run-length
+    # merging produces one full-height segment.
+    for cy in range(grid):
+        for cx, comm in ((9, 0), (10, 1)):
+            x = (cx + 0.5) / grid
+            y = (cy + 0.5) / grid
+            rows.append((f"A{aid}", f"N{aid}", x, y, comm, 10, False))
+            aid += 1
+    # Small isolated blob: one community-2 cell deep inside community 0's
+    # territory, boxed in by its 4 orthogonal neighbors so it forms a closed
+    # 4-edge ring (perimeter 4 * 1/grid = 0.2, under the 0.25 min_len below).
+    blob = (3, 3)
+    neighbors = [(2, 3), (4, 3), (3, 2), (3, 4)]
+    for cx, cy in [blob] + neighbors:
+        comm = 2 if (cx, cy) == blob else 0
+        x = (cx + 0.5) / grid
+        y = (cy + 0.5) / grid
+        rows.append((f"A{aid}", f"N{aid}", x, y, comm, 10, False))
+        aid += 1
+    write_web_communities(web, rows)
+    out = tmp_path / "boundaries.json"
+    # smooth_passes=0 isolates the fragment-filter behavior from majority-
+    # filter erosion (a lone cell would otherwise be absorbed by smoothing
+    # before ever reaching the fragment filter).
+    n = build_community_boundaries(
+        str(web), str(out), grid=grid, min_cell=1, smooth_passes=0, min_len=0.25
+    )
+    assert n == 1                                  # blob ring dropped, long boundary kept
+    geo = json.loads(out.read_text())
+    lines = geo["features"][0]["geometry"]["coordinates"]
+    assert len(lines) == 1
+    assert lines[0] == [[0.5, 0.0], [0.5, 1.0]]
+
+
+def test_chaikin_smooth_curves_staircase_and_keeps_endpoints():
+    from pipeline.build_index import _chaikin_smooth
+
+    staircase = [[0, 0], [1, 0], [1, 1], [2, 1], [2, 2]]
+    out = _chaikin_smooth(staircase, iterations=2)
+    assert len(out) > len(staircase)
+    assert out[0] == [0, 0]
+    assert out[-1] == [2, 2]
+    xs = [p[0] for p in staircase]
+    ys = [p[1] for p in staircase]
+    # loose hull sanity: every output point stays within the input's bbox
+    # (a strict superset of its convex hull)
+    assert all(min(xs) <= p[0] <= max(xs) for p in out)
+    assert all(min(ys) <= p[1] <= max(ys) for p in out)
+
+
 def test_community_shards_top_n_ordering_and_min_members(tmp_path):
     web = tmp_path / "web.parquet"
     rows = []
