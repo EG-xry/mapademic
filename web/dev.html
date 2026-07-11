@@ -1871,16 +1871,24 @@ let vectorGen = 0;           // invalidates stale in-flight tile/shard fetches (
 function colorForCommunity(community) {
   return communityColors.get(community) || VECTOR_POINT_FALLBACK_COLOR;
 }
-// R13: name and a bare (stripId'd) id are carried in properties too -- small
-// memory cost -- so the sub-HIT_ZOOM hover/click path (see hitTest below) can
-// build an entry-like hit array straight from a queryRenderedFeatures result
-// without a second lookup. xw/yw aren't stored redundantly; that path derives
-// them back out of the feature's own geometry instead (see hitTestVector).
+// R13: name, a bare (stripId'd) id, and community are carried in properties
+// too -- small memory cost -- so the sub-HIT_ZOOM hover/click path (see
+// hitTest below) can build an entry-like hit array straight from a
+// queryRenderedFeatures result without a second lookup, including the
+// community field openInfoCard's legend-row highlight needs. Every entry
+// source funneling through here carries community: label tiles and
+// top_authors.json both have it as field 5, and the isolate community-shard
+// branch fills it in as a constant before mapping. A genuinely-undefined
+// community (stale pre-community-rebuild cached tiles) simply drops out of
+// the serialized properties and reads back as undefined in hitTestVector --
+// the same "small community" fallback openInfoCard already handles. xw/yw
+// aren't stored redundantly; that path derives them back out of the
+// feature's own geometry instead (see hitTestVector).
 function entryToFeature([name, id, xw, yw, cited, community]) {
   return {
     type: "Feature",
     geometry: { type: "Point", coordinates: toLngLat(xw, yw).toArray() },
-    properties: { cited, color: colorForCommunity(community), name, id: stripId(id) },
+    properties: { cited, color: colorForCommunity(community), name, id: stripId(id), community },
   };
 }
 // Shared by isolate mode's community-shard render and the R12b global
@@ -2368,17 +2376,19 @@ function hitTestVector(pt) {
     if (d < bestD) { bestD = d; best = f; }
   }
   // Rebuilds the same [name, id, xw, yw, cited, community] shape hitTestTiles
-  // returns, so openInfoCard/the mousemove tooltip below don't need to know
-  // which path a hit came from. xw/yw come back out of the feature's own
-  // geometry (inverse of entryToFeature's toLngLat) rather than a duplicate
-  // stored property. community is left undefined -- entryToFeature doesn't
-  // carry it in properties (out of scope for this task; openInfoCard already
-  // handles an unresolved community by falling back to its "small community"
-  // legend note, so this is a cosmetic gap, not a broken path).
+  // returns, so openInfoCard (including its legend-row community highlight)
+  // and the mousemove tooltip below don't need to know which path a hit came
+  // from. xw/yw come back out of the feature's own geometry (inverse of
+  // entryToFeature's toLngLat) rather than a duplicate stored property;
+  // name/id/cited/community come from the properties entryToFeature stored.
+  // A missing community property reads back as undefined here, which
+  // openInfoCard already maps to its "small community (grey dust)" legend
+  // note -- the same fallback the deep-zoom path uses for off-legend
+  // communities.
   const [lng, lat] = best.geometry.coordinates;
   const m = maplibregl.MercatorCoordinate.fromLngLat({ lng, lat });
-  const { name, id, cited } = best.properties;
-  return [name, id, m.x, 1 - m.y, cited, undefined];
+  const { name, id, cited, community } = best.properties;
+  return [name, id, m.x, 1 - m.y, cited, community];
 }
 // Single entry point for both the mousemove and click handlers below, so the
 // two hit-test paths never fight over cursor/tooltip/card state -- one
