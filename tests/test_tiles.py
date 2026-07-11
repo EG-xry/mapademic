@@ -174,16 +174,18 @@ def test_splats_only_above_threshold(tmp_path):
         " institution, field, is_ring))"
         f" TO '{web}' (FORMAT PARQUET)")
     pal = {1: (1.0, 0.0, 0.0)}
-    s = load_splats(con, str(web), pal, min_cited=60000)
-    assert len(s["px"]) == 1                      # only BIG
+    s = load_splats(con, str(web), pal)
+    assert len(s["px"]) == 1                      # only BIG (SML is below the 5k floor)
     assert s["px"][0] == PIX // 2 and s["py"][0] == PIX // 2
+    assert s["rad0"][0] == 2                      # 100k cited -> tier (60_000, 2)
 
 
 def test_render_zoom_draws_splat_disc(tmp_path):
     level = {"px": np.array([128]), "py": np.array([128]),
              "cnt": np.array([1]), "rgb": np.array([[0.1, 0.1, 0.1]], np.float32)}
     splats = {"px": np.array([128 + 3]), "py": np.array([128]),
-              "rgb": np.array([[0.0, 1.0, 0.0]], np.float32)}
+              "rgb": np.array([[0.0, 1.0, 0.0]], np.float32),
+              "rad0": np.array([2])}
     render_zoom(level, MAXZ, tmp_path, bloom=False, splats=splats)
     # MAXZ: level px are already zoom-MAXZ pixel coords; tile 0/0 holds px<256.
     # XYZ y-flip means tile row (yu=0) is written as ty = ntiles - 1.
@@ -191,6 +193,65 @@ def test_render_zoom_draws_splat_disc(tmp_path):
     img = np.asarray(Image.open(tmp_path / str(MAXZ) / "0" / f"{ntiles - 1}.png"))
     ys, xs = np.nonzero(img[:, :, 1] > 200)       # bright green disc pixels
     assert len(ys) >= 5                           # radius-2 disc, not 1 pixel
+
+
+def test_splat_tier_radii_resolved_at_load(tmp_path):
+    con = duckdb.connect()
+    web = tmp_path / "web.parquet"
+    duckdb.sql(
+        "COPY (SELECT * FROM (VALUES"
+        " ('T1', 'n', 0.5, 0.5, 1, 20, 6000, 'i', 'Medicine', FALSE),"
+        " ('T3', 'n', 0.25, 0.25, 1, 20, 250000, 'i', 'Medicine', FALSE))"
+        " t(id, display_name, xw, yw, community, works_count, cited_by_count,"
+        " institution, field, is_ring))"
+        f" TO '{web}' (FORMAT PARQUET)")
+    pal = {1: (1.0, 0.0, 0.0)}
+    s = load_splats(con, str(web), pal)
+    rad_by_px = dict(zip(s["px"].tolist(), s["rad0"].tolist()))
+    assert rad_by_px[PIX // 2] == 1                # 6k cited -> tier (5_000, 1)
+    assert rad_by_px[PIX // 4] == 3                # 250k cited -> tier (200_000, 3)
+
+
+def test_6k_splat_visible_at_z10_not_z9(tmp_path):
+    # tier (5_000, 1): rad0 == 1. At z10 (shift 0) radius stays 1; at z9
+    # (shift 1) radius drops to 0 -> no splat drawn at all.
+    level = {"px": np.array([128]), "py": np.array([128]),
+             "cnt": np.array([1]), "rgb": np.array([[0.1, 0.1, 0.1]], np.float32)}
+    splats = {"px": np.array([128]), "py": np.array([128]),
+              "rgb": np.array([[0.0, 1.0, 0.0]], np.float32),
+              "rad0": np.array([1])}
+    out10 = tmp_path / "z10"
+    render_zoom(level, MAXZ, out10, bloom=False, splats=splats)
+    ntiles10 = 1 << MAXZ
+    img10 = np.asarray(Image.open(out10 / str(MAXZ) / "0" / f"{ntiles10 - 1}.png"))
+    assert (img10[:, :, 1] > 200).sum() == 5       # radius-1 disc == 5 px
+
+    out9 = tmp_path / "z9"
+    render_zoom(level, MAXZ - 1, out9, bloom=False, splats=splats)
+    ntiles9 = 1 << (MAXZ - 1)
+    img9 = np.asarray(Image.open(out9 / str(MAXZ - 1) / "0" / f"{ntiles9 - 1}.png"))
+    assert (img9[:, :, 1] > 200).sum() == 0        # no splat at z9
+
+
+def test_250k_splat_shrinks_from_r3_to_r2_at_z9(tmp_path):
+    # tier (200_000, 3): rad0 == 3. At z10 radius stays 3 (29 px disc); at
+    # z9 radius drops by one to 2 (13 px disc), still visible.
+    level = {"px": np.array([128]), "py": np.array([128]),
+             "cnt": np.array([1]), "rgb": np.array([[0.1, 0.1, 0.1]], np.float32)}
+    splats = {"px": np.array([128]), "py": np.array([128]),
+              "rgb": np.array([[0.0, 1.0, 0.0]], np.float32),
+              "rad0": np.array([3])}
+    out10 = tmp_path / "z10"
+    render_zoom(level, MAXZ, out10, bloom=False, splats=splats)
+    ntiles10 = 1 << MAXZ
+    img10 = np.asarray(Image.open(out10 / str(MAXZ) / "0" / f"{ntiles10 - 1}.png"))
+    assert (img10[:, :, 1] > 200).sum() == 29      # radius-3 disc == 29 px
+
+    out9 = tmp_path / "z9"
+    render_zoom(level, MAXZ - 1, out9, bloom=False, splats=splats)
+    ntiles9 = 1 << (MAXZ - 1)
+    img9 = np.asarray(Image.open(out9 / str(MAXZ - 1) / "0" / f"{ntiles9 - 1}.png"))
+    assert (img9[:, :, 1] > 200).sum() == 13       # radius-2 disc == 13 px
 
 
 def test_legend_json(tmp_path):

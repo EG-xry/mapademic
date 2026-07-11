@@ -14,7 +14,7 @@ MAXZ = 10
 TILE = 256
 PIX = (2 ** MAXZ) * TILE  # 262144 virtual pixels per side at zoom MAXZ
 
-SPLAT_RADIUS = {9: 1, 10: 2}   # citation-star disc radius in px at each zoom
+SPLAT_TIERS = [(5_000, 1), (60_000, 2), (200_000, 3)]  # (min cited_by_count, radius at MAXZ)
 
 PIXELS_NAME = f"pixels_z{MAXZ}.parquet"
 
@@ -62,11 +62,20 @@ def load_level9(pixels_path: str, palette: dict[int, tuple]) -> dict:
             "cnt": t["cnt"].astype(np.int64), "rgb": lut[inv]}
 
 
-def load_splats(con, web_path: str, palette: dict, min_cited: int) -> dict:
+def load_splats(con, web_path: str, palette: dict) -> dict:
+    """Fetch all authors in the bottom (or higher) citation tier and resolve
+    each to its MAXZ-zoom splat radius (`rad0`); render_zoom derives the
+    per-zoom radius from `rad0` at render time."""
+    min_cited = SPLAT_TIERS[0][0]
+    case_sql = " ".join(
+        f"WHEN cited_by_count >= {thr} THEN {rad}"
+        for thr, rad in sorted(SPLAT_TIERS, key=lambda t: t[0], reverse=True)
+    )
     t = con.execute(
         f"""SELECT least({PIX - 1}, CAST(floor(CAST(xw AS DOUBLE) * {PIX}) AS INT)) px,
                    least({PIX - 1}, CAST(floor(CAST(yw AS DOUBLE) * {PIX}) AS INT)) py,
-                   community
+                   community,
+                   CASE {case_sql} END rad0
             FROM read_parquet('{web_path}')
             WHERE cited_by_count >= {int(min_cited)} AND NOT is_ring"""
     ).fetchnumpy()
@@ -74,7 +83,7 @@ def load_splats(con, web_path: str, palette: dict, min_cited: int) -> dict:
     rgb = np.array([palette.get(int(c), (0.6, 0.6, 0.6)) for c in comm],
                    dtype=np.float32)
     return {"px": t["px"].astype(np.int64), "py": t["py"].astype(np.int64),
-            "rgb": rgb}
+            "rgb": rgb, "rad0": t["rad0"].astype(np.int64)}
 
 
 def write_legend(stats: list[tuple[int, str | None, int, float, float]], out_path: str,
@@ -254,15 +263,18 @@ def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool,
         iy_up = py[sel] - yu * TILE
         iy = (TILE - 1) - iy_up                      # flip rows inside the tile
         img[iy, ix] = color[sel]
-        if splats is not None and z in SPLAT_RADIUS:
+        if splats is not None and z >= MAXZ - 1:      # no splats below z9
             shift = MAXZ - z
+            rad_z = splats["rad0"] - shift             # per-splat radius at this zoom
+            active = rad_z > 0                          # tier invisible below its own zoom
             spx, spy = splats["px"] >> shift, splats["py"] >> shift
-            ssel = (spx // TILE == x) & (spy // TILE == yu)
-            rad = SPLAT_RADIUS[z]
-            for sx, sy_up, srgb in zip(spx[ssel] - x * TILE,
-                                       spy[ssel] - yu * TILE,
-                                       splats["rgb"][ssel]):
+            ssel = active & (spx // TILE == x) & (spy // TILE == yu)
+            for sx, sy_up, srgb, rad in zip(spx[ssel] - x * TILE,
+                                            spy[ssel] - yu * TILE,
+                                            splats["rgb"][ssel],
+                                            rad_z[ssel]):
                 sy = (TILE - 1) - sy_up
+                rad = int(rad)
                 for dy in range(-rad, rad + 1):
                     for dx in range(-rad, rad + 1):
                         if dx*dx + dy*dy > rad*rad:
@@ -300,8 +312,10 @@ def add_parser(parser) -> None:
     parser.add_argument("--out", default=None)
     parser.add_argument("--force-aggregate", action="store_true",
                          help=f"re-aggregate {PIXELS_NAME} even if it looks fresh")
-    parser.add_argument("--splat-min-cited", type=int, default=60000,
-                         help="cited_by_count threshold for z9-10 citation splats (~p99.9)")
+    parser.add_argument("--splat-min-cited", type=int, default=SPLAT_TIERS[0][0],
+                         help="override the bottom citation-splat tier's cited_by_count"
+                              f" threshold (default {SPLAT_TIERS[0][0]}); only scales the"
+                              " r1-at-MAXZ tier, the 60k/200k tiers are fixed")
     parser.add_argument("--edges", nargs="?", const="__default__", default=None,
                          help=f"bake faint coauthor edges into z{EDGE_MINZ}-z{EDGE_MAXZ}"
                               " tiles; bare flag uses data/edges_px.parquet;"
@@ -339,8 +353,10 @@ def run(args) -> int:
     pal = {c: community_rgb(c, n, cx, cy) for c, f, n, cx, cy in stats}
     zooms = sorted(_parse_zooms(args.zooms), reverse=True)  # deep -> shallow
     level = load_level9(pixels, pal)
-    splats = (load_splats(con, web, pal, args.splat_min_cited)
-              if any(z in SPLAT_RADIUS for z in zooms) else None)
+    if args.splat_min_cited != SPLAT_TIERS[0][0]:
+        SPLAT_TIERS[0] = (args.splat_min_cited, SPLAT_TIERS[0][1])
+    splats = (load_splats(con, web, pal)
+              if any(z >= MAXZ - 1 for z in zooms) else None)
     edges = None
     if args.edges:
         # Check if any zoom in the requested range can draw edges
