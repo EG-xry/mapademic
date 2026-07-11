@@ -5,8 +5,9 @@ min(len(normalized concatenated name), 5) chars down to 2 chars, then the
 codepoint shard `_<ord(first char of normalized name) mod 128>`, then `_`.
 That lookup is unchanged. What changed is which shards an author's entry
 lives in: each author is indexed under BOTH the first token and the last
-token of their normalized name (skipped for single-token names, and when
-first token == last token). Both insertions use the same entry (the full
+token of their normalized name (skipped for single-token names, when
+first token == last token, and when the last token is under 2 chars, e.g.
+an initial). Both insertions use the same entry (the full
 spaced norm, not a rotated one) -- an entry is just findable via either
 token's shard family. An author's id can therefore appear in up to two
 shard files; the viewer dedupes by id client-side.
@@ -169,7 +170,7 @@ def build_search_shards(web: str, out_dir: Path) -> int:
         tokens = norm.split(" ")
         first_tok, last_tok = tokens[0], tokens[-1]
         shards[_bucket_key(first_tok)].append((first_tok, entry))
-        if len(tokens) > 1 and first_tok != last_tok:
+        if len(tokens) > 1 and first_tok != last_tok and len(last_tok) >= 2:
             shards[_bucket_key(last_tok)].append((last_tok, entry))
     final = {}
     for key, items in shards.items():

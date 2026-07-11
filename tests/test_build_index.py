@@ -286,6 +286,19 @@ def test_search_shards_first_equals_last_not_duplicated(tmp_path):
     assert_search_shards_lossless(out, rows)
 
 
+def test_search_shards_initial_last_token_skipped(tmp_path):
+    rows = [("Z1", "Zhang Y", 0.1, 0.1, 50)]
+    web = tmp_path / "w.parquet"
+    write_web(web, rows)
+    out = tmp_path / "index"
+    n = build_search_shards(str(web), out)
+    assert n == 1
+    zh = json.loads((out / "search/zh.json").read_text())
+    assert [e[2] for e in zh] == ["Z1"]           # findable via the first-token family
+    assert not (out / "search/_.json").exists()   # last token "y" (1 char) never routes to catch-all
+    assert_search_shards_lossless(out, rows)       # id appears exactly once
+
+
 def test_search_shards_recursive_split_surname_family(tmp_path, monkeypatch):
     monkeypatch.setattr(build_index, "SHARD_SPLIT_BYTES", 500)
     rows = [(f"S{i}", f"Xt{i} Sejnowski{i:03d}", 0.1, 0.1, 500 - i) for i in range(40)]
