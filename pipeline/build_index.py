@@ -2,7 +2,7 @@
 
 Search shard fallback order (viewer): try prefix shards from
 min(len(normalized concatenated name), 5) chars down to 2 chars, then the
-codepoint shard `_<ord(first char of normalized name) mod 32>`, then `_`.
+codepoint shard `_<ord(first char of normalized name) mod 128>`, then `_`.
 That lookup is unchanged. What changed is which shards an author's entry
 lives in: each author is indexed under BOTH the first token and the last
 token of their normalized name (skipped for single-token names, and when
@@ -26,6 +26,7 @@ from pipeline.config import apply_resource_limits, data_dir
 LABEL_ZOOMS = {6: 50, 7: 50, 8: 200, 9: 4000}   # zoom -> per-tile capacity
 SHARD_SPLIT_BYTES = 4_000_000                   # shards larger than this split by one more prefix char
 MAX_PREFIX_LEN = 5                              # deepest prefix-shard key length
+CATCHALL_BUCKETS = 128                          # codepoint-modulus for the `_` catch-all split (JS mirror: web/dev.html)
 
 
 def normalize(name: str) -> str:
@@ -132,9 +133,9 @@ def _split_catchall_shard(items: list, out: dict) -> None:
     """Split the `_` catch-all by first-char codepoint when oversized.
 
     items: list of (sort_token, entry) pairs (see _split_prefix_shard).
-    Entries go to `_<ord(first char of sort_token) % 32>` (JS mirror:
-    "_" + (norm.codePointAt(0) % 32)); entries with an empty sort_token stay
-    in `_`, which is always written.
+    Entries go to `_<ord(first char of sort_token) % CATCHALL_BUCKETS>` (JS
+    mirror: "_" + (norm.codePointAt(0) % 128)); entries with an empty
+    sort_token stay in `_`, which is always written.
     """
     if _shard_bytes([e for _, e in items]) <= SHARD_SPLIT_BYTES:
         out["_"] = [e for _, e in items]
@@ -143,7 +144,7 @@ def _split_catchall_shard(items: list, out: dict) -> None:
     parent = []
     for token, e in items:
         if token:
-            sub[f"_{ord(token[0]) % 32}"].append((token, e))
+            sub[f"_{ord(token[0]) % CATCHALL_BUCKETS}"].append((token, e))
         else:
             parent.append((token, e))
     out["_"] = [e for _, e in parent]            # always written: viewer fallback

@@ -464,7 +464,7 @@ async function fetchSearchShard(key) {
 // the first shard that exists (a 404 falls through to the next, shorter,
 // prefix). Queries that fail the gate, or that exhaust every prefix level
 // without finding a shard, fall through to the codepoint shard
-// `_<cp % 32>`, then the plain `_` catch-all.
+// `_<cp % CATCHALL_BUCKETS>`, then the plain `_` catch-all.
 // Today's on-disk shards use the recursive split (build_index.py's
 // _split_prefix_shard): a prefix shard is broken into one-char-deeper
 // children only once it exceeds SHARD_SPLIT_BYTES, up to MAX_PREFIX_LEN (5)
@@ -473,6 +473,7 @@ async function fetchSearchShard(key) {
 // small) and keep any entry whose name is exactly len(key) chars long or
 // whose next char isn't ascii-alpha -- those are what the descending 5..2
 // walk falls through to when the deepest existing child doesn't match.
+const CATCHALL_BUCKETS = 128;        // codepoint-modulus for the `_` catch-all split; mirrors pipeline/build_index.py's CATCHALL_BUCKETS
 async function lookupSearchShard(norm) {
   const concat = norm.replace(/ /g, "");
   if (/^[a-z]{2}/.test(concat)) {
@@ -484,7 +485,7 @@ async function lookupSearchShard(norm) {
     // (belt and braces against future shard-scheme drift)
   }
   if (concat.length > 0) {
-    const entries = await fetchSearchShard(`_${concat.codePointAt(0) % 32}`);
+    const entries = await fetchSearchShard(`_${concat.codePointAt(0) % CATCHALL_BUCKETS}`);
     if (entries) return entries;
   }
   return (await fetchSearchShard("_")) || [];

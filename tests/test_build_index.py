@@ -227,9 +227,9 @@ def test_search_shards_catchall_codepoint_split(tmp_path, monkeypatch):
     out = tmp_path / "index"
     n = build_search_shards(str(web), out)
     assert n == len(rows)
-    li = json.loads((out / f"search/_{ord('李') % 32}.json").read_text())
+    li = json.loads((out / f"search/_{ord('李') % build_index.CATCHALL_BUCKETS}.json").read_text())
     assert len(li) == 20
-    wang = json.loads((out / f"search/_{ord('王') % 32}.json").read_text())
+    wang = json.loads((out / f"search/_{ord('王') % build_index.CATCHALL_BUCKETS}.json").read_text())
     assert [e[2] for e in wang] == ["W0"]
     catch = json.loads((out / "search/_.json").read_text())  # parent always written
     assert [e[2] for e in catch] == ["X0"]      # empty-norm entry stays in _
@@ -243,7 +243,7 @@ def test_search_shards_catchall_not_split_below_threshold(tmp_path):
     out = tmp_path / "index"
     build_search_shards(str(web), out)
     assert (out / "search/_.json").exists()
-    assert not (out / f"search/_{ord('李') % 32}.json").exists()
+    assert not (out / f"search/_{ord('李') % build_index.CATCHALL_BUCKETS}.json").exists()
     assert_search_shards_lossless(out, rows)
 
 
@@ -311,7 +311,7 @@ def test_search_shards_catchall_last_token_nonascii(tmp_path, monkeypatch):
     out = tmp_path / "index"
     n = build_search_shards(str(web), out)
     assert n == len(rows)
-    li = json.loads((out / f"search/_{ord('李') % 32}.json").read_text())
+    li = json.loads((out / f"search/_{ord('李') % build_index.CATCHALL_BUCKETS}.json").read_text())
     assert len(li) == 20
     assert {e[2] for e in li} == {f"J{i}" for i in range(20)}
     assert_search_shards_lossless(out, rows)
