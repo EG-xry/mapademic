@@ -3,6 +3,13 @@
 Search shard fallback order (viewer): try prefix shards from
 min(len(normalized concatenated name), 5) chars down to 2 chars, then the
 codepoint shard `_<ord(first char of normalized name) mod 32>`, then `_`.
+That lookup is unchanged. What changed is which shards an author's entry
+lives in: each author is indexed under BOTH the first token and the last
+token of their normalized name (skipped for single-token names, and when
+first token == last token). Both insertions use the same entry (the full
+spaced norm, not a rotated one) -- an entry is just findable via either
+token's shard family. An author's id can therefore appear in up to two
+shard files; the viewer dedupes by id client-side.
 (The docstring doubles as argparse help, so no percent signs here.)
 """
 import json
@@ -79,51 +86,69 @@ def _shard_bytes(entries) -> int:
     return len(json.dumps(entries, ensure_ascii=False).encode("utf-8"))
 
 
-def _split_prefix_shard(key: str, entries: list, out: dict) -> None:
+def _bucket_key(token: str) -> str:
+    """2-char ascii-alpha head of a name token, else the catch-all key.
+
+    Shared by both the first-token and the last-token insertion so the two
+    families are bucketed by identical rules.
+    """
+    head = token[:2]
+    if len(head) == 2 and head.isascii() and head.isalpha():
+        return head
+    return "_"
+
+
+def _split_prefix_shard(key: str, items: list, out: dict) -> None:
     """Recursively split an alpha-ascii prefix shard by one more prefix char.
 
+    items: list of (sort_token, entry) pairs. sort_token is whichever name
+    token (first or last) routed this entry into the shard family -- the
+    split key is derived from that token, not from the entry's full norm,
+    so a last-token (surname) family recurses on the surname's own chars.
+
     A split parent is always written (possibly small) so the viewer fallback
-    chain is deterministic. Entries whose concatenated name is exactly
-    len(key) chars, or whose next-char prefix is not alpha-ascii, stay at
-    the parent level.
+    chain is deterministic. Entries whose sort_token is exactly len(key)
+    chars, or whose next-char prefix is not alpha-ascii, stay at the parent
+    level.
     """
     k = len(key)
-    if _shard_bytes(entries) <= SHARD_SPLIT_BYTES or k >= MAX_PREFIX_LEN:
-        out[key] = entries
+    if _shard_bytes([e for _, e in items]) <= SHARD_SPLIT_BYTES or k >= MAX_PREFIX_LEN:
+        out[key] = [e for _, e in items]
         return
     sub = defaultdict(list)
     parent = []
-    for e in entries:
-        concat = e[0].replace(" ", "")
-        child = concat[:k + 1]
-        if len(concat) > k and child.isascii() and child.isalpha():
-            sub[child].append(e)
+    for token, e in items:
+        child = token[:k + 1]
+        if len(token) > k and child.isascii() and child.isalpha():
+            sub[child].append((token, e))
         else:
-            parent.append(e)
-    out[key] = parent                           # always written: viewer fallback
-    for child_key, child_entries in sub.items():
-        _split_prefix_shard(child_key, child_entries, out)
+            parent.append((token, e))
+    out[key] = [e for _, e in parent]           # always written: viewer fallback
+    for child_key, child_items in sub.items():
+        _split_prefix_shard(child_key, child_items, out)
 
 
-def _split_catchall_shard(entries: list, out: dict) -> None:
+def _split_catchall_shard(items: list, out: dict) -> None:
     """Split the `_` catch-all by first-char codepoint when oversized.
 
-    Entries go to `_<ord(first char of normalized name) % 32>` (JS mirror:
-    "_" + (norm.codePointAt(0) % 32)); names that normalize to empty stay
+    items: list of (sort_token, entry) pairs (see _split_prefix_shard).
+    Entries go to `_<ord(first char of sort_token) % 32>` (JS mirror:
+    "_" + (norm.codePointAt(0) % 32)); entries with an empty sort_token stay
     in `_`, which is always written.
     """
-    if _shard_bytes(entries) <= SHARD_SPLIT_BYTES:
-        out["_"] = entries
+    if _shard_bytes([e for _, e in items]) <= SHARD_SPLIT_BYTES:
+        out["_"] = [e for _, e in items]
         return
     sub = defaultdict(list)
     parent = []
-    for e in entries:
-        if e[0]:
-            sub[f"_{ord(e[0][0]) % 32}"].append(e)
+    for token, e in items:
+        if token:
+            sub[f"_{ord(token[0]) % 32}"].append((token, e))
         else:
-            parent.append(e)
-    out["_"] = parent                           # always written: viewer fallback
-    out.update(sub)
+            parent.append((token, e))
+    out["_"] = [e for _, e in parent]            # always written: viewer fallback
+    for child_key, child_items in sub.items():
+        out[child_key] = [e for _, e in child_items]
 
 
 def build_search_shards(web: str, out_dir: Path) -> int:
@@ -139,22 +164,23 @@ def build_search_shards(web: str, out_dir: Path) -> int:
     ).fetchall()
     for name, aid, xw, yw, cited in rows:
         norm = normalize(name or "")
-        head = norm.replace(" ", "")[:2]
-        key = head if len(head) == 2 and head.isascii() and head.isalpha() else "_"
-        shards[key].append([norm, name, aid, round(xw, 6), round(yw, 6), int(cited)])
+        entry = [norm, name, aid, round(xw, 6), round(yw, 6), int(cited)]
+        tokens = norm.split(" ")
+        first_tok, last_tok = tokens[0], tokens[-1]
+        shards[_bucket_key(first_tok)].append((first_tok, entry))
+        if len(tokens) > 1 and first_tok != last_tok:
+            shards[_bucket_key(last_tok)].append((last_tok, entry))
     final = {}
-    total = 0
-    for key, entries in shards.items():
-        total += len(entries)
+    for key, items in shards.items():
         if key == "_":
-            _split_catchall_shard(entries, final)
+            _split_catchall_shard(items, final)
         else:
-            _split_prefix_shard(key, entries, final)
+            _split_prefix_shard(key, items, final)
     sdir = out_dir / "search"
     sdir.mkdir(parents=True, exist_ok=True)
     for key, entries in final.items():
         _write_json_atomic(sdir / f"{key}.json", entries)
-    return total
+    return len(rows)
 
 
 def build_id_shards(web: str, out_dir: Path) -> int:

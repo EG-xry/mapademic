@@ -1,4 +1,5 @@
 import json
+from collections import Counter
 
 import duckdb
 
@@ -23,12 +24,16 @@ def write_web(path, rows):
 
 
 def assert_search_shards_lossless(out_dir, rows):
-    """Union of all search-shard entries equals the input; no id duplicated."""
+    """Union of unique ids across all search shards equals the input ids;
+    each id appears once (single-token names, or first token == last token)
+    or twice (dual first-token/last-token bucketing)."""
     seen = []
     for p in (out_dir / "search").glob("*.json"):
         for e in json.loads(p.read_text()):
             seen.append(e[2])                    # author id
-    assert sorted(seen) == sorted(r[0] for r in rows)
+    counts = Counter(seen)
+    assert set(counts) == {r[0] for r in rows}
+    assert all(1 <= c <= 2 for c in counts.values())
 
 
 def test_normalize():
@@ -239,4 +244,74 @@ def test_search_shards_catchall_not_split_below_threshold(tmp_path):
     build_search_shards(str(web), out)
     assert (out / "search/_.json").exists()
     assert not (out / f"search/_{ord('李') % 32}.json").exists()
+    assert_search_shards_lossless(out, rows)
+
+
+def test_search_shards_dual_token_family(tmp_path):
+    rows = [("S1", "Terrence J. Sejnowski", 0.1, 0.1, 994)]
+    web = tmp_path / "w.parquet"
+    write_web(web, rows)
+    out = tmp_path / "index"
+    n = build_search_shards(str(web), out)
+    assert n == 1
+    te = json.loads((out / "search/te.json").read_text())
+    se = json.loads((out / "search/se.json").read_text())
+    assert [e[1] for e in te] == ["Terrence J. Sejnowski"]
+    assert [e[1] for e in se] == ["Terrence J. Sejnowski"]
+    assert te[0] == se[0]                        # same entry: full spaced norm, not rotated
+    assert te[0][0] == "terrence j sejnowski"
+    assert_search_shards_lossless(out, rows)
+
+
+def test_search_shards_single_token_not_duplicated(tmp_path):
+    rows = [("A1", "Prince", 0.1, 0.1, 10)]
+    web = tmp_path / "w.parquet"
+    write_web(web, rows)
+    out = tmp_path / "index"
+    n = build_search_shards(str(web), out)
+    assert n == 1
+    pr = json.loads((out / "search/pr.json").read_text())
+    assert len(pr) == 1
+    assert_search_shards_lossless(out, rows)
+
+
+def test_search_shards_first_equals_last_not_duplicated(tmp_path):
+    rows = [("A1", "Anna Anna", 0.1, 0.1, 10)]
+    web = tmp_path / "w.parquet"
+    write_web(web, rows)
+    out = tmp_path / "index"
+    build_search_shards(str(web), out)
+    an = json.loads((out / "search/an.json").read_text())
+    assert len(an) == 1
+    assert_search_shards_lossless(out, rows)
+
+
+def test_search_shards_recursive_split_surname_family(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_index, "SHARD_SPLIT_BYTES", 500)
+    rows = [(f"S{i}", f"Xt{i} Sejnowski{i:03d}", 0.1, 0.1, 500 - i) for i in range(40)]
+    rows.append(("SE0", "Yy Se", 0.2, 0.2, 5))   # last token exactly "se" (2 chars): stays at parent
+    web = tmp_path / "w.parquet"
+    write_web(web, rows)
+    out = tmp_path / "index"
+    n = build_search_shards(str(web), out)
+    assert n == len(rows)
+    se = json.loads((out / "search/se.json").read_text())
+    assert [e[2] for e in se] == ["SE0"]         # only the exact-2-char surname stays at the parent
+    sejno = json.loads((out / "search/sejno.json").read_text())
+    assert len(sejno) == 40                      # split key came from the surname, capped at MAX_PREFIX_LEN
+    assert all("sejnowski" in e[0] for e in sejno)
+    assert_search_shards_lossless(out, rows)
+
+
+def test_search_shards_catchall_last_token_nonascii(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_index, "SHARD_SPLIT_BYTES", 500)
+    rows = [(f"J{i}", f"John{i} 李{i:03d}", 0.1, 0.1, 100 - i) for i in range(20)]
+    web = tmp_path / "w.parquet"
+    write_web(web, rows)
+    out = tmp_path / "index"
+    n = build_search_shards(str(web), out)
+    assert n == len(rows)
+    li = json.loads((out / f"search/_{ord('李') % 32}.json").read_text())
+    assert len(li) == 20
+    assert {e[2] for e in li} == {f"J{i}" for i in range(20)}
     assert_search_shards_lossless(out, rows)
