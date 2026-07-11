@@ -662,7 +662,7 @@ let searchActive = -1;
 let searchGen = 0;      // invalidates stale in-flight lookups
 let searchTimer = null;
 let highlightMarker = null;
-let highlightOverlayId = null;   // bare id currently held in overlayLabeledIds by the search highlight, or null
+let highlightOverlayId = null;   // bare id currently claimed under "highlight" in overlayLabelOwners, or null
 
 // ---- Task 9 (R9): overlay-label dedupe ----
 // Bare ids that already have an explicit overlay name tag on the map (a
@@ -672,7 +672,34 @@ let highlightOverlayId = null;   // bare id currently held in overlayLabeledIds 
 // renderPath/clearPath and drawCoauthorRays/clearRays, each of which also
 // calls drawLabels() immediately after a change so the dedupe is visible
 // without waiting for the next move/zoom-triggered redraw.
-let overlayLabeledIds = new Set();
+//
+// Ownership-tracked (review fix on the first cut's plain Set): the same id
+// can be claimed by more than one overlay at once -- e.g. search A draws
+// rays that include B, then the user searches B: B briefly holds both a
+// stale "ray" claim and a fresh "highlight" claim, and drawCoauthorRays'
+// internal clearRays() runs AFTER the highlight is placed. With a plain
+// Set, that clear would delete B outright, taking the fresh highlight's
+// claim with it and bringing B's regular label back beside its highlight
+// tag (doubled name). Same shape via path hops (Connect A-B whose path
+// includes C, then search C). Per-id owner sets make a clear remove only
+// its own owner's claim, so ordering can never drop someone else's.
+const overlayLabelOwners = new Map();   // bareId -> Set of "highlight"|"path"|"ray"
+function overlayLabelAdd(owner, ids) {
+  for (const id of ids) {
+    let owners = overlayLabelOwners.get(id);
+    if (!owners) { owners = new Set(); overlayLabelOwners.set(id, owners); }
+    owners.add(owner);
+  }
+}
+function overlayLabelClear(owner, ids) {
+  for (const id of ids) {
+    const owners = overlayLabelOwners.get(id);
+    if (!owners) continue;
+    owners.delete(owner);
+    if (owners.size === 0) overlayLabelOwners.delete(id);
+  }
+}
+function overlayLabeled(id) { return overlayLabelOwners.has(id); }
 
 // ---- un-search / clear-search button ----
 // Visible whenever there's something to clear: a placed highlight or leftover
@@ -687,7 +714,7 @@ function updateSearchClearVisibility() {
 function clearSearchHighlight() {
   if (highlightMarker) { highlightMarker.remove(); highlightMarker = null; }
   if (highlightOverlayId) {
-    overlayLabeledIds.delete(highlightOverlayId);
+    overlayLabelClear("highlight", [highlightOverlayId]);
     highlightOverlayId = null;
     drawLabels();       // the regular label for this author may now reappear
   }
@@ -712,7 +739,7 @@ function setSearchHighlight(id, name, xw, yw) {
   activeA = stripId(id);
   pendingA = null;             // the real highlight owns a= from here
   highlightOverlayId = activeA;
-  overlayLabeledIds.add(highlightOverlayId);
+  overlayLabelAdd("highlight", [highlightOverlayId]);
   updateSearchClearVisibility();
   writeHash();
   drawLabels();                // hide this author's regular label immediately
@@ -1010,7 +1037,7 @@ async function resolvePathCoords(nodes) {
 
 let pathEventSource = null;
 let pathMarkers = [];
-let pathOverlayIds = [];             // bare ids currently held in overlayLabeledIds by the drawn path's node labels
+let pathOverlayIds = [];             // bare ids currently claimed under "path" in overlayLabelOwners by the drawn path's node labels
 let pathGen = 0;                     // invalidates stale in-flight renders (labelGen pattern)
 
 // ---- Task 4 (night-polish): path hop list ----
@@ -1045,7 +1072,7 @@ function clearPath() {
   pathMarkers.forEach(m => m.remove());
   pathMarkers = [];
   if (pathOverlayIds.length) {
-    pathOverlayIds.forEach(id => overlayLabeledIds.delete(id));
+    overlayLabelClear("path", pathOverlayIds);
     pathOverlayIds = [];
     drawLabels();        // regular labels for these authors may now reappear
   }
@@ -1112,7 +1139,7 @@ async function renderPath(pathSteps, hops, idA, idB) {
   });
 
   pathOverlayIds = points.map(p => stripId(p.id));
-  pathOverlayIds.forEach(id => overlayLabeledIds.add(id));
+  overlayLabelAdd("path", pathOverlayIds);
   drawLabels();           // hide these authors' regular labels immediately
 
   pathDimActive = true;
@@ -1187,7 +1214,7 @@ function setSearchStatus(text) { searchStatusEl.textContent = text || ""; }
 let searchRayGen = 0;        // invalidates stale in-flight ray renders (pathGen pattern)
 let rayEventSource = null;
 let rayMarkers = [];
-let rayOverlayIds = [];      // bare ids currently held in overlayLabeledIds by drawn ray endpoint labels
+let rayOverlayIds = [];      // bare ids currently claimed under "ray" in overlayLabelOwners by drawn ray endpoint labels
 
 function clearRays() {
   searchRayGen++;             // any in-flight drawCoauthorRays is now stale
@@ -1195,7 +1222,7 @@ function clearRays() {
   rayMarkers.forEach(m => m.remove());
   rayMarkers = [];
   if (rayOverlayIds.length) {
-    rayOverlayIds.forEach(id => overlayLabeledIds.delete(id));
+    overlayLabelClear("ray", rayOverlayIds);
     rayOverlayIds = [];
     drawLabels();       // regular labels for these authors may now reappear
   }
@@ -1295,7 +1322,7 @@ async function drawCoauthorRays(bareId, xw, yw) {
     });
 
     rayOverlayIds = endpoints.map(p => p.id);
-    rayOverlayIds.forEach(id => overlayLabeledIds.add(id));
+    overlayLabelAdd("ray", rayOverlayIds);
     drawLabels();          // hide these authors' regular labels immediately
 
     setSearchStatus(`${endpoints.length} coauthors shown (${offMap} off-map)`);
@@ -1550,7 +1577,7 @@ async function drawLabels() {
     // Overlay dedupe (R9): an author already carrying an explicit overlay
     // name tag (search highlight, path node, coauthor-ray endpoint) skips
     // their regular label so the name never renders twice.
-    if (overlayLabeledIds.has(stripId(id))) continue;
+    if (overlayLabeled(stripId(id))) continue;
     const pt = map.project(toLngLat(xw, yw));
     if (pt.x < -50 || pt.y < -20 || pt.x > innerWidth + 50 || pt.y > innerHeight + 20) continue;
     const size = 11 + Math.min(6, Math.log10(1 + cited));       // 11-17 px
