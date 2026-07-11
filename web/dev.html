@@ -184,6 +184,13 @@ const API_BASE = "http://localhost:8000";
 // owns location.hash exclusively so the extra a=/p= params survive.
 let activeA = null;         // bare id of the active search highlight, or null
 let activeP = null;         // [bareA, bareB] of the active path, or null
+// a=/p= from the initial hash, carried by writeHash until the real state
+// takes over (highlight placed / path drawn) or the user discards it
+// (Escape, Clear, editing a Connect input). Without these, the initial
+// jumpTo's synchronous moveend -> writeHash would wipe a=/p= from the URL
+// before restoreFromHash runs -- permanently, in the backend-offline case.
+let pendingA = null;
+let pendingP = null;
 
 function parseHash() {
   const raw = location.hash.replace(/^#/, "");
@@ -191,7 +198,14 @@ function parseHash() {
   const parts = raw.split("&");
   const m = /^(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)$/.exec(parts[0]);
   const out = {};
-  if (m) out.view = { zoom: Number(m[1]), lat: Number(m[2]), lng: Number(m[3]) };
+  if (m) {
+    const zoom = Number(m[1]), lat = Number(m[2]), lng = Number(m[3]);
+    // Out-of-range views (hand-mangled hashes) are dropped rather than fed
+    // to jumpTo, where an invalid LngLat would throw mid-"load" handler.
+    if (zoom >= 0 && zoom <= 13 && Math.abs(lat) <= 85 && Math.abs(lng) <= 180) {
+      out.view = { zoom, lat, lng };
+    }
+  }
   for (let i = 1; i < parts.length; i++) {
     const eq = parts[i].indexOf("=");
     if (eq < 0) continue;
@@ -208,12 +222,18 @@ function parseHash() {
 function writeHash() {
   const c = map.getCenter();
   let h = `#${map.getZoom().toFixed(2)}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`;
-  if (activeA) h += `&a=${activeA}`;
-  if (activeP) h += `&p=${activeP[0]},${activeP[1]}`;
+  const a = activeA || pendingA;
+  const p = activeP || pendingP;
+  if (a) h += `&a=${a}`;
+  if (p) h += `&p=${p[0]},${p[1]}`;
   history.replaceState(null, "", h);
 }
 
 const initialHash = parseHash();
+if (initialHash) {
+  if (initialHash.a) pendingA = stripId(initialHash.a);
+  if (initialHash.p) pendingP = initialHash.p.map(stripId);
+}
 
 const map = new maplibregl.Map({
   container: "map",
@@ -232,6 +252,15 @@ const map = new maplibregl.Map({
   center: [0, 0], zoom: 1, minZoom: 0, maxZoom: 13, renderWorldCopies: false
 });
 map.addControl(new maplibregl.NavigationControl());
+
+// Single guarded gateway for every setPaintProperty on the dots layer: a
+// pre-load call (slider drag, stray clearPath) must not throw. Anything
+// skipped here is reapplied by the map "load" handler (applyDisplayPaint)
+// or is the layer's default already (raster-opacity 1.0).
+function safePaint(prop, v) {
+  if (!map.isStyleLoaded()) return;
+  map.setPaintProperty("dots", prop, v);
+}
 
 const tileCache = new Map();         // "z/x/y" -> {l:[...]} or null
 async function fetchTile(z, x, y) {
@@ -358,6 +387,7 @@ function setSearchHighlight(id, name, xw, yw) {
   highlightMarker = new maplibregl.Marker({ element: el })
     .setLngLat(toLngLat(xw, yw)).addTo(map);
   activeA = stripId(id);
+  pendingA = null;             // the real highlight owns a= from here
   writeHash();
 }
 
@@ -438,6 +468,7 @@ searchInput.addEventListener("keydown", ev => {
     closeSearchDropdown();
     clearSearchHighlight();
     activeA = null;
+    pendingA = null;
     writeHash();
   }
 });
@@ -542,8 +573,10 @@ const connectClear = document.getElementById("connect-clear");
 const connectStatus = document.getElementById("connect-status");
 
 let connectA = null, connectB = null;    // {id, name, xw, yw} once selected
-createAuthorLookup(connectAInput, connectADropdown, sel => { connectA = sel; });
-createAuthorLookup(connectBInput, connectBDropdown, sel => { connectB = sel; });
+// Editing either Connect input discards any not-yet-run p= from the hash:
+// the shared pair no longer matches what the user is about to run.
+createAuthorLookup(connectAInput, connectADropdown, sel => { connectA = sel; pendingP = null; });
+createAuthorLookup(connectBInput, connectBDropdown, sel => { connectB = sel; pendingP = null; });
 
 function setPathStatus(text) { connectStatus.textContent = text || ""; }
 
@@ -619,12 +652,14 @@ function clearPath() {
   pathMarkers = [];
   if (map.getLayer("path-line")) map.removeLayer("path-line");
   if (map.getSource("path")) map.removeSource("path");
-  map.setPaintProperty("dots", "raster-opacity", 1.0);
+  safePaint("raster-opacity", 1.0);
   setPathStatus("");
   activeP = null;
   writeHash();
 }
-connectClear.addEventListener("click", clearPath);
+// pendingP is only discarded on an explicit user Clear -- Go's internal
+// clearPath keeps it, so a failed run still leaves p= in the URL.
+connectClear.addEventListener("click", () => { pendingP = null; clearPath(); });
 
 async function renderPath(pathSteps, hops, idA, idB) {
   const gen = pathGen;               // stale once clearPath / a newer Go bumps it
@@ -665,7 +700,7 @@ async function renderPath(pathSteps, hops, idA, idB) {
     return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
   });
 
-  map.setPaintProperty("dots", "raster-opacity", 0.45);
+  safePaint("raster-opacity", 0.45);
 
   const bounds = coords.reduce(
     (b, c) => b.extend(c),
@@ -674,6 +709,7 @@ async function renderPath(pathSteps, hops, idA, idB) {
   map.fitBounds(bounds, { padding: 60, maxZoom: 11 });
 
   activeP = [idA, idB];
+  pendingP = null;             // the drawn path owns p= from here
   writeHash();
   setPathStatus(`${hops} hops`);
 }
@@ -793,14 +829,13 @@ function saveDisplaySettings() {
 }
 
 // Single choke point for all display-panel paint writes (carry-over fix from
-// Task 1 review): guarded so a pre-load slider drag can't throw. displaySettings
-// is still updated and saved immediately; the paint just applies once the style
-// is ready (the map "load" handler calls this again, catching anything missed).
+// Task 1 review): safePaint no-ops pre-load so a slider drag can't throw.
+// displaySettings is still updated and saved immediately; the paint just
+// applies once the style is ready (the "load" handler calls this again).
 function applyDisplayPaint() {
-  if (!map.isStyleLoaded()) return;
-  map.setPaintProperty("dots", "raster-brightness-max", displaySettings.brightness);
-  map.setPaintProperty("dots", "raster-contrast", displaySettings.contrast);
-  map.setPaintProperty("dots", "raster-saturation", displaySettings.saturation);
+  safePaint("raster-brightness-max", displaySettings.brightness);
+  safePaint("raster-contrast", displaySettings.contrast);
+  safePaint("raster-saturation", displaySettings.saturation);
 }
 
 const dpGear = document.getElementById("display-gear");
@@ -990,7 +1025,10 @@ map.on("click", async ev => {
 map.on("load", () => {
   if (initialHash && initialHash.view) {
     const v = initialHash.view;
-    map.jumpTo({ center: [v.lng, v.lat], zoom: v.zoom });
+    // parseHash already range-checks, but a throw here would kill the rest
+    // of the load handler (labels/regions/restore), so belt and braces.
+    try { map.jumpTo({ center: [v.lng, v.lat], zoom: v.zoom }); }
+    catch { /* keep the default view */ }
   }
   applyDisplayPaint();
   drawLabels();
@@ -1009,7 +1047,8 @@ shareBtn.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(url);
   } catch {
-    prompt("Copy this link:", url);
+    prompt("Copy this link:", url);   // the prompt itself is the feedback
+    return;
   }
   clearTimeout(shareBtnTimer);
   shareBtn.textContent = "copied";
