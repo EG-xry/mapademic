@@ -301,6 +301,10 @@
       <input id="dp-regions" type="checkbox" checked>
       Region names
     </label>
+    <label class="dp-check">
+      <input id="dp-vector-points" type="checkbox">
+      Vector points (beta)
+    </label>
     <button id="display-reset" type="button">Reset</button>
   </div>
 </div>
@@ -1321,7 +1325,7 @@ function collides(placed, x, y, w, h) {
 // ---- Task 1 (night-polish): display settings panel ----
 // Sliders only ever touch brightness/contrast/saturation; raster-opacity stays
 // owned by renderPath/clearPath (path-mode dimming) so the two stay orthogonal.
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true };
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, vectorPoints: false };
 const DISPLAY_KEY = "mapademic.display";
 
 function loadDisplaySettings() {
@@ -1359,6 +1363,7 @@ const dpSaturation = document.getElementById("dp-saturation");
 const dpSaturationN = document.getElementById("dp-saturation-n");
 const dpDensityRadios = document.querySelectorAll('input[name="dp-density"]');
 const dpRegions = document.getElementById("dp-regions");
+const dpVectorPoints = document.getElementById("dp-vector-points");
 const dpReset = document.getElementById("display-reset");
 
 function syncDisplayUI() {
@@ -1370,6 +1375,7 @@ function syncDisplayUI() {
   dpSaturationN.textContent = displaySettings.saturation.toFixed(2);
   dpDensityRadios.forEach(r => { r.checked = Number(r.value) === displaySettings.labelDensity; });
   dpRegions.checked = displaySettings.regionNames;
+  dpVectorPoints.checked = displaySettings.vectorPoints;
 }
 syncDisplayUI();
 
@@ -1407,6 +1413,11 @@ dpRegions.addEventListener("change", () => {
   saveDisplaySettings();
   drawRegions();
 });
+dpVectorPoints.addEventListener("change", () => {
+  displaySettings.vectorPoints = dpVectorPoints.checked;
+  saveDisplaySettings();
+  updateVectorPoints();
+});
 dpReset.addEventListener("click", () => {
   displaySettings = { ...DISPLAY_DEFAULTS };
   try { localStorage.removeItem(DISPLAY_KEY); } catch { /* ignore storage errors */ }
@@ -1414,6 +1425,7 @@ dpReset.addEventListener("click", () => {
   applyDisplayPaint();
   drawLabels();
   drawRegions();
+  updateVectorPoints();
 });
 
 let markers = [];
@@ -1472,6 +1484,86 @@ function drawRegions() {
     el.style.fontSize = size + "px";
     regionMarkers.push(new maplibregl.Marker({ element: el })
       .setLngLat(toLngLat(r.xw, r.yw)).addTo(map));
+  }
+}
+
+// ---- Vector points experiment v0 (R7) ----
+// docs/superpowers/plans/2026-07-11-vector-points-experiment.md. Prototype:
+// render the same z9 label-tile entries used for labels/hover as a MapLibre
+// GeoJSON circle layer, so points stay crisp (resolution-independent) at
+// deep zoom instead of relying on raster upscaling. Reuses fetchTile/
+// visibleTiles exactly like drawLabels; only active at zoom >= 10.25, where
+// a z9 tile already covers a large-enough screen area that the label tiles'
+// 4000/tile cap isn't a visible gap.
+const VECTOR_POINTS_MIN_ZOOM = 10.25;
+// Hard cap on rendered features regardless of how many tiles are visible --
+// keeps the GeoJSON source (and MapLibre's rebuild of it) bounded on a very
+// zoomed-out-but-still->=10.25 view spanning many dense tiles. Entries are
+// sorted by citations desc first, so anything trimmed is always the
+// lowest-cited tail, not a random subset.
+const VECTOR_POINTS_CAP = 60000;
+let vectorGen = 0;           // invalidates stale in-flight tile fetches (labelGen pattern)
+async function updateVectorPoints() {
+  const gen = ++vectorGen;
+  if (!displaySettings.vectorPoints || map.getZoom() < VECTOR_POINTS_MIN_ZOOM) {
+    if (map.getLayer("vector-points")) map.removeLayer("vector-points");
+    if (map.getSource("vector-points")) map.removeSource("vector-points");
+    return;
+  }
+  const lists = await Promise.all(visibleTiles(9).map(([x, y]) => fetchTile(9, x, y)));
+  if (gen !== vectorGen) return;     // a newer call (toggle/move/zoom) owns the source now
+  let entries = lists.filter(Boolean).flatMap(t => t.l);
+  if (entries.length > VECTOR_POINTS_CAP) {
+    entries.sort((a, b) => b[4] - a[4]);           // cited desc
+    entries = entries.slice(0, VECTOR_POINTS_CAP); // keep the highest-cited, drop the tail
+  }
+  const data = {
+    type: "FeatureCollection",
+    features: entries.map(([name, id, xw, yw, cited]) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: toLngLat(xw, yw).toArray() },
+      properties: { cited },
+    })),
+  };
+  const src = map.getSource("vector-points");
+  if (src) {
+    src.setData(data);
+  } else {
+    map.addSource("vector-points", { type: "geojson", data });
+  }
+  if (!map.getLayer("vector-points")) {
+    // Insert just above the raster ("dots") layer, below whatever else
+    // already sits above it (path-line / coauthor-rays, when present) --
+    // read the live style order instead of hardcoding, since those overlay
+    // layers are added/removed dynamically by renderPath/drawCoauthorRays.
+    const layers = map.getStyle().layers;
+    const dotsIdx = layers.findIndex(l => l.id === "dots");
+    const beforeId = dotsIdx >= 0 && dotsIdx + 1 < layers.length ? layers[dotsIdx + 1].id : undefined;
+    map.addLayer({
+      id: "vector-points",
+      type: "circle",
+      source: "vector-points",
+      paint: {
+        // radius = (zoom-interpolated base px) * (sqrt(cited)-interpolated factor),
+        // so highly-cited authors render as slightly larger dots without the
+        // raster splat treatment. MapLibre only allows a "zoom" expression as
+        // the input of a top-level step/interpolate, so the zoom-interpolate
+        // has to be the outer expression, with the (zoom-independent)
+        // data-driven factor nested inside its stop outputs instead of the
+        // other way around -- a bare ["*", zoomInterpolate, dataInterpolate]
+        // throws "zoom expression may only be used... as a top-level
+        // interpolate" at addLayer time.
+        "circle-radius": [
+          "interpolate", ["linear"], ["zoom"],
+          10.25, ["*", 1.5, ["interpolate", ["linear"], ["sqrt", ["get", "cited"]], 0, 0.8, 250, 1.6, 450, 2.2]],
+          11, ["*", 3, ["interpolate", ["linear"], ["sqrt", ["get", "cited"]], 0, 0.8, 250, 1.6, 450, 2.2]],
+        ],
+        "circle-color": "#cfd6d2",
+        "circle-opacity": 0.85,
+        "circle-stroke-width": 0.5,
+        "circle-stroke-color": "#0a0a0c",
+      },
+    }, beforeId);
   }
 }
 
@@ -1664,6 +1756,7 @@ map.on("load", () => {
   applyDisplayPaint();
   drawLabels();
   drawRegions();
+  updateVectorPoints();
   restoreFromHash(initialHash);   // async; resolves a=/p= independently of view restore
 });
 // ---- Task 5 (data-pipeline): live label/region updates while panning/zooming ----
@@ -1696,7 +1789,7 @@ function throttle(fn, wait) {
     }
   };
 }
-const throttledMoveRedraw = throttle(() => { drawLabels(); drawRegions(); }, 180);
+const throttledMoveRedraw = throttle(() => { drawLabels(); drawRegions(); updateVectorPoints(); }, 180);
 map.on("move", throttledMoveRedraw);
 map.on("moveend", () => { drawLabels(); drawRegions(); writeHash(); });
 map.on("zoomend", () => { drawLabels(); drawRegions(); });
