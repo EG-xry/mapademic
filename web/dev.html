@@ -268,7 +268,9 @@
           faint grey web visible at z8-9 is repeat coauthorships - at max
           zoom the map stays clean, and you see a researcher's coauthorships
           by searching them or via the info card's Coauthors button. Grey
-          dust is authors without retained coauthor links.</p>
+          dust is authors without retained coauthor links. The gear's Vector
+          points overlay sizes and colors dots by citations and community at
+          every zoom, not just up close.</p>
       </section>
       <section>
         <h3>Controls</h3>
@@ -337,13 +339,10 @@
       <input id="dp-regions" type="checkbox" checked>
       Region names
     </label>
+    <!-- R12b: category-boundaries UI removed (pipeline builder + data/index/boundaries.json stay dormant on disk). -->
     <label class="dp-check">
       <input id="dp-vector-points" type="checkbox">
-      Vector points at deep zoom
-    </label>
-    <label class="dp-check">
-      <input id="dp-boundaries" type="checkbox">
-      Category boundaries
+      Vector points
     </label>
     <div class="dp-row">
       <div class="dp-row-head"><label for="dp-size-contrast">Citation size contrast</label><span id="dp-size-contrast-n" class="n"></span></div>
@@ -1472,9 +1471,13 @@ function collides(placed, x, y, w, h) {
 // Sliders only ever touch brightness/contrast/saturation; raster-opacity stays
 // owned by updateRasterOpacity() (see near safePaint above), which renderPath/
 // clearPath and the vector-points toggle all defer to, so the three stay orthogonal.
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, vectorPoints: true, labelMode: "normal", sizeContrast: 1.0, boundaries: false };
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, vectorPoints: true, labelMode: "normal", sizeContrast: 1.0 };
 const DISPLAY_KEY = "mapademic.display";
 
+// R12b: a stale localStorage value still carrying the removed "boundaries"
+// key just spreads in as an extra unused property on displaySettings below
+// (loadDisplaySettings' `{...DISPLAY_DEFAULTS, ...JSON.parse(raw)}`) -- no
+// code reads it anymore, so it's silently harmless rather than an error.
 function loadDisplaySettings() {
   try {
     const raw = localStorage.getItem(DISPLAY_KEY);
@@ -1512,7 +1515,6 @@ const dpDensityRadios = document.querySelectorAll('input[name="dp-density"]');
 const dpLabelModeRadios = document.querySelectorAll('input[name="dp-label-mode"]');
 const dpRegions = document.getElementById("dp-regions");
 const dpVectorPoints = document.getElementById("dp-vector-points");
-const dpBoundaries = document.getElementById("dp-boundaries");
 const dpSizeContrast = document.getElementById("dp-size-contrast");
 const dpSizeContrastN = document.getElementById("dp-size-contrast-n");
 const dpReset = document.getElementById("display-reset");
@@ -1528,7 +1530,6 @@ function syncDisplayUI() {
   dpLabelModeRadios.forEach(r => { r.checked = r.value === displaySettings.labelMode; });
   dpRegions.checked = displaySettings.regionNames;
   dpVectorPoints.checked = displaySettings.vectorPoints;
-  dpBoundaries.checked = displaySettings.boundaries;
   dpSizeContrast.value = displaySettings.sizeContrast;
   dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
 }
@@ -1580,11 +1581,6 @@ dpVectorPoints.addEventListener("change", () => {
   updateVectorPoints();
   updateRasterOpacity();
 });
-dpBoundaries.addEventListener("change", () => {
-  displaySettings.boundaries = dpBoundaries.checked;
-  saveDisplaySettings();
-  updateBoundaries();
-});
 dpSizeContrast.addEventListener("input", () => {
   displaySettings.sizeContrast = Number(dpSizeContrast.value);
   dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
@@ -1601,7 +1597,6 @@ dpReset.addEventListener("click", () => {
   updateVectorPoints();
   applyVectorRadius();
   updateRasterOpacity();
-  updateBoundaries();
 });
 
 let markers = [];
@@ -1680,15 +1675,24 @@ function drawRegions() {
   }
 }
 
-// ---- Vector points v1 (R8) ----
-// docs/superpowers/plans/2026-07-11-vector-points-experiment.md. Render the
-// same z9 label-tile entries used for labels/hover as a MapLibre GeoJSON
-// circle layer, so points stay crisp (resolution-independent) at deep zoom
-// instead of relying on raster upscaling. Reuses fetchTile/visibleTiles
-// exactly like drawLabels; only active at zoom >= 10.25, where a z9 tile
-// already covers a large-enough screen area that the label tiles' 4000/tile
-// cap isn't a visible gap. Raster-opacity handoff at that threshold is owned
-// by updateRasterOpacity() (see near safePaint), not this function.
+// ---- Vector points (R8, extended to all zooms in R12b) ----
+// docs/superpowers/plans/2026-07-11-vector-points-experiment.md. Renders
+// author entries as a MapLibre GeoJSON circle layer, so points stay crisp
+// (resolution-independent) instead of relying on raster upscaling. Two zoom
+// regimes hand off at VECTOR_POINTS_MIN_ZOOM (see updateVectorPoints below):
+//   - z >= 10.25: the label-tile path reuses fetchTile/visibleTiles (the
+//     same z9 tiles labels/hover use), where a single tile already covers a
+//     large-enough screen area that the 4000/tile cap isn't a visible gap.
+//     Raster-opacity handoff at this threshold is owned by
+//     updateRasterOpacity() (see near safePaint), not this function.
+//   - z < 10.25 (R12b -- Eric: sizing was invisible here because raster
+//     pixels are fixed size, and isolate mode's shard dots "replicate that
+//     globally"): the global top_authors.json shard (50k, citation-sorted)
+//     renders instead, capped by shardCapForZoom same as isolate's
+//     per-community shard. The raster is NOT dimmed for this -- see
+//     updateRasterOpacity, whose vectorActive check stays gated on
+//     z >= VECTOR_POINTS_MIN_ZOOM, so this overlay only ever complements the
+//     raster, never replaces it.
 const VECTOR_POINTS_MIN_ZOOM = 10.25;
 // Hard cap on rendered features regardless of how many tiles are visible --
 // keeps the GeoJSON source (and MapLibre's rebuild of it) bounded on a very
@@ -1705,14 +1709,12 @@ const VECTOR_POINTS_CAP = 60000;
 const communityColors = new Map();
 const VECTOR_POINT_FALLBACK_COLOR = "#565660";
 
-// Shared layer-anchoring helper (R10b): returns the beforeId to pass to
+// Shared layer-anchoring helper: returns the beforeId to pass to
 // map.addLayer so a new layer lands directly above `afterId` (which must
 // already exist in the style), pushing whatever previously sat right above
 // `afterId` up by one slot. Used to keep a fixed stack order -- dots <
-// community-boundaries < vector-points < path-line/coauthor-rays (those two
-// are always appended with no beforeId, so they stay on top regardless) --
-// no matter which of community-boundaries/vector-points gets added or
-// removed first.
+// vector-points < path-line/coauthor-rays (the latter two are always
+// appended with no beforeId, so they stay on top regardless).
 function beforeIdAbove(afterId) {
   const layers = map.getStyle().layers;
   const idx = layers.findIndex(l => l.id === afterId);
@@ -1738,6 +1740,22 @@ async function fetchCommunityShard(community) {
 // the full shard well before z7 per the task spec.
 function shardCapForZoom(z) {
   return Math.min(20000, Math.round(300 * Math.pow(4, z - 1)));
+}
+
+// Global top-authors shard (R12b): the mid-zoom (<10.25) counterpart of
+// isolate's per-community shard, fetched once and cached the same way
+// fetchCommunityShard is -- see updateVectorPoints' globalMidZoomActive
+// branch. Pre-sorted citations-desc by the pipeline, same as community
+// shards, so shardEntriesToFeatures' slice-from-the-front cap keeps the
+// highest-cited entries.
+let topAuthorsPromise = null;
+function fetchTopAuthors() {
+  if (!topAuthorsPromise) {
+    topAuthorsPromise = fetch("/data/index/top_authors.json")
+      .then(r => r.ok ? r.json() : [])
+      .catch(() => []);
+  }
+  return topAuthorsPromise;
 }
 
 // ---- Task 9 (R9) / R10a / R11a: citation size contrast knob ----
@@ -1771,6 +1789,12 @@ function shardCapForZoom(z) {
 // stop's output, not wrap the whole interpolate -- MapLibre only allows a
 // "zoom" expression as a top-level interpolate/step input (see the addLayer
 // comment above), so the zoom-interpolate must stay the outermost expression.
+// R12b: extended below 10.25 now that the global top_authors shard renders
+// at mid zooms too. Outer-multiply stops at z2 (1.2px) and z6 (1.8px) anchor
+// the low end so the contrast slider still has visible room to work with
+// well before the label-tile handoff, instead of clamping to the 10.25
+// anchor's 1.5px the whole way down; the existing z10.25/z11 stops (and
+// their R11a-tuned values) are unchanged.
 const VECTOR_RADIUS_BASE_FACTORS = [0.6, 0.85, 1.2, 2.0, 3.0, 4.0];   // R11a distribution-calibrated stop outputs, contrast 1.0
 const VECTOR_RADIUS_SQRT_STOPS = [0, 18, 55, 130, 250, 450];          // sqrt(cited) stops these factors sit at
 function vectorRadiusEffectiveFactor(base, contrast) {
@@ -1784,6 +1808,8 @@ function buildVectorRadiusExpression(contrast) {
   });
   return [
     "interpolate", ["linear"], ["zoom"],
+    2, ["max", 0.7, ["*", 1.2, factorExpr]],
+    6, ["max", 0.7, ["*", 1.8, factorExpr]],
     10.25, ["max", 0.7, ["*", 1.5, factorExpr]],
     11, ["max", 0.7, ["*", 3.5, factorExpr]],
   ];
@@ -1798,6 +1824,30 @@ function applyVectorRadius() {
 }
 
 let vectorGen = 0;           // invalidates stale in-flight tile/shard fetches (labelGen pattern)
+// community (label-tile/shard entry field 5) -> raster palette hex, resolved
+// here rather than inline everywhere it's needed. Tail/unknown communities
+// (not one of the 37) and stale-cached label tiles from before the
+// community-id rebuild landed (entry[5] undefined) both fall back to dust
+// grey, matching the raster's own tail-author color.
+function colorForCommunity(community) {
+  return communityColors.get(community) || VECTOR_POINT_FALLBACK_COLOR;
+}
+function entryToFeature([name, id, xw, yw, cited, community]) {
+  return {
+    type: "Feature",
+    geometry: { type: "Point", coordinates: toLngLat(xw, yw).toArray() },
+    properties: { cited, color: colorForCommunity(community) },
+  };
+}
+// Shared by isolate mode's community-shard render and the R12b global
+// mid-zoom overlay -- "isolate mode without the filter and without the dim":
+// caps an already citations-desc-sorted entries list to shardCapForZoom(z)
+// and turns it into GeoJSON features.
+function shardEntriesToFeatures(entries, z) {
+  const cap = shardCapForZoom(z);
+  return entries.slice(0, cap).map(entryToFeature);
+}
+
 async function updateVectorPoints() {
   const gen = ++vectorGen;
   const z = map.getZoom();
@@ -1813,28 +1863,42 @@ async function updateVectorPoints() {
   // is independent of the vectorPoints display toggle.
   const shardActive = isolateCommunity != null && z < VECTOR_POINTS_MIN_ZOOM;
   setIsolateShardActive(shardActive);
-  if (!vectorActive && !shardActive) {
+  // R12b: below vector-points zoom, when vector points are enabled and no
+  // isolate is active, render the global top_authors.json shard instead --
+  // gated on isolateCommunity == null so isolate always takes precedence
+  // when active (its dim + filter behavior is unchanged). Unlike shardActive,
+  // this DOES depend on the vectorPoints display toggle: it's the toggle's
+  // own mid-zoom rendering, not an isolate side effect. updateRasterOpacity's
+  // vectorActive check stays gated on z >= VECTOR_POINTS_MIN_ZOOM, so this
+  // path never dims the raster -- it only ever complements it.
+  const globalMidZoomActive = displaySettings.vectorPoints && !vectorActive && isolateCommunity == null;
+  if (!vectorActive && !shardActive && !globalMidZoomActive) {
     if (map.getLayer("vector-points")) map.removeLayer("vector-points");
     if (map.getSource("vector-points")) map.removeSource("vector-points");
     return;
   }
 
-  let entries;
+  let features;
   if (shardActive) {
     const shard = await fetchCommunityShard(isolateCommunity);
     if (gen !== vectorGen) return;   // a newer call (isolate change/move/zoom) owns the source now
-    const cap = shardCapForZoom(z);
     // Shard entries are [name, id, xw, yw, cited] (already cited-desc from
-    // the pipeline, no community field -- it's implicit in the shard file),
-    // so slicing the front keeps the highest-cited; community is filled in
-    // here to match the label-tile entry shape the feature mapping below
+    // the pipeline, no community field -- it's implicit in the shard file);
+    // community is filled in here to match the entry shape entryToFeature
     // expects.
-    entries = (shard || []).slice(0, cap)
+    const entries = (shard || [])
       .map(([name, id, xw, yw, cited]) => [name, id, xw, yw, cited, isolateCommunity]);
+    features = shardEntriesToFeatures(entries, z);
+  } else if (globalMidZoomActive) {
+    // top_authors.json entries already carry community (field 5), unlike
+    // community shards, so no remapping is needed before capping.
+    const entries = await fetchTopAuthors();
+    if (gen !== vectorGen) return;   // a newer call (toggle/move/zoom) owns the source now
+    features = shardEntriesToFeatures(entries, z);
   } else {
     const lists = await Promise.all(visibleTiles(9).map(([x, y]) => fetchTile(9, x, y)));
     if (gen !== vectorGen) return;     // a newer call (toggle/move/zoom) owns the source now
-    entries = lists.filter(Boolean).flatMap(t => t.l);
+    let entries = lists.filter(Boolean).flatMap(t => t.l);
     // Task R10a: community isolate v1 -- filters vector points to the isolated
     // community. Only reached here once zoom >= VECTOR_POINTS_MIN_ZOOM, since
     // shardActive above takes over below it.
@@ -1845,18 +1909,9 @@ async function updateVectorPoints() {
       entries.sort((a, b) => b[4] - a[4]);           // cited desc
       entries = entries.slice(0, VECTOR_POINTS_CAP); // keep the highest-cited, drop the tail
     }
+    features = entries.map(entryToFeature);
   }
-  const data = {
-    type: "FeatureCollection",
-    // community (entry[5]) is undefined for stale-cached tiles fetched before
-    // the community-id rebuild landed; communityColors.get(undefined) misses
-    // same as an unknown community id, so both fall back to dust grey below.
-    features: entries.map(([name, id, xw, yw, cited, community]) => ({
-      type: "Feature",
-      geometry: { type: "Point", coordinates: toLngLat(xw, yw).toArray() },
-      properties: { cited, color: communityColors.get(community) || VECTOR_POINT_FALLBACK_COLOR },
-    })),
-  };
+  const data = { type: "FeatureCollection", features };
   const src = map.getSource("vector-points");
   if (src) {
     src.setData(data);
@@ -1864,12 +1919,11 @@ async function updateVectorPoints() {
     map.addSource("vector-points", { type: "geojson", data });
   }
   if (!map.getLayer("vector-points")) {
-    // Anchored directly above community-boundaries (or above "dots" when
-    // boundaries aren't on the map), below whatever else already sits above
+    // Anchored directly above "dots", below whatever else already sits above
     // that (path-line / coauthor-rays, when present) -- read the live style
     // order via beforeIdAbove instead of hardcoding, since those overlay
     // layers are added/removed dynamically by renderPath/drawCoauthorRays.
-    const beforeId = beforeIdAbove(map.getLayer("community-boundaries") ? "community-boundaries" : "dots");
+    const beforeId = beforeIdAbove("dots");
     map.addLayer({
       id: "vector-points",
       type: "circle",
@@ -1893,67 +1947,6 @@ async function updateVectorPoints() {
         "circle-opacity": 0.9,
         "circle-stroke-width": 0.5,
         "circle-stroke-color": "#0a0a0c",
-      },
-    }, beforeId);
-  }
-}
-
-// ---- Category boundaries (R10b, curved in R11b) ----
-// Solid lines tracing the majority-community raster grid's boundary edges
-// (build_community_boundaries), fetched once and cached converted to
-// LngLat -- the source data's xw/yw are world coords in the same convention
-// as every other xw/yw in this file (label tiles, region names, shard
-// entries), so they need the same toLngLat (xw, 1-yw) Mercator conversion.
-let boundariesDataPromise = null;
-function fetchBoundariesData() {
-  if (!boundariesDataPromise) {
-    boundariesDataPromise = fetch("/data/index/boundaries.json")
-      .then(r => r.ok ? r.json() : null)
-      .then(geojson => {
-        if (!geojson) return null;
-        return {
-          type: "FeatureCollection",
-          features: geojson.features.map(f => ({
-            type: "Feature",
-            properties: f.properties,
-            geometry: {
-              type: f.geometry.type,
-              coordinates: f.geometry.coordinates.map(
-                line => line.map(([xw, yw]) => toLngLat(xw, yw).toArray())
-              ),
-            },
-          })),
-        };
-      })
-      .catch(() => null);
-  }
-  return boundariesDataPromise;
-}
-
-async function updateBoundaries() {
-  if (!displaySettings.boundaries) {
-    if (map.getLayer("community-boundaries")) map.removeLayer("community-boundaries");
-    if (map.getSource("community-boundaries")) map.removeSource("community-boundaries");
-    return;
-  }
-  const data = await fetchBoundariesData();
-  if (!data || !displaySettings.boundaries) return;   // toggled off while fetching, or fetch failed
-  if (!map.getSource("community-boundaries")) {
-    map.addSource("community-boundaries", { type: "geojson", data });
-  }
-  if (!map.getLayer("community-boundaries")) {
-    // Anchored directly above "dots", below vector-points (if present) --
-    // see beforeIdAbove's comment for the fixed dots < community-boundaries <
-    // vector-points < path-line/coauthor-rays stack order.
-    const beforeId = map.getLayer("vector-points") ? "vector-points" : beforeIdAbove("dots");
-    map.addLayer({
-      id: "community-boundaries",
-      type: "line",
-      source: "community-boundaries",
-      paint: {
-        "line-color": "#d5dbe4",
-        "line-opacity": 0.7,
-        "line-width": 1.4,
       },
     }, beforeId);
   }
@@ -2326,7 +2319,6 @@ map.on("load", () => {
   drawLabels();
   drawRegions();
   updateVectorPoints();
-  updateBoundaries();
   updateRasterOpacity();
   restoreFromHash(initialHash);   // async; resolves a=/p= independently of view restore
 });
