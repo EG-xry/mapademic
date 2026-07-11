@@ -335,6 +335,19 @@ let activeP = null;         // [bareA, bareB] of the active path, or null
 // (Escape, Clear, editing a Connect input). Without these, the initial
 // jumpTo's synchronous moveend -> writeHash would wipe a=/p= from the URL
 // before restoreFromHash runs -- permanently, in the backend-offline case.
+// When both a= and p= are present in the initial hash, p= wins from the
+// start: restoreFromHash's a= branch is gated on `!parsed.p`, so it never
+// runs at all -- no highlight/rays are ever placed, rather than placing them
+// and having the path clear them right after (matches the
+// path-clears-highlight rule with no render flash). This gate doesn't
+// depend on backend reachability, so it applies the same way whether the
+// p= branch's probe succeeds or fails: pendingA is left set either way, and
+// still keeps a= alive in the URL via writeHash above until either a path
+// actually draws (renderPath's pre-existing clearSearchAndRays call drops
+// pendingA/activeA too, once it owns the highlight slot) or the user
+// re-searches; if the backend probe fails, p= itself stays pending and
+// nothing ever claims the highlight slot, so a= simply lingers, unapplied,
+// until the user acts.
 let pendingA = null;
 let pendingP = null;
 
@@ -507,26 +520,36 @@ async function fetchSearchShard(key) {
 // break that.
 //
 // Perf: worst case is the 4-level prefix walk (5,4,3,2) plus one
-// token-catch-all fetch = 5 fetches, all going through the existing
+// token-catch-all fetch = 5 fetches, issued in parallel via Promise.all so a
+// cold query costs ~1 RTT instead of up to 5. All go through the existing
 // searchShardCache so repeat queries and shared prefixes cost nothing extra.
 const CATCHALL_BUCKETS = 128;        // codepoint-modulus for the `_` catch-all split; mirrors pipeline/build_index.py's CATCHALL_BUCKETS
+const MAX_PREFIX_LEN = 5;            // deepest prefix-shard key length; mirrors pipeline/build_index.py's MAX_PREFIX_LEN
 async function lookupSearchShard(norm) {
   const concat = norm.replace(/ /g, "");
   const merged = [];
-  const fetchInto = async (key) => {
-    const entries = await fetchSearchShard(key);
-    if (entries) merged.push(...entries);
-  };
 
+  // Keys are collected deepest-prefix-first, then the token catch-all, and
+  // fetched together via Promise.all -- the merge order stays deterministic
+  // (it mirrors `keys`) while the RTTs run concurrently instead of serially,
+  // so a cold query costs ~1 RTT instead of up to 5.
+  const keys = [];
   if (/^[a-z]{2}/.test(concat)) {
-    for (let k = Math.min(5, concat.length); k >= 2; k--) {
-      await fetchInto(concat.slice(0, k));
+    for (let k = Math.min(MAX_PREFIX_LEN, concat.length); k >= 2; k--) {
+      keys.push(concat.slice(0, k));
     }
   }
 
   const firstToken = norm.split(" ")[0] || "";
   if (firstToken && !/^[a-z]{2}/.test(firstToken)) {
-    await fetchInto(`_${firstToken.codePointAt(0) % CATCHALL_BUCKETS}`);
+    keys.push(`_${firstToken.codePointAt(0) % CATCHALL_BUCKETS}`);
+  }
+
+  if (keys.length > 0) {
+    const results = await Promise.all(keys.map(fetchSearchShard));
+    for (const entries of results) {
+      if (entries) merged.push(...entries);
+    }
   }
 
   if (merged.length > 0) return merged;
@@ -1254,7 +1277,13 @@ async function probeBackendHealth() {
 // lat/lng) is handled separately in the map "load" handler via jumpTo.
 async function restoreFromHash(parsed) {
   if (!parsed) return;
-  if (parsed.a) {
+  // p= wins outright when both are present: skip the a= highlight/rays
+  // entirely rather than placing them and immediately clearing them once
+  // the path is drawn (path-clears-highlight rule, applied here without the
+  // render flash). This holds even when the backend turns out to be offline
+  // below -- p= stays pending either way, so a= stays skipped for
+  // consistency; the user can re-search to get the highlight back.
+  if (parsed.a && !parsed.p) {
     const bareA = stripId(parsed.a);
     const bucket = await fetchIdBucket(idBucketNum(bareA));
     const hit = bucket ? bucket.get(bareA) : null;
