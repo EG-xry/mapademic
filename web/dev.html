@@ -33,6 +33,10 @@
                         width: 100%; background: #0b0b0bd9; border-radius: 6px;
                         max-height: 300px; overflow-y: auto; display: none; }
     #search-dropdown.open { display: block; }
+    /* ---- Task 3 (search-v2): coauthor-ray status pill ---- */
+    #search-status:empty { display: none; }
+    #search-status { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
+                       border-radius: 6px; padding: 4px 10px; margin-top: 6px; }
     #search-dropdown .row { padding: 6px 10px; cursor: pointer; display: flex;
                              justify-content: space-between; gap: 8px; color: #ddd; }
     #search-dropdown .row:hover, #search-dropdown .row.active { background: #ffffff1a; }
@@ -91,6 +95,12 @@
     .path-node.ghost .path-dot { background: transparent; }
     .path-label { color: #fff; font: 12px system-ui; text-shadow: 0 0 4px #000, 0 0 8px #000;
                   white-space: nowrap; margin-top: 2px; }
+    /* ---- Task 3 (search-v2): coauthor ray endpoint markers ---- */
+    .coauthor-node { display: flex; flex-direction: column; align-items: center;
+                      pointer-events: none; }
+    .coauthor-dot { width: 6px; height: 6px; border-radius: 50%; background: #7fae8e; }
+    .coauthor-label { color: #fff; font: 11px system-ui; text-shadow: 0 0 4px #000, 0 0 8px #000;
+                       white-space: nowrap; margin-top: 2px; pointer-events: none; }
     /* ---- Task 1 (night-polish): display settings panel ---- */
     #display-gear { position: fixed; right: 10px; bottom: 46px; z-index: 9;
                      width: 30px; height: 30px; background: #0b0b0bd9; color: #ddd;
@@ -179,6 +189,7 @@
     <button id="share-btn" type="button" aria-label="Copy share link">Share</button>
   </div>
   <div id="search-dropdown"></div>
+  <div id="search-status"></div>
   <div id="connect-panel">
     <div class="connect-row">
       <input id="connect-a-input" type="text" placeholder="Author A…" autocomplete="off">
@@ -221,9 +232,10 @@
       <section>
         <h3>Controls</h3>
         <ul>
-          <li>Search for an author by name.</li>
-          <li>Connect finds the shortest coauthor path between two authors
-            via the degree-of-separation engine.</li>
+          <li>Search finds one researcher and draws rays to their top
+            coauthorships.</li>
+          <li>Connect finds the shortest coauthor path between two
+            researchers via the degree-of-separation engine.</li>
           <li>Hover a dot at deep zoom to see the author's name and
             citations; click it for full details.</li>
           <li>Share copies a link to the exact view.</li>
@@ -286,6 +298,7 @@
   </div>
   <div id="info-card-body"></div>
   <div class="ic-actions">
+    <button id="info-card-coauthors" type="button">Coauthors</button>
     <button id="info-card-open" type="button">Open on OpenAlex</button>
     <button id="info-card-connect" type="button">Connect from here</button>
     <button id="info-card-copy" type="button">Copy link</button>
@@ -495,9 +508,11 @@ function tokenMatch(queryTokens, entryTokens) {
 }
 
 // entry shape: [norm, display_name, id, xw, yw, cited]
-// Dedupes by id first -- Task 1's dual first/last-token search shards let
-// the same author's entry arrive twice once a lookup spans more than one
-// shard, so this is a cheap guard against showing/ranking a person twice.
+// Dedupes by id first -- Task 1's dual first/last-token search shards insert
+// an author under both their first-token and last-token bucket key, and
+// those two keys can collide (e.g. "Anna Anderson" buckets to "an" via
+// either token), landing the same entry twice in a single shard file. This
+// is a cheap guard against showing/ranking a person twice.
 // Then buckets into three ranked groups: (1) entry norm starts with the
 // full query norm; (2) tokenMatch passed AND the first query token
 // prefix-matches the entry's first token; (3) any other tokenMatch hit.
@@ -594,6 +609,7 @@ function selectSearchEntry(e) {
   setSearchHighlight(id, name, xw, yw);
   closeSearchDropdown();
   searchInput.blur();
+  drawCoauthorRays(stripId(id), xw, yw);
 }
 
 async function runSearch(query) {
@@ -650,6 +666,7 @@ function searchDropdownEscape() {
 }
 function searchHighlightEscape() {
   clearSearchHighlight();
+  clearRays();
   activeA = null;
   pendingA = null;
   writeHash();
@@ -936,6 +953,7 @@ async function renderPath(pathSteps, hops, idA, idB) {
 
 connectGo.addEventListener("click", () => {
   if (!connectA || !connectB) { setPathStatus("select both authors"); return; }
+  clearRays();    // a path replaces any coauthor rays from a prior search
   clearPath();    // starting a new Go clears any previous path first
   pathGen++;      // this Go owns the overlay from here (clearPath also bumps)
   const idA = stripId(connectA.id), idB = stripId(connectB.id);
@@ -974,6 +992,145 @@ connectGo.addEventListener("click", () => {
     setPathStatus("path backend unreachable - is the degree-of-separation server running on :8000?");
   });
 });
+
+// ---- Task 3 (search-v2): coauthor rays ----
+// On a search select (and the info card's "Coauthors" button, and an a=
+// share-URL restore -- all three route through this one function so there is
+// a single ray-drawing flow), fly-to + highlight is already done by the
+// caller; this probes the backend and, if it's up, streams the origin's
+// depth-1 coauthor neighborhood via /api/graph/expand and draws thin rays to
+// each resolved coauthor. Mutually exclusive with the path overlay: drawing
+// rays always clears any active path first, and Connect's Go always clears
+// rays (see connectGo above).
+const searchStatusEl = document.getElementById("search-status");
+function setSearchStatus(text) { searchStatusEl.textContent = text || ""; }
+
+let searchRayGen = 0;        // invalidates stale in-flight ray renders (pathGen pattern)
+let rayEventSource = null;
+let rayMarkers = [];
+
+function clearRays() {
+  searchRayGen++;             // any in-flight drawCoauthorRays is now stale
+  if (rayEventSource) { rayEventSource.close(); rayEventSource = null; }
+  rayMarkers.forEach(m => m.remove());
+  rayMarkers = [];
+  if (map.getLayer("coauthor-rays")) map.removeLayer("coauthor-rays");
+  if (map.getSource("coauthor-rays")) map.removeSource("coauthor-rays");
+  setSearchStatus("");
+}
+
+// Streams /api/graph/expand?new_id=<bareId>&depth=1&top_k=25&edges=coauthor
+// (see backend/graph_expand.py in the degree-of-separation repo). With no
+// origin_ids/path_ids passed, the stream is just: one "node" event for the
+// origin itself (type "origin", ignored here), "progress" events, one
+// "expansion" event per depth level (here just depth 1) carrying the kept
+// coauthor nodes (type "expansion": {id, name, institution, works_count,
+// cited_by_count, type, depth, expand_owners}) and their edges, then "done"
+// ({}) once a cache-only stitch pass has also flushed. Coauthor coords are
+// resolved through the id shards (fetchIdBucket/idBucketNum/stripId, same as
+// resolvePathCoords) only after "done", so every candidate is known before
+// drawing. searchRayGen is checked after every await and on every streamed
+// event so a stale stream (superseded by a newer search/Escape/clearRays)
+// can't paint over newer state.
+async function drawCoauthorRays(bareId, xw, yw) {
+  clearPath();                 // rays and path never coexist
+  clearRays();                 // clear any rays from a prior author (bump)
+  const gen = ++searchRayGen;  // this call owns the overlay from here
+
+  setSearchStatus("loading coauthors…");
+  const healthy = await probeBackendHealth();
+  if (gen !== searchRayGen) return;
+  if (!healthy) { setSearchStatus("coauthor backend offline"); return; }
+
+  const coauthors = [];        // [{id, name}], populated from "expansion" events
+  const es = new EventSource(
+    `${API_BASE}/api/graph/expand?new_id=${encodeURIComponent(bareId)}&depth=1&top_k=25&edges=coauthor`
+  );
+  rayEventSource = es;
+
+  es.addEventListener("expansion", ev => {
+    if (gen !== searchRayGen) return;
+    let data;
+    try { data = JSON.parse(ev.data); } catch { return; }
+    for (const n of data.nodes || []) {
+      if (n.type !== "expansion") continue;        // origin/path node types, defensive
+      if (String(n.id).startsWith("W")) continue;   // work node, defensive (edges=coauthor implies authors)
+      if (n.id === bareId) continue;                // origin itself, defensive
+      coauthors.push({ id: n.id, name: n.name });
+    }
+  });
+
+  async function finish() {
+    if (rayEventSource === es) rayEventSource = null;
+    es.close();
+    if (gen !== searchRayGen) return;
+
+    const buckets = await Promise.all(coauthors.map(c => fetchIdBucket(idBucketNum(c.id))));
+    if (gen !== searchRayGen) return;
+
+    const from = toLngLat(xw, yw).toArray();
+    const features = [];
+    const endpoints = [];
+    let offMap = 0;
+    coauthors.forEach((c, i) => {
+      const m = buckets[i];
+      const hit = m ? m.get(stripId(c.id)) : null;
+      if (!hit) { offMap++; return; }
+      features.push({
+        type: "Feature",
+        geometry: { type: "LineString", coordinates: [from, toLngLat(hit[0], hit[1]).toArray()] },
+      });
+      endpoints.push({ xw: hit[0], yw: hit[1], name: c.name });
+    });
+
+    if (features.length) {
+      map.addSource("coauthor-rays", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features },
+      });
+      map.addLayer({
+        id: "coauthor-rays", type: "line", source: "coauthor-rays",
+        paint: { "line-color": "#7fae8e", "line-width": 1.2, "line-opacity": 0.55 },
+      });
+    }
+
+    rayMarkers = endpoints.map(p => {
+      const el = document.createElement("div");
+      el.className = "coauthor-node";
+      const dot = document.createElement("div");
+      dot.className = "coauthor-dot";
+      const label = document.createElement("div");
+      label.className = "coauthor-label";
+      label.textContent = p.name;
+      el.append(dot, label);
+      return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
+    });
+
+    setSearchStatus(`${endpoints.length} coauthors shown (${offMap} off-map)`);
+  }
+  es.addEventListener("done", finish);
+
+  es.addEventListener("app_error", ev => {
+    if (rayEventSource === es) rayEventSource = null;
+    es.close();
+    if (gen !== searchRayGen) return;
+    let msg = "coauthor backend offline";
+    try { msg = JSON.parse(ev.data).message || msg; } catch { /* ignore malformed frame */ }
+    setSearchStatus(msg);
+  });
+  // Fires on backend-down / dropped-connection; EventSource retries silently
+  // otherwise, so without this the pill would say "loading coauthors…"
+  // forever. The identity check no-ops a stale error from an already-finished
+  // or already-superseded stream (done/app_error closed it, or a newer call
+  // replaced rayEventSource before this one's error arrived).
+  es.addEventListener("error", () => {
+    if (rayEventSource !== es) return;
+    es.close();
+    rayEventSource = null;
+    if (gen !== searchRayGen) return;
+    setSearchStatus("coauthor backend offline");
+  });
+}
 
 // ---- Task 2 (night-polish): hash-restore helpers ----
 // Author names aren't in the id-coord shards, so a=/p= restores fetch them
@@ -1014,6 +1171,7 @@ async function restoreFromHash(parsed) {
     if (hit) {
       const name = await fetchDisplayName(bareA);
       setSearchHighlight(bareA, name, hit[0], hit[1]);
+      drawCoauthorRays(bareA, hit[0], hit[1]);
     }
   }
   if (parsed.p) {
@@ -1224,6 +1382,7 @@ const infoCard = document.getElementById("info-card");
 const infoCardName = document.getElementById("info-card-name");
 const infoCardBody = document.getElementById("info-card-body");
 const infoCardClose = document.getElementById("info-card-close");
+const infoCardCoauthorsBtn = document.getElementById("info-card-coauthors");
 const infoCardOpenBtn = document.getElementById("info-card-open");
 const infoCardConnectBtn = document.getElementById("info-card-connect");
 const infoCardCopyBtn = document.getElementById("info-card-copy");
@@ -1294,6 +1453,12 @@ infoCardClose.addEventListener("click", closeInfoCard);
 // Escape handling for the card (and every other panel) lives in the single
 // document-level capture-phase priority chain at the bottom of this script
 // (Task 4: "keyboard shortcuts") -- info card is rung 1 of that chain.
+
+infoCardCoauthorsBtn.addEventListener("click", () => {
+  if (!infoCardData) return;
+  const { bareId, xw, yw } = infoCardData;
+  drawCoauthorRays(bareId, xw, yw);
+});
 
 infoCardOpenBtn.addEventListener("click", () => {
   if (!infoCardData) return;
