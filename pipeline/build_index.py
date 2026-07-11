@@ -25,8 +25,10 @@ from collections import defaultdict
 from pathlib import Path
 
 import duckdb
+import numpy as np
 
 from pipeline.config import apply_resource_limits, data_dir
+from pipeline.palette import load_community_stats
 
 LABEL_ZOOMS = {6: 50, 7: 50, 8: 200, 9: 4000}   # zoom -> per-tile capacity
 SHARD_SPLIT_BYTES = 4_000_000                   # shards larger than this split by one more prefix char
@@ -212,6 +214,159 @@ def build_id_shards(web: str, out_dir: Path) -> int:
     return total
 
 
+BOUNDARIES_MAX_BYTES = 2_500_000   # serialized-size target for boundaries.json
+
+
+def _smooth_majority(arr: np.ndarray) -> np.ndarray:
+    """One 3x3 majority (mode) filter pass over non-empty cells (-1 = empty).
+
+    For each non-empty cell, the winner is the value that appears most often
+    among the 9 cells in its neighborhood (out-of-bounds and empty cells are
+    excluded as candidates). A genuine tie between two different values keeps
+    the cell's original (center) value unchanged.
+    """
+    h, w = arr.shape
+    padded = np.pad(arr, 1, mode="constant", constant_values=-1)
+    offsets = [(dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1)]
+    center_idx = offsets.index((0, 0))
+    stack = np.stack(
+        [padded[1 + dy:1 + dy + h, 1 + dx:1 + dx + w] for dy, dx in offsets]
+    )
+    valid = stack != -1
+    counts = np.zeros(stack.shape, dtype=np.int16)
+    for i in range(len(offsets)):
+        counts[i] = ((stack == stack[i]) & valid & valid[i]).sum(axis=0)
+    counts = np.where(valid, counts, -1)              # invalid candidates can't win
+    best_count = counts.max(axis=0)
+    is_best = (counts == best_count) & valid
+    first_best_idx = np.argmax(is_best, axis=0)        # first candidate hitting best_count
+    best_value = np.take_along_axis(stack, first_best_idx[None, :, :], axis=0)[0]
+    masked = np.where(is_best, stack, -2)              # -2: sentinel, never a real value
+    agrees = (masked == best_value[None, :, :]) | (masked == -2)
+    tie = ~agrees.all(axis=0)                          # >1 distinct value at best_count
+    smoothed = np.where(tie, stack[center_idx], best_value)
+    return np.where(arr != -1, smoothed, -1).astype(arr.dtype)
+
+
+def _boundary_lines(arr: np.ndarray, grid: int) -> list:
+    """Shared edges between 4-adjacent cells of differing non-empty
+    communities, in world coords, run-length merged along each row/column."""
+    lines = []
+    diff_h = (arr[:-1, :] != -1) & (arr[1:, :] != -1) & (arr[:-1, :] != arr[1:, :])
+    for cx in range(grid - 1):
+        bx = round((cx + 1) / grid, 6)
+        col = diff_h[cx].tolist()
+        run_start = None
+        for cy in range(grid + 1):
+            active = cy < grid and col[cy]
+            if active:
+                if run_start is None:
+                    run_start = cy
+            elif run_start is not None:
+                lines.append([[bx, round(run_start / grid, 6)], [bx, round(cy / grid, 6)]])
+                run_start = None
+    diff_v = (arr[:, :-1] != -1) & (arr[:, 1:] != -1) & (arr[:, :-1] != arr[:, 1:])
+    for cy in range(grid - 1):
+        by = round((cy + 1) / grid, 6)
+        row = diff_v[:, cy].tolist()
+        run_start = None
+        for cx in range(grid + 1):
+            active = cx < grid and row[cx]
+            if active:
+                if run_start is None:
+                    run_start = cx
+            elif run_start is not None:
+                lines.append([[round(run_start / grid, 6), by], [round(cx / grid, 6), by]])
+                run_start = None
+    return lines
+
+
+def build_community_boundaries(web: str, out_path: str, grid: int = 1024, min_cell: int = 3) -> int:
+    """Dashed community-boundary polylines: majority-community raster over a
+    grid x grid grid (cells with < min_cell authors are empty), one 3x3
+    speckle-cleanup pass, then boundary edges between differing neighbors
+    run-length merged into a single MultiLineString feature."""
+    con = duckdb.connect()
+    apply_resource_limits(con)
+    rows = con.execute(
+        f"""
+        WITH pts AS (
+            SELECT least({grid - 1}, CAST(floor(CAST(xw AS DOUBLE) * {grid}) AS INT)) AS cx,
+                   least({grid - 1}, CAST(floor(CAST(yw AS DOUBLE) * {grid}) AS INT)) AS cy,
+                   community
+            FROM read_parquet('{web}') WHERE NOT is_ring
+        ),
+        counts AS (
+            SELECT cx, cy, community, count(*) AS c FROM pts GROUP BY 1, 2, 3
+        ),
+        totals AS (
+            SELECT cx, cy, sum(c) AS n FROM counts GROUP BY 1, 2
+        ),
+        ranked AS (
+            SELECT cx, cy, community, c,
+                   row_number() OVER (PARTITION BY cx, cy ORDER BY c DESC, community ASC) AS rn
+            FROM counts
+        )
+        SELECT r.cx, r.cy, r.community
+        FROM ranked r JOIN totals t ON t.cx = r.cx AND t.cy = r.cy
+        WHERE r.rn = 1 AND t.n >= {min_cell}
+        """
+    ).fetchall()
+    arr = np.full((grid, grid), -1, dtype=np.int32)
+    for cx, cy, community in rows:
+        arr[cx, cy] = community
+    arr = _smooth_majority(arr)
+    lines = _boundary_lines(arr, grid)
+    geojson = {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "properties": {},
+            "geometry": {"type": "MultiLineString", "coordinates": lines},
+        }],
+    }
+    _write_json_atomic(Path(out_path), geojson)
+    size = len(json.dumps(geojson, ensure_ascii=False).encode("utf-8"))
+    if size > BOUNDARIES_MAX_BYTES:
+        print(f"note: boundaries.json is {size:,} bytes (target < {BOUNDARIES_MAX_BYTES:,}); "
+              f"consider raising min_cell (currently {min_cell})")
+    return len(lines)
+
+
+def build_community_shards(web: str, out_dir: Path, top_n: int = 20000, min_members: int = 1000) -> int:
+    """Per-community top-N-by-citations roster, for communities with enough
+    members to also appear in the legend (see palette.load_community_stats)."""
+    communities_dir = out_dir / "communities"
+    if communities_dir.exists():
+        shutil.rmtree(communities_dir)
+    communities_dir.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    apply_resource_limits(con)
+    stats = load_community_stats(con, web)
+    qualifying = [c for c, _f, n, _cx, _cy in stats if n >= min_members]
+    if not qualifying:
+        return 0
+    ids_sql = ", ".join(str(c) for c in qualifying)
+    rows = con.execute(
+        f"""
+        SELECT community, display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count
+        FROM (
+            SELECT community, display_name, id, xw, yw, cited_by_count,
+                   row_number() OVER (PARTITION BY community ORDER BY cited_by_count DESC, id) AS rn
+            FROM read_parquet('{web}')
+            WHERE NOT is_ring AND community IN ({ids_sql})
+        ) WHERE rn <= {top_n}
+        ORDER BY community, cited_by_count DESC, id
+        """
+    ).fetchall()
+    shards = defaultdict(list)
+    for community, name, aid, xw, yw, cited in rows:
+        shards[community].append([name, aid, round(xw, 6), round(yw, 6), int(cited)])
+    for community, entries in shards.items():
+        _write_json_atomic(communities_dir / f"{community}.json", entries)
+    return len(shards)
+
+
 def add_parser(parser) -> None:
     parser.add_argument("--web", default=None)
     parser.add_argument("--out", default=None)
@@ -223,5 +378,8 @@ def run(args) -> int:
     t = build_label_tiles(web, out)
     s = build_search_shards(web, out)
     i = build_id_shards(web, out)
-    print(f"{t:,} label tiles, {s:,} searchable names, {i:,} id-shard entries -> {out}")
+    b = build_community_boundaries(web, str(out / "boundaries.json"))
+    m = build_community_shards(web, out)
+    print(f"{t:,} label tiles, {s:,} searchable names, {i:,} id-shard entries, "
+          f"{b:,} boundary polylines, {m:,} community shards -> {out}")
     return 0

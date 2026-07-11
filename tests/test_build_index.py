@@ -5,6 +5,8 @@ import duckdb
 
 import pipeline.build_index as build_index
 from pipeline.build_index import (
+    build_community_boundaries,
+    build_community_shards,
     build_id_shards,
     build_label_tiles,
     build_search_shards,
@@ -21,6 +23,20 @@ def write_web(path, rows):
     duckdb.sql(f"COPY (SELECT id, display_name, xw, yw, community, works_count, cited_by_count, institution, field, FALSE AS is_ring FROM (VALUES {vals}) t(id, display_name, xw, yw,"
                f" community, works_count, cited_by_count, institution, field))"
                f" TO '{path}' (FORMAT PARQUET)")
+
+
+def write_web_communities(path, rows):
+    """rows: (id, name, xw, yw, community, cited, is_ring)"""
+    vals = ", ".join(
+        f"('{i}', '{n}', {x}, {y}, {comm}, 20, {c}, 'I', 'Biology', {str(ring).upper()})"
+        for i, n, x, y, comm, c, ring in rows
+    )
+    duckdb.sql(
+        f"COPY (SELECT id, display_name, xw, yw, community, works_count, cited_by_count, "
+        f"institution, field, is_ring FROM (VALUES {vals}) "
+        f"t(id, display_name, xw, yw, community, works_count, cited_by_count, institution, field, is_ring))"
+        f" TO '{path}' (FORMAT PARQUET)"
+    )
 
 
 def assert_search_shards_lossless(out_dir, rows):
@@ -346,3 +362,96 @@ def test_search_shards_catchall_last_token_nonascii(tmp_path, monkeypatch):
     assert len(li) == 20
     assert {e[2] for e in li} == {f"J{i}" for i in range(20)}
     assert_search_shards_lossless(out, rows)
+
+
+def test_smooth_majority_kills_speckle_and_keeps_ties():
+    import numpy as np
+
+    from pipeline.build_index import _smooth_majority
+
+    # 3x3 grid: a lone community-9 speckle surrounded by community-0.
+    arr = np.zeros((3, 3), dtype=np.int32)
+    arr[1, 1] = 9
+    out = _smooth_majority(arr)
+    assert out[1, 1] == 0                        # speckle absorbed by majority neighbor
+
+    # Three distinct single-count neighbors (1, 2, and the center's own 5)
+    # tie for best_count=1 -> center is kept unchanged.
+    tie = np.array([
+        [1, 2, -1],
+        [-1, 5, -1],
+        [-1, -1, -1],
+    ], dtype=np.int32)
+    out_tie = _smooth_majority(tie)
+    assert out_tie[1, 1] == 5                     # tie among 1, 2, 5 -> center kept
+    assert out_tie[2, 0] == -1                    # empty cells stay empty
+
+
+def test_boundaries_straight_line_between_two_communities(tmp_path):
+    web = tmp_path / "web.parquet"
+    rows = []
+    aid = 0
+    for cy in range(4):
+        for cx in range(4):
+            comm = 0 if cx < 2 else 1
+            x = (cx + 0.5) / 4
+            y = (cy + 0.5) / 4
+            rows.append((f"A{aid}", f"N{aid}", x, y, comm, 10, False))
+            aid += 1
+    write_web_communities(web, rows)
+    out = tmp_path / "boundaries.json"
+    n = build_community_boundaries(str(web), str(out), grid=4, min_cell=1)
+    assert n == 1                                 # one merged run, not four separate segments
+    geo = json.loads(out.read_text())
+    assert geo["type"] == "FeatureCollection"
+    assert len(geo["features"]) == 1
+    geom = geo["features"][0]["geometry"]
+    assert geom["type"] == "MultiLineString"
+    assert geom["coordinates"] == [[[0.5, 0.0], [0.5, 1.0]]]
+
+
+def test_boundaries_speckle_under_min_cell_produces_none(tmp_path):
+    web = tmp_path / "web.parquet"
+    rows = [
+        ("A0", "N0", 0.15, 0.15, 0, 10, False),   # cell (0,0): 3 authors, community 0
+        ("A1", "N1", 0.15, 0.15, 0, 9, False),
+        ("A2", "N2", 0.15, 0.15, 0, 8, False),
+        ("A3", "N3", 0.4, 0.15, 1, 5, False),     # cell (1,0): 1 author, community 1 -> under min_cell
+    ]
+    write_web_communities(web, rows)
+    out = tmp_path / "boundaries.json"
+    n = build_community_boundaries(str(web), str(out), grid=4, min_cell=3)
+    assert n == 0
+    geo = json.loads(out.read_text())
+    assert geo["features"][0]["geometry"]["coordinates"] == []
+
+
+def test_community_shards_top_n_ordering_and_min_members(tmp_path):
+    web = tmp_path / "web.parquet"
+    rows = []
+    for i in range(5):
+        rows.append((f"A{i}", f"Name{i}", 0.1 + i * 0.01, 0.1, 0, 100 - i, False))
+    rows.append(("B0", "Beta0", 0.5, 0.5, 1, 999, False))
+    rows.append(("B1", "Beta1", 0.5, 0.5, 1, 998, False))
+    write_web_communities(web, rows)
+    out = tmp_path / "index"
+    n = build_community_shards(str(web), out, top_n=3, min_members=3)
+    assert n == 1                                 # only community 0 has >= 3 members
+    assert not (out / "communities" / "1.json").exists()
+    c0 = json.loads((out / "communities" / "0.json").read_text())
+    assert len(c0) == 3                           # top_n cap
+    assert [e[4] for e in c0] == [100, 99, 98]     # cited desc
+    assert [e[0] for e in c0] == ["Name0", "Name1", "Name2"]
+
+
+def test_community_shards_clears_stale_dir(tmp_path):
+    web = tmp_path / "web.parquet"
+    rows = [(f"A{i}", f"Name{i}", 0.1, 0.1, 0, 10, False) for i in range(3)]
+    write_web_communities(web, rows)
+    out = tmp_path / "index"
+    communities_dir = out / "communities"
+    communities_dir.mkdir(parents=True)
+    (communities_dir / "stale.json").write_text("[]")
+    build_community_shards(str(web), out, min_members=1)
+    assert not (communities_dir / "stale.json").exists()
+    assert (communities_dir / "0.json").exists()
