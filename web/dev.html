@@ -10,6 +10,13 @@
     .lbl { color: #fff; font-family: system-ui, sans-serif;
            text-shadow: 0 0 4px #000, 0 0 8px #000; pointer-events: none;
            white-space: nowrap; }
+    /* ---- Task 9 (R9): faint author-label mode ----
+       !important is required here: MapLibre's Marker sets a plain (non-!important)
+       inline opacity on its element every render frame (its occlusion-fade
+       logic), which would silently clobber a bare el.style.opacity write on
+       the next frame. An author-stylesheet !important rule outranks that
+       normal-priority inline style in the cascade, so it sticks. */
+    .lbl.lbl-faint { opacity: .32 !important; }
     .region { color: #9ab; font: 600 15px system-ui; letter-spacing: .08em;
               text-transform: uppercase; text-shadow: 0 0 6px #000;
               pointer-events: none; opacity: .85; }
@@ -297,6 +304,14 @@
         <label><input type="radio" name="dp-density" value="2"> 2x</label>
       </div>
     </div>
+    <div class="dp-row">
+      <div class="dp-row-head"><span>Author names</span></div>
+      <div class="dp-radios" role="radiogroup" aria-label="Author names">
+        <label><input type="radio" name="dp-label-mode" value="normal" checked> Normal</label>
+        <label><input type="radio" name="dp-label-mode" value="faint"> Faint</label>
+        <label><input type="radio" name="dp-label-mode" value="hover"> Hover only</label>
+      </div>
+    </div>
     <label class="dp-check">
       <input id="dp-regions" type="checkbox" checked>
       Region names
@@ -305,6 +320,10 @@
       <input id="dp-vector-points" type="checkbox">
       Vector points at deep zoom
     </label>
+    <div class="dp-row">
+      <div class="dp-row-head"><label for="dp-size-contrast">Citation size contrast</label><span id="dp-size-contrast-n" class="n"></span></div>
+      <input id="dp-size-contrast" type="range" min="0" max="2.5" step="0.1" value="1.0">
+    </div>
     <button id="display-reset" type="button">Reset</button>
   </div>
 </div>
@@ -643,6 +662,17 @@ let searchActive = -1;
 let searchGen = 0;      // invalidates stale in-flight lookups
 let searchTimer = null;
 let highlightMarker = null;
+let highlightOverlayId = null;   // bare id currently held in overlayLabeledIds by the search highlight, or null
+
+// ---- Task 9 (R9): overlay-label dedupe ----
+// Bare ids that already have an explicit overlay name tag on the map (a
+// search highlight, a path node, or a coauthor-ray endpoint) -- drawLabels
+// skips these entries so a regular label never doubles up with an overlay
+// one. Maintained by setSearchHighlight/clearSearchHighlight,
+// renderPath/clearPath and drawCoauthorRays/clearRays, each of which also
+// calls drawLabels() immediately after a change so the dedupe is visible
+// without waiting for the next move/zoom-triggered redraw.
+let overlayLabeledIds = new Set();
 
 // ---- un-search / clear-search button ----
 // Visible whenever there's something to clear: a placed highlight or leftover
@@ -656,6 +686,11 @@ function updateSearchClearVisibility() {
 
 function clearSearchHighlight() {
   if (highlightMarker) { highlightMarker.remove(); highlightMarker = null; }
+  if (highlightOverlayId) {
+    overlayLabeledIds.delete(highlightOverlayId);
+    highlightOverlayId = null;
+    drawLabels();       // the regular label for this author may now reappear
+  }
   updateSearchClearVisibility();
 }
 
@@ -676,8 +711,11 @@ function setSearchHighlight(id, name, xw, yw) {
     .setLngLat(toLngLat(xw, yw)).addTo(map);
   activeA = stripId(id);
   pendingA = null;             // the real highlight owns a= from here
+  highlightOverlayId = activeA;
+  overlayLabeledIds.add(highlightOverlayId);
   updateSearchClearVisibility();
   writeHash();
+  drawLabels();                // hide this author's regular label immediately
 }
 
 function renderSearchDropdown() {
@@ -954,7 +992,7 @@ async function resolvePathCoords(nodes) {
     return hit ? { xw: hit[0], yw: hit[1] } : null;
   });
   return nodes.map((n, i) => {
-    if (hits[i]) return { ...hits[i], ghost: false, name: n.name };
+    if (hits[i]) return { ...hits[i], ghost: false, name: n.name, id: n.id };
     let prevIdx = -1;
     for (let j = i - 1; j >= 0; j--) if (hits[j]) { prevIdx = j; break; }
     let nextIdx = -1;
@@ -964,7 +1002,7 @@ async function resolvePathCoords(nodes) {
       const t = (i - prevIdx) / (nextIdx - prevIdx);
       return { xw: prev.xw + (next.xw - prev.xw) * t,
                yw: prev.yw + (next.yw - prev.yw) * t,
-               ghost: true, name: n.name };
+               ghost: true, name: n.name, id: n.id };
     }
     return null;
   });
@@ -972,6 +1010,7 @@ async function resolvePathCoords(nodes) {
 
 let pathEventSource = null;
 let pathMarkers = [];
+let pathOverlayIds = [];             // bare ids currently held in overlayLabeledIds by the drawn path's node labels
 let pathGen = 0;                     // invalidates stale in-flight renders (labelGen pattern)
 
 // ---- Task 4 (night-polish): path hop list ----
@@ -1005,6 +1044,11 @@ function clearPath() {
   if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
   pathMarkers.forEach(m => m.remove());
   pathMarkers = [];
+  if (pathOverlayIds.length) {
+    pathOverlayIds.forEach(id => overlayLabeledIds.delete(id));
+    pathOverlayIds = [];
+    drawLabels();        // regular labels for these authors may now reappear
+  }
   clearHopList();
   if (map.getLayer("path-line")) map.removeLayer("path-line");
   if (map.getSource("path")) map.removeSource("path");
@@ -1066,6 +1110,10 @@ async function renderPath(pathSteps, hops, idA, idB) {
     el.append(dot, label);
     return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
   });
+
+  pathOverlayIds = points.map(p => stripId(p.id));
+  pathOverlayIds.forEach(id => overlayLabeledIds.add(id));
+  drawLabels();           // hide these authors' regular labels immediately
 
   pathDimActive = true;
   updateRasterOpacity();
@@ -1139,12 +1187,18 @@ function setSearchStatus(text) { searchStatusEl.textContent = text || ""; }
 let searchRayGen = 0;        // invalidates stale in-flight ray renders (pathGen pattern)
 let rayEventSource = null;
 let rayMarkers = [];
+let rayOverlayIds = [];      // bare ids currently held in overlayLabeledIds by drawn ray endpoint labels
 
 function clearRays() {
   searchRayGen++;             // any in-flight drawCoauthorRays is now stale
   if (rayEventSource) { rayEventSource.close(); rayEventSource = null; }
   rayMarkers.forEach(m => m.remove());
   rayMarkers = [];
+  if (rayOverlayIds.length) {
+    rayOverlayIds.forEach(id => overlayLabeledIds.delete(id));
+    rayOverlayIds = [];
+    drawLabels();       // regular labels for these authors may now reappear
+  }
   if (map.getLayer("coauthor-rays")) map.removeLayer("coauthor-rays");
   if (map.getSource("coauthor-rays")) map.removeSource("coauthor-rays");
   setSearchStatus("");
@@ -1214,7 +1268,7 @@ async function drawCoauthorRays(bareId, xw, yw) {
         type: "Feature",
         geometry: { type: "LineString", coordinates: [from, toLngLat(hit[0], hit[1]).toArray()] },
       });
-      endpoints.push({ xw: hit[0], yw: hit[1], name: c.name });
+      endpoints.push({ xw: hit[0], yw: hit[1], name: c.name, id: stripId(c.id) });
     });
 
     if (features.length) {
@@ -1239,6 +1293,10 @@ async function drawCoauthorRays(bareId, xw, yw) {
       el.append(dot, label);
       return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
     });
+
+    rayOverlayIds = endpoints.map(p => p.id);
+    rayOverlayIds.forEach(id => overlayLabeledIds.add(id));
+    drawLabels();          // hide these authors' regular labels immediately
 
     setSearchStatus(`${endpoints.length} coauthors shown (${offMap} off-map)`);
   }
@@ -1343,7 +1401,7 @@ function collides(placed, x, y, w, h) {
 // Sliders only ever touch brightness/contrast/saturation; raster-opacity stays
 // owned by updateRasterOpacity() (see near safePaint above), which renderPath/
 // clearPath and the vector-points toggle all defer to, so the three stay orthogonal.
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, vectorPoints: true };
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, vectorPoints: true, labelMode: "normal", sizeContrast: 1.0 };
 const DISPLAY_KEY = "mapademic.display";
 
 function loadDisplaySettings() {
@@ -1380,8 +1438,11 @@ const dpContrastN = document.getElementById("dp-contrast-n");
 const dpSaturation = document.getElementById("dp-saturation");
 const dpSaturationN = document.getElementById("dp-saturation-n");
 const dpDensityRadios = document.querySelectorAll('input[name="dp-density"]');
+const dpLabelModeRadios = document.querySelectorAll('input[name="dp-label-mode"]');
 const dpRegions = document.getElementById("dp-regions");
 const dpVectorPoints = document.getElementById("dp-vector-points");
+const dpSizeContrast = document.getElementById("dp-size-contrast");
+const dpSizeContrastN = document.getElementById("dp-size-contrast-n");
 const dpReset = document.getElementById("display-reset");
 
 function syncDisplayUI() {
@@ -1392,8 +1453,11 @@ function syncDisplayUI() {
   dpSaturation.value = displaySettings.saturation;
   dpSaturationN.textContent = displaySettings.saturation.toFixed(2);
   dpDensityRadios.forEach(r => { r.checked = Number(r.value) === displaySettings.labelDensity; });
+  dpLabelModeRadios.forEach(r => { r.checked = r.value === displaySettings.labelMode; });
   dpRegions.checked = displaySettings.regionNames;
   dpVectorPoints.checked = displaySettings.vectorPoints;
+  dpSizeContrast.value = displaySettings.sizeContrast;
+  dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
 }
 syncDisplayUI();
 
@@ -1426,6 +1490,12 @@ dpDensityRadios.forEach(r => r.addEventListener("change", () => {
   saveDisplaySettings();
   drawLabels();
 }));
+dpLabelModeRadios.forEach(r => r.addEventListener("change", () => {
+  if (!r.checked) return;
+  displaySettings.labelMode = r.value;
+  saveDisplaySettings();
+  drawLabels();
+}));
 dpRegions.addEventListener("change", () => {
   displaySettings.regionNames = dpRegions.checked;
   saveDisplaySettings();
@@ -1437,6 +1507,12 @@ dpVectorPoints.addEventListener("change", () => {
   updateVectorPoints();
   updateRasterOpacity();
 });
+dpSizeContrast.addEventListener("input", () => {
+  displaySettings.sizeContrast = Number(dpSizeContrast.value);
+  dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
+  saveDisplaySettings();
+  applyVectorRadius();
+});
 dpReset.addEventListener("click", () => {
   displaySettings = { ...DISPLAY_DEFAULTS };
   try { localStorage.removeItem(DISPLAY_KEY); } catch { /* ignore storage errors */ }
@@ -1445,6 +1521,7 @@ dpReset.addEventListener("click", () => {
   drawLabels();
   drawRegions();
   updateVectorPoints();
+  applyVectorRadius();
   updateRasterOpacity();
 });
 
@@ -1453,7 +1530,12 @@ let labelGen = 0;                    // invalidates stale in-flight redraws
 async function drawLabels() {
   const gen = ++labelGen;
   const z = map.getZoom();
-  if (z < 5.5) { markers.forEach(m => m.remove()); markers = []; return; }
+  // "hover only" mode (R9 labelMode) draws no regular author labels at any
+  // zoom -- the hover tooltip at HIT_ZOOM and region names are unaffected,
+  // this only ever clears/skips the .lbl markers this function itself owns.
+  if (displaySettings.labelMode === "hover" || z < 5.5) {
+    markers.forEach(m => m.remove()); markers = []; return;
+  }
   const lz = Math.max(6, Math.min(9, Math.round(z)));
   const lists = await Promise.all(visibleTiles(lz).map(([x, y]) => fetchTile(lz, x, y)));
   if (gen !== labelGen) return;      // a newer call owns the markers now
@@ -1465,6 +1547,10 @@ async function drawLabels() {
   const cap = Math.round(baseCap * displaySettings.labelDensity);
   for (const [name, id, xw, yw, cited] of entries) {
     if (markers.length >= cap) break;
+    // Overlay dedupe (R9): an author already carrying an explicit overlay
+    // name tag (search highlight, path node, coauthor-ray endpoint) skips
+    // their regular label so the name never renders twice.
+    if (overlayLabeledIds.has(stripId(id))) continue;
     const pt = map.project(toLngLat(xw, yw));
     if (pt.x < -50 || pt.y < -20 || pt.x > innerWidth + 50 || pt.y > innerHeight + 20) continue;
     const size = 11 + Math.min(6, Math.log10(1 + cited));       // 11-17 px
@@ -1474,6 +1560,7 @@ async function drawLabels() {
     const el = document.createElement("div");
     el.className = "lbl"; el.textContent = name;
     el.style.fontSize = size + "px";
+    if (displaySettings.labelMode === "faint") el.classList.add("lbl-faint");
     markers.push(new maplibregl.Marker({ element: el })
       .setLngLat(toLngLat(xw, yw)).addTo(map));
   }
@@ -1531,6 +1618,43 @@ const VECTOR_POINTS_CAP = 60000;
 // matching the raster's own tail-author color.
 const communityColors = new Map();
 const VECTOR_POINT_FALLBACK_COLOR = "#565660";
+
+// ---- Task 9 (R9): citation size contrast knob ----
+// The v1 circle-radius expression's inner sqrt(cited)-interpolate outputs a
+// "factor" around 1.0 (0.75 floor .. 3.8 top). `contrast` rescales that
+// factor around 1.0: effectiveFactor = 1 + (baseFactor - 1) * contrast, so
+// contrast 1.0 reproduces the original curve exactly (this file's prior
+// fixed factors), 0 flattens every author to the same size (factor 1 at
+// every citation count), and 2.5 stretches it until top-cited authors are
+// ~8x radius while the floor shrinks toward ~0.37x.
+// The final per-stop radius (after the zoom-outer multiply) is clamped to a
+// 0.7px floor via ["max", 0.7, ...] so a high contrast setting never shrinks
+// low-cited authors into invisibility. That max has to sit INSIDE each zoom
+// stop's output, not wrap the whole interpolate -- MapLibre only allows a
+// "zoom" expression as a top-level interpolate/step input (see the addLayer
+// comment above), so the zoom-interpolate must stay the outermost expression.
+const VECTOR_RADIUS_BASE_FACTORS = [0.75, 1.0, 2.0, 3.0, 3.8];   // original v1 stop outputs, contrast 1.0
+const VECTOR_RADIUS_SQRT_STOPS = [0, 70, 250, 450, 700];         // sqrt(cited) stops these factors sit at
+function buildVectorRadiusExpression(contrast) {
+  const factorExpr = ["interpolate", ["linear"], ["sqrt", ["get", "cited"]]];
+  VECTOR_RADIUS_SQRT_STOPS.forEach((stop, i) => {
+    factorExpr.push(stop, 1 + (VECTOR_RADIUS_BASE_FACTORS[i] - 1) * contrast);
+  });
+  return [
+    "interpolate", ["linear"], ["zoom"],
+    10.25, ["max", 0.7, ["*", 1.5, factorExpr]],
+    11, ["max", 0.7, ["*", 3.5, factorExpr]],
+  ];
+}
+// Guarded by layer existence (not safePaint/styleReady) since vector-points
+// is a dynamically added/removed layer, not part of the initial style --
+// map.getLayer is itself the right pre-load guard here.
+function applyVectorRadius() {
+  if (map.getLayer("vector-points")) {
+    map.setPaintProperty("vector-points", "circle-radius", buildVectorRadiusExpression(displaySettings.sizeContrast));
+  }
+}
+
 let vectorGen = 0;           // invalidates stale in-flight tile fetches (labelGen pattern)
 async function updateVectorPoints() {
   const gen = ++vectorGen;
@@ -1585,11 +1709,7 @@ async function updateVectorPoints() {
         // other way around -- a bare ["*", zoomInterpolate, dataInterpolate]
         // throws "zoom expression may only be used... as a top-level
         // interpolate" at addLayer time.
-        "circle-radius": [
-          "interpolate", ["linear"], ["zoom"],
-          10.25, ["*", 1.5, ["interpolate", ["linear"], ["sqrt", ["get", "cited"]], 0, 0.75, 70, 1.0, 250, 2.0, 450, 3.0, 700, 3.8]],
-          11, ["*", 3.5, ["interpolate", ["linear"], ["sqrt", ["get", "cited"]], 0, 0.75, 70, 1.0, 250, 2.0, 450, 3.0, 700, 3.8]],
-        ],
+        "circle-radius": buildVectorRadiusExpression(displaySettings.sizeContrast),
         // color resolved per feature in JS (feature property "color", set
         // above from communityColors) rather than a giant match expression --
         // matches the raster palette's 37 big communities, dust grey fallback
