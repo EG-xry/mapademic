@@ -10,6 +10,7 @@ from pipeline.build_index import (
     build_id_shards,
     build_label_tiles,
     build_search_shards,
+    build_top_authors,
     normalize,
 )
 
@@ -511,3 +512,67 @@ def test_community_shards_clears_stale_dir(tmp_path):
     build_community_shards(str(web), out, min_members=1)
     assert not (communities_dir / "stale.json").exists()
     assert (communities_dir / "0.json").exists()
+
+
+def test_top_authors_cap_respected(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_index, "TOP_AUTHORS_CAP", 3)
+    web = tmp_path / "web.parquet"
+    rows = [(f"A{i}", f"Name{i}", 0.1, 0.1, 0, 100 - i, False) for i in range(5)]
+    write_web_communities(web, rows)
+    out = tmp_path / "top_authors.json"
+    n = build_top_authors(str(web), out)
+    assert n == 3                                 # cap respected
+    entries = json.loads(out.read_text())
+    assert len(entries) == 3
+    assert [e[0] for e in entries] == ["Name0", "Name1", "Name2"]  # cited desc, cap applied to top
+
+
+def test_top_authors_ordering_and_id_tiebreak(tmp_path):
+    web = tmp_path / "web.parquet"
+    rows = [
+        ("A2", "Bravo", 0.2, 0.2, 0, 50, False),
+        ("A1", "Alpha", 0.1, 0.1, 0, 50, False),   # same cited as Bravo -> id tiebreak
+        ("A3", "Charlie", 0.3, 0.3, 0, 100, False),
+    ]
+    write_web_communities(web, rows)
+    out = tmp_path / "top_authors.json"
+    build_top_authors(str(web), out)
+    entries = json.loads(out.read_text())
+    assert [e[1] for e in entries] == ["A3", "A1", "A2"]  # cited desc, deterministic id tiebreak
+
+
+def test_top_authors_community_field_present_as_int(tmp_path):
+    web = tmp_path / "web.parquet"
+    rows = [("A1", "Alpha", 0.111111, 0.222222, 7, 50, False)]
+    write_web_communities(web, rows)
+    out = tmp_path / "top_authors.json"
+    build_top_authors(str(web), out)
+    entries = json.loads(out.read_text())
+    assert entries[0] == ["Alpha", "A1", 0.111111, 0.222222, 50, 7]
+    assert isinstance(entries[0][5], int)
+
+
+def test_top_authors_excludes_ring(tmp_path):
+    web = tmp_path / "web.parquet"
+    rows = [
+        ("A1", "RingNode", 0.1, 0.1, 0, 999, True),
+        ("A2", "Normal", 0.2, 0.2, 0, 50, False),
+    ]
+    write_web_communities(web, rows)
+    out = tmp_path / "top_authors.json"
+    n = build_top_authors(str(web), out)
+    assert n == 1
+    entries = json.loads(out.read_text())
+    assert [e[1] for e in entries] == ["A2"]
+
+
+def test_top_authors_atomic_write(tmp_path):
+    web = tmp_path / "web.parquet"
+    rows = [("A1", "Alpha", 0.1, 0.1, 0, 50, False)]
+    write_web_communities(web, rows)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    out = out_dir / "top_authors.json"
+    build_top_authors(str(web), out)
+    assert out.exists()
+    assert not list(out_dir.glob("*.tmp"))         # no leftover tmp file
