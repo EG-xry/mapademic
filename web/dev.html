@@ -361,7 +361,7 @@ function parseHash() {
     const zoom = Number(m[1]), lat = Number(m[2]), lng = Number(m[3]);
     // Out-of-range views (hand-mangled hashes) are dropped rather than fed
     // to jumpTo, where an invalid LngLat would throw mid-"load" handler.
-    if (zoom >= 0 && zoom <= 13 && Math.abs(lat) <= 85 && Math.abs(lng) <= 180) {
+    if (zoom >= 0 && zoom <= 11 && Math.abs(lat) <= 85 && Math.abs(lng) <= 180) {
       out.view = { zoom, lat, lng };
     }
   }
@@ -408,7 +408,7 @@ const map = new maplibregl.Map({
         paint: { "raster-fade-duration": 150 } }
     ]
   },
-  center: [0, 0], zoom: 1, minZoom: 0, maxZoom: 13, renderWorldCopies: false
+  center: [0, 0], zoom: 1, minZoom: 0, maxZoom: 11, renderWorldCopies: false
 });
 map.addControl(new maplibregl.NavigationControl());
 
