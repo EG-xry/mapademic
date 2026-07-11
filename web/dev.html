@@ -303,7 +303,7 @@
     </label>
     <label class="dp-check">
       <input id="dp-vector-points" type="checkbox">
-      Vector points (beta)
+      Vector points at deep zoom
     </label>
     <button id="display-reset" type="button">Reset</button>
   </div>
@@ -428,6 +428,21 @@ let styleReady = false;
 function safePaint(prop, v) {
   if (!styleReady) return;
   map.setPaintProperty("dots", prop, v);
+}
+
+// Single resolver owning every raster-opacity write on the dots layer, so
+// path-dimming and vector-points handoff (added later in this file, once
+// displaySettings/VECTOR_POINTS_MIN_ZOOM exist) never fight over the same
+// paint property. renderPath/clearPath only ever set pathDimActive and call
+// this -- they no longer touch raster-opacity directly. Precedence: vector
+// points active (enabled AND zoom >= VECTOR_POINTS_MIN_ZOOM) always wins,
+// fading the raster fully out so vector circles are the only dots layer
+// visible; otherwise a path in flight dims the raster to 0.45 (unchanged
+// pre-vector-points behavior); otherwise full opacity.
+let pathDimActive = false;   // true while renderPath owns a drawn path, cleared by clearPath
+function updateRasterOpacity() {
+  const vectorActive = displaySettings.vectorPoints && map.getZoom() >= VECTOR_POINTS_MIN_ZOOM;
+  safePaint("raster-opacity", vectorActive ? 0 : (pathDimActive ? 0.45 : 1.0));
 }
 
 const tileCache = new Map();         // "z/x/y" -> {l:[...]} or null
@@ -993,7 +1008,8 @@ function clearPath() {
   clearHopList();
   if (map.getLayer("path-line")) map.removeLayer("path-line");
   if (map.getSource("path")) map.removeSource("path");
-  safePaint("raster-opacity", 1.0);
+  pathDimActive = false;
+  updateRasterOpacity();
   setPathStatus("");
   activeP = null;
   writeHash();
@@ -1051,7 +1067,8 @@ async function renderPath(pathSteps, hops, idA, idB) {
     return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
   });
 
-  safePaint("raster-opacity", 0.45);
+  pathDimActive = true;
+  updateRasterOpacity();
 
   const bounds = coords.reduce(
     (b, c) => b.extend(c),
@@ -1324,8 +1341,9 @@ function collides(placed, x, y, w, h) {
 
 // ---- Task 1 (night-polish): display settings panel ----
 // Sliders only ever touch brightness/contrast/saturation; raster-opacity stays
-// owned by renderPath/clearPath (path-mode dimming) so the two stay orthogonal.
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, vectorPoints: false };
+// owned by updateRasterOpacity() (see near safePaint above), which renderPath/
+// clearPath and the vector-points toggle all defer to, so the three stay orthogonal.
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, vectorPoints: true };
 const DISPLAY_KEY = "mapademic.display";
 
 function loadDisplaySettings() {
@@ -1417,6 +1435,7 @@ dpVectorPoints.addEventListener("change", () => {
   displaySettings.vectorPoints = dpVectorPoints.checked;
   saveDisplaySettings();
   updateVectorPoints();
+  updateRasterOpacity();
 });
 dpReset.addEventListener("click", () => {
   displaySettings = { ...DISPLAY_DEFAULTS };
@@ -1426,6 +1445,7 @@ dpReset.addEventListener("click", () => {
   drawLabels();
   drawRegions();
   updateVectorPoints();
+  updateRasterOpacity();
 });
 
 let markers = [];
@@ -1487,14 +1507,15 @@ function drawRegions() {
   }
 }
 
-// ---- Vector points experiment v0 (R7) ----
-// docs/superpowers/plans/2026-07-11-vector-points-experiment.md. Prototype:
-// render the same z9 label-tile entries used for labels/hover as a MapLibre
-// GeoJSON circle layer, so points stay crisp (resolution-independent) at
-// deep zoom instead of relying on raster upscaling. Reuses fetchTile/
-// visibleTiles exactly like drawLabels; only active at zoom >= 10.25, where
-// a z9 tile already covers a large-enough screen area that the label tiles'
-// 4000/tile cap isn't a visible gap.
+// ---- Vector points v1 (R8) ----
+// docs/superpowers/plans/2026-07-11-vector-points-experiment.md. Render the
+// same z9 label-tile entries used for labels/hover as a MapLibre GeoJSON
+// circle layer, so points stay crisp (resolution-independent) at deep zoom
+// instead of relying on raster upscaling. Reuses fetchTile/visibleTiles
+// exactly like drawLabels; only active at zoom >= 10.25, where a z9 tile
+// already covers a large-enough screen area that the label tiles' 4000/tile
+// cap isn't a visible gap. Raster-opacity handoff at that threshold is owned
+// by updateRasterOpacity() (see near safePaint), not this function.
 const VECTOR_POINTS_MIN_ZOOM = 10.25;
 // Hard cap on rendered features regardless of how many tiles are visible --
 // keeps the GeoJSON source (and MapLibre's rebuild of it) bounded on a very
@@ -1502,6 +1523,14 @@ const VECTOR_POINTS_MIN_ZOOM = 10.25;
 // sorted by citations desc first, so anything trimmed is always the
 // lowest-cited tail, not a random subset.
 const VECTOR_POINTS_CAP = 60000;
+// community (label-tile entry field 5, added by pipeline/build_index.py's
+// community column) -> raster palette hex, from legend.json's 37 big
+// communities (populated by the legend.json fetch below, async). Tail/unknown
+// communities (not one of the 37) and stale-cached label tiles from before
+// that field existed (entry[5] undefined) both fall back to this dust grey,
+// matching the raster's own tail-author color.
+const communityColors = new Map();
+const VECTOR_POINT_FALLBACK_COLOR = "#565660";
 let vectorGen = 0;           // invalidates stale in-flight tile fetches (labelGen pattern)
 async function updateVectorPoints() {
   const gen = ++vectorGen;
@@ -1519,10 +1548,13 @@ async function updateVectorPoints() {
   }
   const data = {
     type: "FeatureCollection",
-    features: entries.map(([name, id, xw, yw, cited]) => ({
+    // community (entry[5]) is undefined for stale-cached tiles fetched before
+    // the community-id rebuild landed; communityColors.get(undefined) misses
+    // same as an unknown community id, so both fall back to dust grey below.
+    features: entries.map(([name, id, xw, yw, cited, community]) => ({
       type: "Feature",
       geometry: { type: "Point", coordinates: toLngLat(xw, yw).toArray() },
-      properties: { cited },
+      properties: { cited, color: communityColors.get(community) || VECTOR_POINT_FALLBACK_COLOR },
     })),
   };
   const src = map.getSource("vector-points");
@@ -1545,7 +1577,7 @@ async function updateVectorPoints() {
       source: "vector-points",
       paint: {
         // radius = (zoom-interpolated base px) * (sqrt(cited)-interpolated factor),
-        // so highly-cited authors render as slightly larger dots without the
+        // so highly-cited authors render as visibly larger dots without the
         // raster splat treatment. MapLibre only allows a "zoom" expression as
         // the input of a top-level step/interpolate, so the zoom-interpolate
         // has to be the outer expression, with the (zoom-independent)
@@ -1555,10 +1587,14 @@ async function updateVectorPoints() {
         // interpolate" at addLayer time.
         "circle-radius": [
           "interpolate", ["linear"], ["zoom"],
-          10.25, ["*", 1.5, ["interpolate", ["linear"], ["sqrt", ["get", "cited"]], 0, 0.8, 250, 1.6, 450, 2.2]],
-          11, ["*", 3, ["interpolate", ["linear"], ["sqrt", ["get", "cited"]], 0, 0.8, 250, 1.6, 450, 2.2]],
+          10.25, ["*", 1.5, ["interpolate", ["linear"], ["sqrt", ["get", "cited"]], 0, 0.55, 70, 1.0, 250, 2.0, 450, 3.0, 700, 3.8]],
+          11, ["*", 3, ["interpolate", ["linear"], ["sqrt", ["get", "cited"]], 0, 0.55, 70, 1.0, 250, 2.0, 450, 3.0, 700, 3.8]],
         ],
-        "circle-color": "#cfd6d2",
+        // color resolved per feature in JS (feature property "color", set
+        // above from communityColors) rather than a giant match expression --
+        // matches the raster palette's 37 big communities, dust grey fallback
+        // for the tail/unknown/undefined case.
+        "circle-color": ["get", "color"],
         "circle-opacity": 0.85,
         "circle-stroke-width": 0.5,
         "circle-stroke-color": "#0a0a0c",
@@ -1569,6 +1605,12 @@ async function updateVectorPoints() {
 
 fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
   .then(entries => {
+    // All 37 big communities go into the color map (not just the top-25 shown
+    // in the legend UI below), so vector points match the raster palette
+    // regardless of which community a given point belongs to.
+    for (const e of entries) {
+      if (e.community != null && e.color) communityColors.set(e.community, e.color);
+    }
     const box = document.getElementById("legend-rows");
     for (const e of entries.slice(0, 25)) {
       const row = document.createElement("div"); row.className = "row";
@@ -1581,6 +1623,10 @@ fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
       row.append(sw, label, n);
       box.appendChild(row);
     }
+    // Vector points may have already rendered (grey fallback) before this
+    // fetch resolved -- e.g. vectorPoints defaults on and the initial view is
+    // already >= VECTOR_POINTS_MIN_ZOOM -- so re-run once colors are known.
+    updateVectorPoints();
   });
 
 // ---- Task 3 (night-polish): author info card on click ----
@@ -1746,6 +1792,10 @@ map.on("click", async ev => {
 });
 map.on("load", () => {
   styleReady = true;               // safePaint writes are safe from here on
+  // Smooth crossfade for every raster-opacity write updateRasterOpacity makes
+  // from here on (vector-points handoff, path dimming) -- set once, since
+  // it's a static paint config rather than a per-call value.
+  safePaint("raster-opacity-transition", { duration: 300 });
   if (initialHash && initialHash.view) {
     const v = initialHash.view;
     // parseHash already range-checks, but a throw here would kill the rest
@@ -1757,6 +1807,7 @@ map.on("load", () => {
   drawLabels();
   drawRegions();
   updateVectorPoints();
+  updateRasterOpacity();
   restoreFromHash(initialHash);   // async; resolves a=/p= independently of view restore
 });
 // ---- Task 5 (data-pipeline): live label/region updates while panning/zooming ----
@@ -1789,7 +1840,7 @@ function throttle(fn, wait) {
     }
   };
 }
-const throttledMoveRedraw = throttle(() => { drawLabels(); drawRegions(); updateVectorPoints(); }, 180);
+const throttledMoveRedraw = throttle(() => { drawLabels(); drawRegions(); updateVectorPoints(); updateRasterOpacity(); }, 180);
 map.on("move", throttledMoveRedraw);
 map.on("moveend", () => { drawLabels(); drawRegions(); writeHash(); });
 map.on("zoomend", () => { drawLabels(); drawRegions(); });
