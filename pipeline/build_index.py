@@ -444,10 +444,12 @@ def build_community_shards(web: str, out_dir: Path, top_n: int = 20000, min_memb
 TOP_AUTHORS_CAP = 50_000   # global top-N-by-citations roster size for the mid-zoom vector overlay
 
 
-def build_top_authors(web: str, out_path: str) -> int:
+def build_top_authors(web: str, out_path: str, top_n: int = None) -> int:
     """Global top-N-by-citations author roster (all communities pooled),
     for the mid-zoom vector overlay. Ring nodes excluded, same as label
     tiles and community shards."""
+    if top_n is None:
+        top_n = TOP_AUTHORS_CAP
     con = duckdb.connect()
     apply_resource_limits(con)
     rows = con.execute(
@@ -456,7 +458,7 @@ def build_top_authors(web: str, out_path: str) -> int:
         FROM read_parquet('{web}')
         WHERE NOT is_ring
         ORDER BY cited_by_count DESC, id
-        LIMIT {TOP_AUTHORS_CAP}
+        LIMIT {top_n}
         """
     ).fetchall()
     entries = [
@@ -481,6 +483,7 @@ def run(args) -> int:
     b = build_community_boundaries(web, str(out / "boundaries.json"))
     m = build_community_shards(web, out)
     ta = build_top_authors(web, str(out / "top_authors.json"))
+    ta_xl = build_top_authors(web, str(out / "top_authors_xl.json"), top_n=300_000)
     print(f"{t:,} label tiles, {s:,} searchable names, {i:,} id-shard entries, "
-          f"{b:,} boundary polylines, {m:,} community shards, {ta:,} top authors -> {out}")
+          f"{b:,} boundary polylines, {m:,} community shards, {ta:,} top authors, {ta_xl:,} top authors xl -> {out}")
     return 0

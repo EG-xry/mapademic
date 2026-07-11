@@ -576,3 +576,15 @@ def test_top_authors_atomic_write(tmp_path):
     build_top_authors(str(web), out)
     assert out.exists()
     assert not list(out_dir.glob("*.tmp"))         # no leftover tmp file
+
+
+def test_top_authors_top_n_parameter_respected(tmp_path):
+    web = tmp_path / "web.parquet"
+    rows = [(f"A{i}", f"Name{i}", 0.1, 0.1, 0, 100 - i, False) for i in range(10)]
+    write_web_communities(web, rows)
+    out = tmp_path / "top_authors.json"
+    n = build_top_authors(str(web), str(out), top_n=5)
+    assert n == 5
+    entries = json.loads(out.read_text())
+    assert len(entries) == 5
+    assert [e[1] for e in entries] == ["A0", "A1", "A2", "A3", "A4"]  # top 5 by cited
