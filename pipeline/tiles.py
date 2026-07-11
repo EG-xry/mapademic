@@ -190,9 +190,9 @@ def _accumulate_edges(acc: np.ndarray, edges: dict, z: int, x: int, yu: int,
                       buckets: dict, radius: int, alpha: float) -> None:
     """Rasterize edges near tile (x, yu) additively into the shared alpha
     buffer `acc` (alpha per sample; no clip or color here). Both edge sets add
-    into ONE buffer so the 0.25 glow ceiling is shared - overlapping layers
-    cannot stack past a single ceiling. render_zoom clips the combined buffer
-    once and applies EDGE_RGB once."""
+    into ONE buffer so the 0.25 glow ceiling is shared for future co-occurring
+    layers. Today at most one layer draws per zoom. render_zoom clips the
+    combined buffer once and applies EDGE_RGB once."""
     hits = [buckets[(bx, by)]
             for bx in range(x - radius, x + radius + 1)
             for by in range(yu - radius, yu + radius + 1)
@@ -248,7 +248,7 @@ def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool,
             if edge_buckets is not None:
                 _accumulate_edges(acc, edges, z, x, yu, edge_buckets, edge_radius,
                                   EDGE_ALPHA)
-            # single shared ceiling across both edge layers, color applied once
+            # shared-acc structure for future co-occurring layers; today at most one draws
             img += np.clip(acc, 0, 0.25)[:, :, None] * EDGE_RGB
         ix = px[sel] - x * TILE
         iy_up = py[sel] - yu * TILE
@@ -343,17 +343,29 @@ def run(args) -> int:
               if any(z in SPLAT_RADIUS for z in zooms) else None)
     edges = None
     if args.edges:
-        epath = (str(data_dir() / "edges_px.parquet")
-                 if args.edges == "__default__" else args.edges)
-        edges = load_edges(epath)
-        print(f"baking {len(edges['x0']):,} edges into z{EDGE_MINZ}-z{EDGE_MAXZ} tiles",
-              flush=True)
+        # Check if any zoom in the requested range can draw edges
+        if any(EDGE_MINZ <= z <= EDGE_MAXZ for z in zooms):
+            epath = (str(data_dir() / "edges_px.parquet")
+                     if args.edges == "__default__" else args.edges)
+            edges = load_edges(epath)
+            print(f"baking {len(edges['x0']):,} edges into z{EDGE_MINZ}-z{EDGE_MAXZ} tiles",
+                  flush=True)
+        else:
+            zoom_range = f"{min(zooms)}-{max(zooms)}"
+            print(f"note: --edges has no effect for zooms {zoom_range} (edges bake at z{EDGE_MINZ}-z{EDGE_MAXZ})",
+                  flush=True)
     edges_w1 = None
     if args.edges_w1:
-        w1path = (str(data_dir() / "edges_px_w1.parquet")
-                  if args.edges_w1 == "__default__" else args.edges_w1)
-        edges_w1 = load_edges(w1path)
-        print(f"baking {len(edges_w1['x0']):,} weight-1 edges into z{MAXZ} tiles", flush=True)
+        # Check if z10 (MAXZ) is in the requested zooms
+        if MAXZ in zooms:
+            w1path = (str(data_dir() / "edges_px_w1.parquet")
+                      if args.edges_w1 == "__default__" else args.edges_w1)
+            edges_w1 = load_edges(w1path)
+            print(f"baking {len(edges_w1['x0']):,} weight-1 edges into z{MAXZ} tiles", flush=True)
+        else:
+            zoom_range = f"{min(zooms)}-{max(zooms)}"
+            print(f"note: --edges-w1 has no effect for zooms {zoom_range} (edges-w1 bake at z{MAXZ} only)",
+                  flush=True)
     index_dir = data_dir() / "index"
     index_dir.mkdir(parents=True, exist_ok=True)
     n_legend = write_legend(stats, str(index_dir / "legend.json"),
