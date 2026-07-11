@@ -153,7 +153,12 @@
     #display-panel .dp-row-head { display: flex; justify-content: space-between; align-items: center; }
     #display-panel .dp-row-head .n { color: #888; }
     #display-panel input[type="range"] { width: 100%; }
-    #display-panel .dp-radios { display: flex; gap: 10px; }
+    /* R13: flex-wrap keeps the new "Points" row's longer "Raster + vector"
+       label from breaking word-by-word (word-wrap inside a squeezed flex
+       item); an item that doesn't fit now wraps to its own line instead.
+       Existing rows (Label density, Author names) already fit on one line
+       and are unaffected. */
+    #display-panel .dp-radios { display: flex; flex-wrap: wrap; gap: 10px; }
     #display-panel .dp-radios label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
     #display-panel .dp-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
     #display-reset { background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
@@ -268,9 +273,9 @@
           faint grey web visible at z8-9 is repeat coauthorships - at max
           zoom the map stays clean, and you see a researcher's coauthorships
           by searching them or via the info card's Coauthors button. Grey
-          dust is authors without retained coauthor links. The gear's Vector
-          points overlay sizes and colors dots by citations and community at
-          every zoom, not just up close.</p>
+          dust is authors without retained coauthor links. The gear's Points
+          setting sizes and colors dots by citations and community at every
+          zoom, not just up close, and can hide the raster splats entirely.</p>
       </section>
       <section>
         <h3>Controls</h3>
@@ -340,10 +345,16 @@
       Region names
     </label>
     <!-- R12b: category-boundaries UI removed (pipeline builder + data/index/boundaries.json stay dormant on disk). -->
-    <label class="dp-check">
-      <input id="dp-vector-points" type="checkbox">
-      Vector points
-    </label>
+    <!-- R13: replaced the old "Vector points" on/off checkbox with a
+         three-way mode -- see displaySettings.pointMode. -->
+    <div class="dp-row">
+      <div class="dp-row-head"><span>Points</span></div>
+      <div class="dp-radios" role="radiogroup" aria-label="Points">
+        <label><input type="radio" name="dp-point-mode" value="both" checked> Raster + vector</label>
+        <label><input type="radio" name="dp-point-mode" value="vector"> Vector only</label>
+        <label><input type="radio" name="dp-point-mode" value="raster"> Raster only</label>
+      </div>
+    </div>
     <div class="dp-row">
       <div class="dp-row-head"><label for="dp-size-contrast">Citation size contrast</label><span id="dp-size-contrast-n" class="n"></span></div>
       <input id="dp-size-contrast" type="range" min="0" max="5" step="0.1" value="1.0">
@@ -478,22 +489,30 @@ function safePaint(prop, v) {
 // this file, once displaySettings/VECTOR_POINTS_MIN_ZOOM/isolateCommunity
 // exist) never fight over the same paint property. renderPath/clearPath only
 // ever set pathDimActive and call this -- they no longer touch raster-opacity
-// directly. Precedence: vector points active (enabled AND zoom >=
-// VECTOR_POINTS_MIN_ZOOM) always wins, fading the raster fully out so vector
-// circles are the only dots layer visible (isolate filtering happens inside
-// updateVectorPoints itself in that case); otherwise a path in flight dims
-// the raster to 0.45 (unchanged pre-vector-points behavior); otherwise a
-// community isolate in effect (Task R10a) dims the raster to 0.2 at ALL
-// zooms -- this is the isolate's only effect below vector zoom, since the
-// raster itself isn't filterable per-community until R10b's per-community
-// shards ship; otherwise full opacity.
+// directly. Precedence (R13: pointMode replaces the old vectorPoints
+// checkbox): pointMode "vector" always wins outright, forcing the raster
+// fully out at every zoom (not just deep zoom) since that mode's whole point
+// is vector-only rendering; otherwise pointMode "both" at deep zoom (zoom >=
+// VECTOR_POINTS_MIN_ZOOM) fades the raster out the same way the old
+// vectorPoints-enabled behavior did, so vector circles are the only dots
+// layer visible there (isolate filtering happens inside updateVectorPoints
+// itself in that case); otherwise a path in flight dims the raster to 0.45
+// (unchanged pre-vector-points behavior); otherwise a community isolate in
+// effect (Task R10a) dims the raster to 0.2 at ALL zooms -- this is the
+// isolate's only effect below vector zoom (or in pointMode "raster" at any
+// zoom), since the raster itself isn't filterable per-community until R10b's
+// per-community shards ship; otherwise full opacity. pointMode "raster"
+// never forces 0 here -- see updateVectorPoints for how its isolate shard
+// dots still render as vector points regardless (deliberate, isolate is an
+// explicit action) without this resolver treating that as "vector active".
 let pathDimActive = false;   // true while renderPath owns a drawn path, cleared by clearPath
 function updateRasterOpacity() {
-  const vectorActive = displaySettings.vectorPoints && map.getZoom() >= VECTOR_POINTS_MIN_ZOOM;
+  const vectorActive = displaySettings.pointMode === "both" && map.getZoom() >= VECTOR_POINTS_MIN_ZOOM;
   // Deliberate precedence: a drawn path's dim (0.45) wins over isolate's
   // deeper dim (0.2) when both are active, since the path is the fresher,
   // more specific intent and path drawing doesn't clear isolate state.
-  const opacity = vectorActive ? 0
+  const opacity = displaySettings.pointMode === "vector" ? 0
+    : vectorActive ? 0
     : pathDimActive ? 0.45
     : isolateCommunity != null ? 0.2
     : 1.0;
@@ -1471,18 +1490,33 @@ function collides(placed, x, y, w, h) {
 // Sliders only ever touch brightness/contrast/saturation; raster-opacity stays
 // owned by updateRasterOpacity() (see near safePaint above), which renderPath/
 // clearPath and the vector-points toggle all defer to, so the three stay orthogonal.
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, vectorPoints: true, labelMode: "normal", sizeContrast: 1.0 };
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 1.0 };
 const DISPLAY_KEY = "mapademic.display";
 
 // R12b: a stale localStorage value still carrying the removed "boundaries"
 // key just spreads in as an extra unused property on displaySettings below
 // (loadDisplaySettings' `{...DISPLAY_DEFAULTS, ...JSON.parse(raw)}`) -- no
 // code reads it anymore, so it's silently harmless rather than an error.
+// R13: the boolean "vectorPoints" checkbox setting was replaced by the
+// three-way "pointMode" radio (see DISPLAY_DEFAULTS above and the Points
+// row in #display-panel). A stale vectorPoints value is actively migrated
+// (true -> "both", matching the old overlay-everywhere default; false ->
+// "raster", matching the old fully-off state) rather than left to spread in
+// inert like "boundaries" above, since leaving it alone would silently drop
+// the user's prior on/off choice back to the new default every load. Only
+// applies when pointMode itself isn't already present in the saved value --
+// an explicit new-format save always wins. The stale vectorPoints property
+// is otherwise left in place afterward (same as "boundaries"); nothing reads
+// it again, so it's harmless.
 function loadDisplaySettings() {
   try {
     const raw = localStorage.getItem(DISPLAY_KEY);
     if (!raw) return { ...DISPLAY_DEFAULTS };
-    return { ...DISPLAY_DEFAULTS, ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw);
+    if (parsed.pointMode === undefined && typeof parsed.vectorPoints === "boolean") {
+      parsed.pointMode = parsed.vectorPoints ? "both" : "raster";
+    }
+    return { ...DISPLAY_DEFAULTS, ...parsed };
   } catch {
     return { ...DISPLAY_DEFAULTS };
   }
@@ -1514,7 +1548,7 @@ const dpSaturationN = document.getElementById("dp-saturation-n");
 const dpDensityRadios = document.querySelectorAll('input[name="dp-density"]');
 const dpLabelModeRadios = document.querySelectorAll('input[name="dp-label-mode"]');
 const dpRegions = document.getElementById("dp-regions");
-const dpVectorPoints = document.getElementById("dp-vector-points");
+const dpPointModeRadios = document.querySelectorAll('input[name="dp-point-mode"]');
 const dpSizeContrast = document.getElementById("dp-size-contrast");
 const dpSizeContrastN = document.getElementById("dp-size-contrast-n");
 const dpReset = document.getElementById("display-reset");
@@ -1529,7 +1563,7 @@ function syncDisplayUI() {
   dpDensityRadios.forEach(r => { r.checked = Number(r.value) === displaySettings.labelDensity; });
   dpLabelModeRadios.forEach(r => { r.checked = r.value === displaySettings.labelMode; });
   dpRegions.checked = displaySettings.regionNames;
-  dpVectorPoints.checked = displaySettings.vectorPoints;
+  dpPointModeRadios.forEach(r => { r.checked = r.value === displaySettings.pointMode; });
   dpSizeContrast.value = displaySettings.sizeContrast;
   dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
 }
@@ -1575,12 +1609,13 @@ dpRegions.addEventListener("change", () => {
   saveDisplaySettings();
   drawRegions();
 });
-dpVectorPoints.addEventListener("change", () => {
-  displaySettings.vectorPoints = dpVectorPoints.checked;
+dpPointModeRadios.forEach(r => r.addEventListener("change", () => {
+  if (!r.checked) return;
+  displaySettings.pointMode = r.value;
   saveDisplaySettings();
   updateVectorPoints();
   updateRasterOpacity();
-});
+}));
 dpSizeContrast.addEventListener("input", () => {
   displaySettings.sizeContrast = Number(dpSizeContrast.value);
   dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
@@ -1689,10 +1724,14 @@ function drawRegions() {
 //     pixels are fixed size, and isolate mode's shard dots "replicate that
 //     globally"): the global top_authors.json shard (50k, citation-sorted)
 //     renders instead, capped by shardCapForZoom same as isolate's
-//     per-community shard. The raster is NOT dimmed for this -- see
-//     updateRasterOpacity, whose vectorActive check stays gated on
-//     z >= VECTOR_POINTS_MIN_ZOOM, so this overlay only ever complements the
-//     raster, never replaces it.
+//     per-community shard. In pointMode "both" the raster is NOT dimmed for
+//     this -- see updateRasterOpacity, whose "both"-mode vectorActive check
+//     stays gated on z >= VECTOR_POINTS_MIN_ZOOM, so this overlay only ever
+//     complements the raster there, never replaces it. R13: pointMode
+//     "vector" dims the raster to 0 at every zoom regardless (a separate,
+//     unconditional top-precedence branch in updateRasterOpacity), so at
+//     that point this same overlay IS the only dots layer visible below
+//     10.25 too.
 const VECTOR_POINTS_MIN_ZOOM = 10.25;
 // Hard cap on rendered features regardless of how many tiles are visible --
 // keeps the GeoJSON source (and MapLibre's rebuild of it) bounded on a very
@@ -1832,11 +1871,16 @@ let vectorGen = 0;           // invalidates stale in-flight tile/shard fetches (
 function colorForCommunity(community) {
   return communityColors.get(community) || VECTOR_POINT_FALLBACK_COLOR;
 }
+// R13: name and a bare (stripId'd) id are carried in properties too -- small
+// memory cost -- so the sub-HIT_ZOOM hover/click path (see hitTest below) can
+// build an entry-like hit array straight from a queryRenderedFeatures result
+// without a second lookup. xw/yw aren't stored redundantly; that path derives
+// them back out of the feature's own geometry instead (see hitTestVector).
 function entryToFeature([name, id, xw, yw, cited, community]) {
   return {
     type: "Feature",
     geometry: { type: "Point", coordinates: toLngLat(xw, yw).toArray() },
-    properties: { cited, color: colorForCommunity(community) },
+    properties: { cited, color: colorForCommunity(community), name, id: stripId(id) },
   };
 }
 // Shared by isolate mode's community-shard render and the R12b global
@@ -1851,7 +1895,10 @@ function shardEntriesToFeatures(entries, z) {
 async function updateVectorPoints() {
   const gen = ++vectorGen;
   const z = map.getZoom();
-  const vectorActive = displaySettings.vectorPoints && z >= VECTOR_POINTS_MIN_ZOOM;
+  // R13: pointMode "raster" suppresses every vector-point branch below EXCEPT
+  // shardActive (isolate's own shard dots, right below) -- see that branch's
+  // comment for why isolate keeps rendering even in "raster" mode.
+  const vectorActive = displaySettings.pointMode !== "raster" && z >= VECTOR_POINTS_MIN_ZOOM;
   // R10b "isolate anywhere": below vector-points zoom, an active community
   // isolate still renders its top-cited authors as points over the dimmed
   // raster (see updateRasterOpacity's isolate branch, which is already
@@ -1860,18 +1907,28 @@ async function updateVectorPoints() {
   // label tiles. At/above VECTOR_POINTS_MIN_ZOOM the label-tile branch below
   // already filters by community and has every author (not just the top
   // 20k), so this branch only ever applies strictly below the threshold, and
-  // is independent of the vectorPoints display toggle.
+  // is independent of pointMode -- R13: including pointMode "raster". That is
+  // a deliberate choice, not an oversight: isolating a community is an
+  // explicit user action, and its shard dots are the only way to see who's
+  // in that community below vector zoom once the raster itself dims (raster
+  // isn't filterable per-community). "Raster" mode's contract is "no vector
+  // point layers by default", not "no vector points, ever" -- it doesn't
+  // reach into isolate's own explicit rendering. The deep-zoom label-tile
+  // isolate filter (vectorActive branch below) does NOT get this exemption --
+  // "raster" mode suppresses that one same as everything else, per spec.
   const shardActive = isolateCommunity != null && z < VECTOR_POINTS_MIN_ZOOM;
   setIsolateShardActive(shardActive);
   // R12b: below vector-points zoom, when vector points are enabled and no
   // isolate is active, render the global top_authors.json shard instead --
   // gated on isolateCommunity == null so isolate always takes precedence
   // when active (its dim + filter behavior is unchanged). Unlike shardActive,
-  // this DOES depend on the vectorPoints display toggle: it's the toggle's
-  // own mid-zoom rendering, not an isolate side effect. updateRasterOpacity's
-  // vectorActive check stays gated on z >= VECTOR_POINTS_MIN_ZOOM, so this
-  // path never dims the raster -- it only ever complements it.
-  const globalMidZoomActive = displaySettings.vectorPoints && !vectorActive && isolateCommunity == null;
+  // this DOES depend on pointMode (R13: not "raster"): it's the mode's own
+  // mid-zoom rendering, not an isolate side effect. updateRasterOpacity's
+  // vectorActive check stays gated on pointMode "both" AND z >=
+  // VECTOR_POINTS_MIN_ZOOM, so this path never dims the raster on its own --
+  // it only ever complements it (pointMode "vector" dims the raster
+  // separately, unconditionally, at the top of that resolver).
+  const globalMidZoomActive = displaySettings.pointMode !== "raster" && !vectorActive && isolateCommunity == null;
   if (!vectorActive && !shardActive && !globalMidZoomActive) {
     if (map.getLayer("vector-points")) map.removeLayer("vector-points");
     if (map.getSource("vector-points")) map.removeSource("vector-points");
@@ -2128,8 +2185,8 @@ fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
       legendCommunityRows.set(e.community, row);
     }
     // Vector points may have already rendered (grey fallback) before this
-    // fetch resolved -- e.g. vectorPoints defaults on and the initial view is
-    // already >= VECTOR_POINTS_MIN_ZOOM -- so re-run once colors are known.
+    // fetch resolved -- e.g. pointMode defaults to "both" and the initial
+    // view is already >= VECTOR_POINTS_MIN_ZOOM -- so re-run once colors are known.
     updateVectorPoints();
   });
 
@@ -2261,8 +2318,10 @@ infoCardCopyBtn.addEventListener("click", async () => {
 });
 
 const tip = document.getElementById("tip");
-async function hitTest(pt) {
-  if (map.getZoom() < HIT_ZOOM) return null;
+// z >= HIT_ZOOM: label-tile hit test, unchanged from pre-R13 -- authoritative
+// at this zoom because the z9 tiles carry the FULL local population, not
+// just the top-cited subset the vector layer renders below HIT_ZOOM.
+async function hitTestTiles(pt) {
   // Candidate tiles come from the four corners of the hit box, so dots just
   // across a z9 tile boundary are still found (2-4 tiles worst case).
   const n = 1 << 9, seen = new Set(), tiles = [];
@@ -2285,6 +2344,48 @@ async function hitTest(pt) {
     }
   }
   return best;
+}
+// R13: z < HIT_ZOOM -- hover/click on whatever's actually rendered in the
+// "vector-points" layer (isolate's shard dots, the global mid-zoom overlay,
+// or nothing at all in pointMode "raster" with no isolate active), rather
+// than the old dead zone below HIT_ZOOM. Guarded on layer existence:
+// queryRenderedFeatures throws for a layer id absent from the current style,
+// and vector-points is added/removed dynamically (not part of the initial
+// style) depending on pointMode/isolate/zoom.
+// Small (12x12px) query box -- vector dots are small and can sit close
+// together at low zoom, so a tight box plus the nearest-of-candidates pick
+// below keeps the hit test precise instead of always grabbing whichever
+// feature happened to be drawn last.
+function hitTestVector(pt) {
+  if (!map.getLayer("vector-points")) return null;
+  const feats = map.queryRenderedFeatures(
+    [[pt.x - 6, pt.y - 6], [pt.x + 6, pt.y + 6]], { layers: ["vector-points"] });
+  if (feats.length === 0) return null;
+  let best = feats[0], bestD = Infinity;
+  for (const f of feats) {
+    const p = map.project(f.geometry.coordinates);
+    const d = Math.hypot(p.x - pt.x, p.y - pt.y);
+    if (d < bestD) { bestD = d; best = f; }
+  }
+  // Rebuilds the same [name, id, xw, yw, cited, community] shape hitTestTiles
+  // returns, so openInfoCard/the mousemove tooltip below don't need to know
+  // which path a hit came from. xw/yw come back out of the feature's own
+  // geometry (inverse of entryToFeature's toLngLat) rather than a duplicate
+  // stored property. community is left undefined -- entryToFeature doesn't
+  // carry it in properties (out of scope for this task; openInfoCard already
+  // handles an unresolved community by falling back to its "small community"
+  // legend note, so this is a cosmetic gap, not a broken path).
+  const [lng, lat] = best.geometry.coordinates;
+  const m = maplibregl.MercatorCoordinate.fromLngLat({ lng, lat });
+  const { name, id, cited } = best.properties;
+  return [name, id, m.x, 1 - m.y, cited, undefined];
+}
+// Single entry point for both the mousemove and click handlers below, so the
+// two hit-test paths never fight over cursor/tooltip/card state -- one
+// function owns the branch on zoom, callers stay unchanged.
+async function hitTest(pt) {
+  if (map.getZoom() >= HIT_ZOOM) return hitTestTiles(pt);
+  return hitTestVector(pt);
 }
 map.on("mousemove", async ev => {
   const hit = await hitTest(ev.point);
