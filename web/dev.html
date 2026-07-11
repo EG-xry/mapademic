@@ -257,8 +257,13 @@ map.addControl(new maplibregl.NavigationControl());
 // pre-load call (slider drag, stray clearPath) must not throw. Anything
 // skipped here is reapplied by the map "load" handler (applyDisplayPaint)
 // or is the layer's default already (raster-opacity 1.0).
+// Gates on a styleReady flag, NOT map.isStyleLoaded(): the latter also
+// reports false whenever any source/tile is still in flight (e.g. right
+// after renderPath's addSource), which would silently drop paint writes
+// long after the style itself is usable.
+let styleReady = false;
 function safePaint(prop, v) {
-  if (!map.isStyleLoaded()) return;
+  if (!styleReady) return;
   map.setPaintProperty("dots", prop, v);
 }
 
@@ -1023,6 +1028,7 @@ map.on("click", async ev => {
   window.open(url, "_blank", "noopener");
 });
 map.on("load", () => {
+  styleReady = true;               // safePaint writes are safe from here on
   if (initialHash && initialHash.view) {
     const v = initialHash.view;
     // parseHash already range-checks, but a throw here would kill the rest
