@@ -147,6 +147,8 @@ BLOOM = np.array([[0.06, 0.12, 0.06], [0.12, 0.0, 0.12], [0.06, 0.12, 0.06]],
 EDGE_ALPHA = 0.08
 EDGE_RGB = np.array([0.45, 0.50, 0.60], dtype=np.float32)  # cool grey
 EDGE_MINZ = 8
+EDGE_MAXZ = 9  # regular edges cap out here; z10 (MAXZ) stays edge-free, see
+               # per-author coauthor rays in the viewer for max-zoom detail
 W1_ALPHA = 0.05  # weight-1 edges, drawn only at z == MAXZ
 
 
@@ -224,7 +226,8 @@ def render_zoom(level: dict, z: int, out_dir: Path, bloom: bool,
     bright = _brightness(level["cnt"])
     color = level["rgb"] * bright[:, None]
     tx, ty_up = px // TILE, py // TILE
-    edge_buckets, edge_radius = ((None, 0) if edges is None or z < EDGE_MINZ
+    edge_buckets, edge_radius = ((None, 0)
+                                 if edges is None or z < EDGE_MINZ or z > EDGE_MAXZ
                                  else _bucket_edges(edges, z))
     w1_buckets, w1_radius = ((None, 0) if edges_w1 is None or z != MAXZ
                              else _bucket_edges(edges_w1, z))
@@ -300,10 +303,10 @@ def add_parser(parser) -> None:
     parser.add_argument("--splat-min-cited", type=int, default=60000,
                          help="cited_by_count threshold for z9-10 citation splats (~p99.9)")
     parser.add_argument("--edges", nargs="?", const="__default__", default=None,
-                         help=f"bake faint coauthor edges into z>={EDGE_MINZ} tiles;"
-                              " bare flag uses data/edges_px.parquet;"
+                         help=f"bake faint coauthor edges into z{EDGE_MINZ}-z{EDGE_MAXZ}"
+                              " tiles; bare flag uses data/edges_px.parquet;"
                               " already-rendered tiles are skipped, so delete the"
-                              f" z{EDGE_MINZ}-z{MAXZ} tile dirs first to re-bake")
+                              f" z{EDGE_MINZ}-z{EDGE_MAXZ} tile dirs first to re-bake")
     parser.add_argument("--edges-w1", nargs="?", const="__default__", default=None,
                          help=f"bake faint weight-1 coauthor edges into z{MAXZ} tiles"
                               " only; bare flag uses data/edges_px_w1.parquet;"
@@ -343,7 +346,8 @@ def run(args) -> int:
         epath = (str(data_dir() / "edges_px.parquet")
                  if args.edges == "__default__" else args.edges)
         edges = load_edges(epath)
-        print(f"baking {len(edges['x0']):,} edges into z>={EDGE_MINZ} tiles", flush=True)
+        print(f"baking {len(edges['x0']):,} edges into z{EDGE_MINZ}-z{EDGE_MAXZ} tiles",
+              flush=True)
     edges_w1 = None
     if args.edges_w1:
         w1path = (str(data_dir() / "edges_px_w1.parquet")
