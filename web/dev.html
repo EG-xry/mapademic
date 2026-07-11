@@ -1930,7 +1930,7 @@ async function updateBoundaries() {
     // Anchored directly above "dots", below vector-points (if present) --
     // see beforeIdAbove's comment for the fixed dots < community-boundaries <
     // vector-points < path-line/coauthor-rays stack order.
-    const beforeId = beforeIdAbove(map.getLayer("vector-points") ? "vector-points" : "dots");
+    const beforeId = map.getLayer("vector-points") ? "vector-points" : beforeIdAbove("dots");
     map.addLayer({
       id: "community-boundaries",
       type: "line",
