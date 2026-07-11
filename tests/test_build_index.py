@@ -52,6 +52,8 @@ def test_label_tiles_ranked_and_capped(tmp_path):
     z6 = json.loads((out / "labels/6/16/47.json").read_text())  # 0.25 -> tile 16, y-flip of 16 at z6 = 47
     assert len(z6["l"]) == 50                       # capped at z6
     assert z6["l"][0][0] == "Name0"                 # highest cited first
+    assert len(z6["l"][0]) == 6                      # [display_name, id, xw, yw, cited, community]
+    assert z6["l"][0][5] == 1                        # community round-trips (write_web hardcodes 1)
     z9 = json.loads((out / "labels/9/128/383.json").read_text())
     assert len(z9["l"]) == 60                       # cap 200 not hit
     far = json.loads((out / "labels/6/48/15.json").read_text())
@@ -70,6 +72,22 @@ def test_label_tiles_200_cap(tmp_path):
     assert z8["l"][0][0] == "Name0"                 # highest cited first
     z9 = json.loads((out / "labels/9/128/383.json").read_text())
     assert len(z9["l"]) == 250                       # not capped at z9 (cap 4000)
+
+
+def test_label_tiles_community_round_trips(tmp_path):
+    web = tmp_path / "web.parquet"
+    duckdb.sql(
+        "COPY (SELECT * FROM (VALUES "
+        "('A1', 'Alice', 0.25, 0.25, 7, 20, 100, 'I', 'Biology', FALSE), "
+        "('A2', 'Bob', 0.25, 0.25, 3, 20, 50, 'I', 'Biology', FALSE)"
+        ") t(id, display_name, xw, yw, community, works_count, cited_by_count, institution, field, is_ring))"
+        f" TO '{web}' (FORMAT PARQUET)")
+    out = tmp_path / "index"
+    build_label_tiles(str(web), out)
+    z6 = json.loads((out / "labels/6/16/47.json").read_text())
+    by_id = {e[1]: e for e in z6["l"]}
+    assert by_id["A1"][5] == 7                       # known fixture row: Alice's community
+    assert by_id["A2"][5] == 3                       # known fixture row: Bob's community
 
 
 def test_search_shards_cover_everyone(tmp_path):

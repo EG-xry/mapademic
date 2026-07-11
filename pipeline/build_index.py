@@ -1,5 +1,9 @@
 """Label/hit tiles (zooms 6-9) and prefix search shards. Zero backend.
 
+Label tile entry shape: [display_name, id, xw, yw, cited, community]
+(community as int). Backward-compat: consumers must index fields
+positionally 0..4 as before; field 5 (community) is additive.
+
 Search shard fallback order (viewer): try prefix shards from
 min(len(normalized concatenated name), 5) chars down to 2 chars, then the
 codepoint shard `_<ord(first char of normalized name) mod 128>`, then `_`.
@@ -48,10 +52,10 @@ def build_label_tiles(web: str, out_dir: Path) -> int:
         ntiles = 1 << z
         rows = con.execute(
             f"""
-            SELECT tx, ty_up, display_name, id, xw, yw, cited_by_count FROM (
+            SELECT tx, ty_up, display_name, id, xw, yw, cited_by_count, community FROM (
                 SELECT least({ntiles - 1}, CAST(floor(CAST(xw AS DOUBLE) * {ntiles}) AS INT)) AS tx,
                        least({ntiles - 1}, CAST(floor(CAST(yw AS DOUBLE) * {ntiles}) AS INT)) AS ty_up,
-                       display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count,
+                       display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count, community,
                        row_number() OVER (
                            PARTITION BY least({ntiles - 1}, CAST(floor(CAST(xw AS DOUBLE) * {ntiles}) AS INT)),
                                         least({ntiles - 1}, CAST(floor(CAST(yw AS DOUBLE) * {ntiles}) AS INT))
@@ -63,9 +67,9 @@ def build_label_tiles(web: str, out_dir: Path) -> int:
             """
         ).fetchall()
         tiles = defaultdict(list)
-        for tx, ty_up, name, aid, xw, yw, cited in rows:
+        for tx, ty_up, name, aid, xw, yw, cited, community in rows:
             tiles[(tx, ty_up)].append(
-                [name, aid, round(xw, 6), round(yw, 6), int(cited)]
+                [name, aid, round(xw, 6), round(yw, 6), int(cited), int(community)]
             )
         for (tx, ty_up), entries in tiles.items():
             ty = (ntiles - 1) - ty_up               # XYZ y-flip
