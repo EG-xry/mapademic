@@ -23,9 +23,14 @@
     #tip { position: fixed; display: none; background: #111c; color: #eee;
            font: 12px system-ui; padding: 4px 8px; border-radius: 4px;
            pointer-events: none; z-index: 10; }
+    /* Task R10a follow-up: the scroll lives on #legend-rows, not #legend, so
+       the summary header and the isolate pill anchored right under it stay
+       visible while the (now full 37-community) roster scrolls beneath. The
+       calc reserves room for summary + pill within the 70vh panel cap. */
     #legend { position: fixed; right: 10px; top: 10px; background: #0b0b0bd9;
               color: #ddd; font: 12px system-ui; border-radius: 6px;
-              max-height: 70vh; overflow-y: auto; z-index: 9; width: 230px; }
+              max-height: 70vh; z-index: 9; width: 230px; }
+    #legend-rows { max-height: calc(70vh - 80px); overflow-y: auto; }
     #legend summary { cursor: pointer; padding: 6px 10px; font-weight: 600; }
     #legend .row { display: flex; gap: 6px; align-items: center; padding: 2px 10px; }
     /* ---- Task R10a: legend rows are now interactive (community isolate) ---- */
@@ -238,7 +243,7 @@
   </div>
 </div>
 <button id="help-btn" type="button" aria-label="Help">?</button>
-<details id="legend" open><summary>Legend</summary><div id="legend-rows"></div><div id="legend-isolate-pill"></div></details>
+<details id="legend" open><summary>Legend</summary><div id="legend-isolate-pill"></div><div id="legend-rows"></div></details>
 <div id="help-overlay" role="dialog" aria-modal="true" aria-labelledby="help-title">
   <div id="help-card">
     <div class="hc-head">
@@ -477,6 +482,9 @@ function safePaint(prop, v) {
 let pathDimActive = false;   // true while renderPath owns a drawn path, cleared by clearPath
 function updateRasterOpacity() {
   const vectorActive = displaySettings.vectorPoints && map.getZoom() >= VECTOR_POINTS_MIN_ZOOM;
+  // Deliberate precedence: a drawn path's dim (0.45) wins over isolate's
+  // deeper dim (0.2) when both are active, since the path is the fresher,
+  // more specific intent and path drawing doesn't clear isolate state.
   const opacity = vectorActive ? 0
     : pathDimActive ? 0.45
     : isolateCommunity != null ? 0.2
@@ -1804,10 +1812,10 @@ async function updateVectorPoints() {
 }
 
 // ---- Task R10a: legend author highlight + community isolate v1 ----
-// legendCommunityRows only holds the top-25 rows actually rendered in the
-// legend UI below (not all 37 communities in legend.json/communityColors) --
-// a community that exists but isn't one of those 25 rows has nowhere to
-// highlight/isolate, same as a true long-tail "grey dust" author.
+// legendCommunityRows holds a row for every legend.json entry (all 37 big
+// communities -- the full roster is rendered, the rows container scrolls),
+// so highlight/isolate reaches every colored community; the "grey dust" note
+// path below is only for genuinely-off-legend long-tail communities.
 const legendCommunityRows = new Map();   // community id -> legend row <button>
 const legendIsolatePill = document.getElementById("legend-isolate-pill");
 let legendHighlightGen = 0;              // invalidates a stale in-flight search-path resolve
@@ -1836,6 +1844,9 @@ function highlightLegendCommunity(community) {
     legendNoteRow.className = "row legend-note";
     legendNoteRow.textContent = "selected author: small community (grey dust)";
     document.getElementById("legend-rows").prepend(legendNoteRow);
+    // #legend-rows scrolls (R10a follow-up), so bring the note into view the
+    // same way an active row is.
+    legendNoteRow.scrollIntoView({ block: "nearest" });
   }
 }
 
@@ -1902,14 +1913,16 @@ function toggleIsolateCommunity(community, row, name) {
 
 fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
   .then(entries => {
-    // All 37 big communities go into the color map (not just the top-25 shown
-    // in the legend UI below), so vector points match the raster palette
-    // regardless of which community a given point belongs to.
+    // All 37 big communities go into the color map, so vector points match
+    // the raster palette regardless of which community a point belongs to.
     for (const e of entries) {
       if (e.community != null && e.color) communityColors.set(e.community, e.color);
     }
     const box = document.getElementById("legend-rows");
-    for (const e of entries.slice(0, 25)) {
+    // Full roster (R10a follow-up): every legend.json entry gets a row -- the
+    // rows container scrolls, so highlight/isolate reaches all 37 colored
+    // communities instead of just the top 25.
+    for (const e of entries) {
       // Task R10a: rows are now interactive (click to isolate), so they're
       // real <button>s rather than <div>s -- keyboard-accessible for free
       // (Tab focus, Enter/Space activation) instead of hand-rolling
