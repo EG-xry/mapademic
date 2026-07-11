@@ -28,6 +28,17 @@
               max-height: 70vh; overflow-y: auto; z-index: 9; width: 230px; }
     #legend summary { cursor: pointer; padding: 6px 10px; font-weight: 600; }
     #legend .row { display: flex; gap: 6px; align-items: center; padding: 2px 10px; }
+    /* ---- Task R10a: legend rows are now interactive (community isolate) ---- */
+    #legend button.row { all: unset; box-sizing: border-box; width: 100%;
+                          display: flex; gap: 6px; align-items: center; padding: 2px 10px;
+                          color: #ddd; font: 12px system-ui; cursor: pointer; }
+    #legend .row:hover:not(.legend-note) { background: #ffffff1a; }
+    #legend .row.legend-active { border-left: 3px solid #7fae8e; padding-left: 7px; color: #fff; }
+    #legend .row.legend-isolated { background: #7fae8e26; }
+    #legend .row.legend-note { color: #888; font-style: italic; cursor: default; }
+    #legend-isolate-pill { display: none; margin: 6px 10px 10px; padding: 4px 8px;
+                             background: #7fae8e26; border: 1px solid #7fae8e; border-radius: 4px;
+                             color: #ddd; font: 11px system-ui; }
     #legend .sw { width: 10px; height: 10px; border-radius: 2px; flex: none; }
     #legend .n { color: #888; margin-left: auto; }
     #search { position: fixed; left: 10px; top: 10px; z-index: 9; width: 260px;
@@ -227,7 +238,7 @@
   </div>
 </div>
 <button id="help-btn" type="button" aria-label="Help">?</button>
-<details id="legend" open><summary>Legend</summary><div id="legend-rows"></div></details>
+<details id="legend" open><summary>Legend</summary><div id="legend-rows"></div><div id="legend-isolate-pill"></div></details>
 <div id="help-overlay" role="dialog" aria-modal="true" aria-labelledby="help-title">
   <div id="help-card">
     <div class="hc-head">
@@ -322,7 +333,7 @@
     </label>
     <div class="dp-row">
       <div class="dp-row-head"><label for="dp-size-contrast">Citation size contrast</label><span id="dp-size-contrast-n" class="n"></span></div>
-      <input id="dp-size-contrast" type="range" min="0" max="2.5" step="0.1" value="1.0">
+      <input id="dp-size-contrast" type="range" min="0" max="5" step="0.1" value="1.0">
     </div>
     <button id="display-reset" type="button">Reset</button>
   </div>
@@ -450,18 +461,27 @@ function safePaint(prop, v) {
 }
 
 // Single resolver owning every raster-opacity write on the dots layer, so
-// path-dimming and vector-points handoff (added later in this file, once
-// displaySettings/VECTOR_POINTS_MIN_ZOOM exist) never fight over the same
-// paint property. renderPath/clearPath only ever set pathDimActive and call
-// this -- they no longer touch raster-opacity directly. Precedence: vector
-// points active (enabled AND zoom >= VECTOR_POINTS_MIN_ZOOM) always wins,
-// fading the raster fully out so vector circles are the only dots layer
-// visible; otherwise a path in flight dims the raster to 0.45 (unchanged
-// pre-vector-points behavior); otherwise full opacity.
+// path-dimming, vector-points handoff, and community isolate (added later in
+// this file, once displaySettings/VECTOR_POINTS_MIN_ZOOM/isolateCommunity
+// exist) never fight over the same paint property. renderPath/clearPath only
+// ever set pathDimActive and call this -- they no longer touch raster-opacity
+// directly. Precedence: vector points active (enabled AND zoom >=
+// VECTOR_POINTS_MIN_ZOOM) always wins, fading the raster fully out so vector
+// circles are the only dots layer visible (isolate filtering happens inside
+// updateVectorPoints itself in that case); otherwise a path in flight dims
+// the raster to 0.45 (unchanged pre-vector-points behavior); otherwise a
+// community isolate in effect (Task R10a) dims the raster to 0.2 at ALL
+// zooms -- this is the isolate's only effect below vector zoom, since the
+// raster itself isn't filterable per-community until R10b's per-community
+// shards ship; otherwise full opacity.
 let pathDimActive = false;   // true while renderPath owns a drawn path, cleared by clearPath
 function updateRasterOpacity() {
   const vectorActive = displaySettings.vectorPoints && map.getZoom() >= VECTOR_POINTS_MIN_ZOOM;
-  safePaint("raster-opacity", vectorActive ? 0 : (pathDimActive ? 0.45 : 1.0));
+  const opacity = vectorActive ? 0
+    : pathDimActive ? 0.45
+    : isolateCommunity != null ? 0.2
+    : 1.0;
+  safePaint("raster-opacity", opacity);
 }
 
 const tileCache = new Map();         // "z/x/y" -> {l:[...]} or null
@@ -719,6 +739,7 @@ function clearSearchHighlight() {
     drawLabels();       // the regular label for this author may now reappear
   }
   updateSearchClearVisibility();
+  clearLegendHighlight();   // Task R10a: no author selected -> no legend row highlighted
 }
 
 // Places the pulsing highlight marker plus a persistent name tag -- used by
@@ -743,6 +764,11 @@ function setSearchHighlight(id, name, xw, yw) {
   updateSearchClearVisibility();
   writeHash();
   drawLabels();                // hide this author's regular label immediately
+  // Task R10a: search-shard entries don't carry community, so resolve it by
+  // fetching the z9 label tile at this author's coords (info-card selections
+  // skip this -- they already have community from the hit entry, see
+  // openInfoCard below).
+  highlightLegendForCoords(activeA, xw, yw);
 }
 
 function renderSearchDropdown() {
@@ -1605,7 +1631,14 @@ function drawRegions() {
   const sorted = [...regions].sort((a, b) => a.rank - b.rank);   // rank 1 first
   const placed = [];                                             // screen-space rects
   for (const r of sorted) {
-    const zminByRank = 1.5 + 1.2 * Math.log10(r.rank);
+    // Task R10a: community isolate v1 -- while isolating, only that
+    // community's region name is ever shown.
+    if (isolateCommunity != null && r.community !== isolateCommunity) continue;
+    // Task R10a: global 2.3 floor keeps ANY region name (including rank 1,
+    // "Advancements in Battery Materials") off the initial ~z1.4 default
+    // view -- the old formula alone put rank 1 at zmin 1.5, visible from
+    // launch.
+    const zminByRank = Math.max(2.3, 1.5 + 1.2 * Math.log10(r.rank));
     if (z < zminByRank) continue;
     const pt = map.project(toLngLat(r.xw, r.yw));
     if (pt.x < -50 || pt.y < -20 || pt.x > innerWidth + 50 || pt.y > innerHeight + 20) continue;
@@ -1646,14 +1679,22 @@ const VECTOR_POINTS_CAP = 60000;
 const communityColors = new Map();
 const VECTOR_POINT_FALLBACK_COLOR = "#565660";
 
-// ---- Task 9 (R9): citation size contrast knob ----
+// ---- Task 9 (R9) / R10a: citation size contrast knob ----
 // The v1 circle-radius expression's inner sqrt(cited)-interpolate outputs a
 // "factor" around 1.0 (0.75 floor .. 3.8 top). `contrast` rescales that
-// factor around 1.0: effectiveFactor = 1 + (baseFactor - 1) * contrast, so
-// contrast 1.0 reproduces the original curve exactly (this file's prior
-// fixed factors), 0 flattens every author to the same size (factor 1 at
-// every citation count), and 2.5 stretches it until top-cited authors are
-// ~8x radius while the floor shrinks toward ~0.37x.
+// factor ASYMMETRICALLY around 1.0 (R10a -- Eric: "stop making the smaller
+// citation authors have a smaller circle"):
+//   - stops at/above the floor (base >= 1): effectiveFactor =
+//     1 + (base - 1) * contrast for every contrast value, same as before --
+//     contrast 1.0 reproduces the original curve, 0 flattens to factor 1
+//     everywhere, and >1 amplifies without a ceiling (contrast 5 stretches
+//     the top stop to 1 + 2.8*5 = 15x).
+//   - the one below-floor stop (base < 1, i.e. the small-author 0.75 floor):
+//     effectiveFactor = base once contrast >= 1 -- it STOPS shrinking past
+//     the original baseline as contrast increases, instead of continuing
+//     toward 0 like the old symmetric formula did. Below contrast 1 it still
+//     follows the same 1 + (base - 1) * contrast curve as everything else,
+//     so contrast 0 still flattens ALL stops (including this one) to 1.
 // The final per-stop radius (after the zoom-outer multiply) is clamped to a
 // 0.7px floor via ["max", 0.7, ...] so a high contrast setting never shrinks
 // low-cited authors into invisibility. That max has to sit INSIDE each zoom
@@ -1662,10 +1703,14 @@ const VECTOR_POINT_FALLBACK_COLOR = "#565660";
 // comment above), so the zoom-interpolate must stay the outermost expression.
 const VECTOR_RADIUS_BASE_FACTORS = [0.75, 1.0, 2.0, 3.0, 3.8];   // original v1 stop outputs, contrast 1.0
 const VECTOR_RADIUS_SQRT_STOPS = [0, 70, 250, 450, 700];         // sqrt(cited) stops these factors sit at
+function vectorRadiusEffectiveFactor(base, contrast) {
+  if (base >= 1) return 1 + (base - 1) * contrast;
+  return contrast >= 1 ? base : 1 + (base - 1) * contrast;
+}
 function buildVectorRadiusExpression(contrast) {
   const factorExpr = ["interpolate", ["linear"], ["sqrt", ["get", "cited"]]];
   VECTOR_RADIUS_SQRT_STOPS.forEach((stop, i) => {
-    factorExpr.push(stop, 1 + (VECTOR_RADIUS_BASE_FACTORS[i] - 1) * contrast);
+    factorExpr.push(stop, vectorRadiusEffectiveFactor(VECTOR_RADIUS_BASE_FACTORS[i], contrast));
   });
   return [
     "interpolate", ["linear"], ["zoom"],
@@ -1693,6 +1738,14 @@ async function updateVectorPoints() {
   const lists = await Promise.all(visibleTiles(9).map(([x, y]) => fetchTile(9, x, y)));
   if (gen !== vectorGen) return;     // a newer call (toggle/move/zoom) owns the source now
   let entries = lists.filter(Boolean).flatMap(t => t.l);
+  // Task R10a: community isolate v1 -- filters vector points to the isolated
+  // community. This only ever runs at deep zoom (this function returns above
+  // when zoom < VECTOR_POINTS_MIN_ZOOM), so below vector zoom the isolate is
+  // approximate: dimmed raster only (see updateRasterOpacity), until R10b
+  // ships per-community raster shards.
+  if (isolateCommunity != null) {
+    entries = entries.filter(e => e[5] === isolateCommunity);
+  }
   if (entries.length > VECTOR_POINTS_CAP) {
     entries.sort((a, b) => b[4] - a[4]);           // cited desc
     entries = entries.slice(0, VECTOR_POINTS_CAP); // keep the highest-cited, drop the tail
@@ -1750,6 +1803,103 @@ async function updateVectorPoints() {
   }
 }
 
+// ---- Task R10a: legend author highlight + community isolate v1 ----
+// legendCommunityRows only holds the top-25 rows actually rendered in the
+// legend UI below (not all 37 communities in legend.json/communityColors) --
+// a community that exists but isn't one of those 25 rows has nowhere to
+// highlight/isolate, same as a true long-tail "grey dust" author.
+const legendCommunityRows = new Map();   // community id -> legend row <button>
+const legendIsolatePill = document.getElementById("legend-isolate-pill");
+let legendHighlightGen = 0;              // invalidates a stale in-flight search-path resolve
+let legendActiveRow = null;              // row currently carrying .legend-active, or null
+let legendNoteRow = null;                // transient "small community" note row, or null
+
+function clearLegendHighlight() {
+  legendHighlightGen++;        // drop any in-flight highlightLegendForCoords resolve
+  if (legendActiveRow) { legendActiveRow.classList.remove("legend-active"); legendActiveRow = null; }
+  if (legendNoteRow) { legendNoteRow.remove(); legendNoteRow = null; }
+}
+
+// community: numeric community id, or null/undefined if unresolved. Shared by
+// both selection paths (info-card calls this directly with its hit entry's
+// community; the search path goes through highlightLegendForCoords below,
+// which resolves community first and then calls this).
+function highlightLegendCommunity(community) {
+  clearLegendHighlight();
+  const row = community != null ? legendCommunityRows.get(community) : undefined;
+  if (row) {
+    row.classList.add("legend-active");
+    row.scrollIntoView({ block: "nearest" });
+    legendActiveRow = row;
+  } else {
+    legendNoteRow = document.createElement("div");
+    legendNoteRow.className = "row legend-note";
+    legendNoteRow.textContent = "selected author: small community (grey dust)";
+    document.getElementById("legend-rows").prepend(legendNoteRow);
+  }
+}
+
+// z9 label-tile bucket math for a single (xw, yw) point -- same bucketing
+// visibleTiles uses for a viewport range, narrowed to the one tile a point
+// falls in. yw is stored as world y (1 - mercator y; see toLngLat above), so
+// the row index needs that same flip before scaling by n.
+function z9TileForPoint(xw, yw) {
+  const n = 1 << 9;
+  const tx = Math.min(n - 1, Math.max(0, Math.floor(xw * n)));
+  const ty = Math.min(n - 1, Math.max(0, Math.floor((1 - yw) * n)));
+  return [tx, ty];
+}
+
+// Search-path community resolution: search-shard entries don't carry
+// community (unlike hitTest's z9-tile hit entries used by openInfoCard), so
+// fetch the z9 label tile at this author's coords and match by id.
+async function highlightLegendForCoords(bareId, xw, yw) {
+  const gen = ++legendHighlightGen;
+  const [tx, ty] = z9TileForPoint(xw, yw);
+  const tile = await fetchTile(9, tx, ty);
+  if (gen !== legendHighlightGen) return;   // superseded by a newer selection/clear
+  const entry = tile && tile.l.find(e => stripId(e[1]) === bareId);
+  highlightLegendCommunity(entry ? entry[5] : null);
+}
+
+// ---- community isolate v1 ----
+// Session-only: NOT part of displaySettings, never persisted to localStorage.
+// Below vector zoom (< VECTOR_POINTS_MIN_ZOOM) the isolate is approximate --
+// only the dimmed raster (updateRasterOpacity) and the region-name filter
+// (drawRegions) apply, since the raster tiles themselves aren't filterable
+// per-community; full isolation needs R10b's per-community shards.
+let isolateCommunity = null;   // community id currently isolated, or null
+let isolateRow = null;         // legend row currently carrying .legend-isolated, or null
+
+function setIsolate(community, row, name) {
+  if (isolateRow) { isolateRow.classList.remove("legend-isolated"); isolateRow.setAttribute("aria-pressed", "false"); }
+  isolateCommunity = community;
+  isolateRow = row;
+  row.classList.add("legend-isolated");
+  row.setAttribute("aria-pressed", "true");
+  legendIsolatePill.textContent = `isolating: ${name} - click again to exit`;
+  legendIsolatePill.style.display = "block";
+  updateVectorPoints();
+  updateRasterOpacity();
+  drawRegions();
+}
+
+function clearIsolate() {
+  if (isolateRow) { isolateRow.classList.remove("legend-isolated"); isolateRow.setAttribute("aria-pressed", "false"); }
+  isolateCommunity = null;
+  isolateRow = null;
+  legendIsolatePill.style.display = "none";
+  legendIsolatePill.textContent = "";
+  updateVectorPoints();
+  updateRasterOpacity();
+  drawRegions();
+}
+
+function toggleIsolateCommunity(community, row, name) {
+  if (isolateCommunity === community) clearIsolate();
+  else setIsolate(community, row, name);
+}
+
 fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
   .then(entries => {
     // All 37 big communities go into the color map (not just the top-25 shown
@@ -1760,15 +1910,26 @@ fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
     }
     const box = document.getElementById("legend-rows");
     for (const e of entries.slice(0, 25)) {
-      const row = document.createElement("div"); row.className = "row";
+      // Task R10a: rows are now interactive (click to isolate), so they're
+      // real <button>s rather than <div>s -- keyboard-accessible for free
+      // (Tab focus, Enter/Space activation) instead of hand-rolling
+      // role="button" + a keydown handler.
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "row";
+      row.setAttribute("aria-pressed", "false");
+      const name = e.name || e.field || "Community " + e.community;
+      row.setAttribute("aria-label", `${name}, click to isolate`);
       const sw = document.createElement("span");
       sw.className = "sw"; sw.style.background = e.color;
       const label = document.createElement("span");
-      label.textContent = e.name || e.field || "Community " + e.community;
+      label.textContent = name;
       const n = document.createElement("span");
       n.className = "n"; n.textContent = (e.members / 1e6).toFixed(1) + "M";
       row.append(sw, label, n);
+      row.addEventListener("click", () => toggleIsolateCommunity(e.community, row, name));
       box.appendChild(row);
+      legendCommunityRows.set(e.community, row);
     }
     // Vector points may have already rendered (grey fallback) before this
     // fetch resolved -- e.g. vectorPoints defaults on and the initial view is
@@ -1812,6 +1973,7 @@ function closeInfoCard() {
   infoCard.classList.remove("open");
   infoCardBody.innerHTML = "";
   infoCardData = null;
+  clearLegendHighlight();            // Task R10a: no card open -> no legend row highlighted
 }
 
 async function fetchAuthorDetails(bareId) {
@@ -1824,9 +1986,11 @@ async function fetchAuthorDetails(bareId) {
   return infoCardCache.get(bareId);
 }
 
-// hit entry shape: [name, id, xw, yw, cited] (same as drawLabels/hitTest).
+// hit entry shape: [name, id, xw, yw, cited, community] (hitTest reads z9
+// label tiles, same shape as updateVectorPoints' entries -- field 5 is
+// community, per pipeline/build_index.py).
 function openInfoCard(hit) {
-  const [name, rawId, xw, yw, cited] = hit;
+  const [name, rawId, xw, yw, cited, community] = hit;
   const bareId = stripId(rawId);
   // Same id-normalization as the old click handler: entries may already carry
   // a full "https://openalex.org/..." id or a bare one.
@@ -1838,6 +2002,10 @@ function openInfoCard(hit) {
   infoCardBody.innerHTML = "";
   addInfoRow("Citations", cited.toLocaleString());
   infoCard.classList.add("open");
+  // Task R10a: info-card selections already have community from the hit
+  // entry, unlike a search selection (see setSearchHighlight), so this skips
+  // the z9-tile-fetch resolve and highlights directly.
+  highlightLegendCommunity(community);
 
   fetchAuthorDetails(bareId).then(data => {
     if (gen !== infoCardGen) return;   // card closed, or replaced, since this fetch started
@@ -2070,6 +2238,10 @@ document.addEventListener("keydown", ev => {
       // both (clearSearchHighlight no-ops when there's no highlight marker).
       ev.preventDefault(); ev.stopPropagation();
       searchHighlightEscape();
+    } else if (isolateCommunity != null) {
+      // Task R10a: last rung -- Escape also exits a community isolate.
+      ev.preventDefault(); ev.stopPropagation();
+      clearIsolate();
     }
     return;
   }
