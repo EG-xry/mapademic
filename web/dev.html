@@ -130,6 +130,43 @@
     .ic-actions button { flex: 1; background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
                            border-radius: 6px; padding: 6px 6px; font: 11px system-ui; cursor: pointer; }
     .ic-actions button:hover { border-color: #7fae8e; }
+    /* ---- Task 4 (night-polish): help overlay, path hop list, a11y sweep ---- */
+    button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-visible {
+      outline: 2px solid #7fae8e; outline-offset: 2px;
+    }
+    #help-btn { position: fixed; right: 250px; top: 10px; z-index: 9;
+                 width: 30px; height: 30px; background: #0b0b0bd9; color: #ddd;
+                 border: 1px solid #333; border-radius: 6px; cursor: pointer;
+                 font: 15px system-ui; line-height: 1; }
+    #help-btn:hover { border-color: #7fae8e; }
+    #help-overlay { position: fixed; inset: 0; background: #000000b3; z-index: 20;
+                     display: none; align-items: center; justify-content: center; }
+    #help-overlay.open { display: flex; }
+    #help-card { background: #0b0b0bf5; color: #ddd; font: 13px system-ui;
+                  border-radius: 8px; width: 520px; max-width: 90vw; max-height: 80vh;
+                  overflow-y: auto; border: 1px solid #333; }
+    #help-card .hc-head { display: flex; justify-content: space-between; align-items: center;
+                            padding: 12px 16px; border-bottom: 1px solid #222;
+                            position: sticky; top: 0; background: #0b0b0bf5; }
+    #help-card h2 { margin: 0; font-size: 15px; }
+    #help-close { background: none; border: none; color: #ddd; font-size: 18px;
+                   line-height: 1; padding: 0 2px; cursor: pointer; }
+    #help-close:hover { color: #7fae8e; }
+    #help-body { padding: 12px 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+    #help-body h3 { margin: 0 0 4px; font-size: 13px; color: #9ab; }
+    #help-body p { margin: 0; line-height: 1.5; }
+    #help-body ul { margin: 4px 0 0; padding-left: 18px; line-height: 1.5; }
+    #help-body a { color: #7fae8e; }
+    #help-body kbd { background: #222; border: 1px solid #444; border-radius: 3px;
+                       padding: 1px 5px; font: 11px monospace; }
+    #path-hops { display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow-y: auto; }
+    #path-hops .hop { display: flex; gap: 6px; align-items: center; padding: 4px 8px;
+                        background: #0b0b0bd9; border-radius: 4px; cursor: pointer;
+                        color: #ddd; font: 12px system-ui; border: 1px solid transparent; }
+    #path-hops .hop:hover { background: #ffffff1a; }
+    #path-hops .hop .hop-i { color: #888; flex: none; width: 18px; text-align: right; }
+    #path-hops .hop .hop-name { flex: 1; }
+    #path-hops .hop .hop-ghost { color: #888; font-size: 10px; flex: none; }
   </style>
 </head>
 <body>
@@ -156,9 +193,61 @@
       <button id="connect-clear" type="button">Clear</button>
     </div>
     <div id="connect-status"></div>
+    <div id="path-hops"></div>
   </div>
 </div>
+<button id="help-btn" type="button" aria-label="Help">?</button>
 <details id="legend" open><summary>Legend</summary><div id="legend-rows"></div></details>
+<div id="help-overlay" role="dialog" aria-modal="true" aria-labelledby="help-title">
+  <div id="help-card">
+    <div class="hc-head">
+      <h2 id="help-title">About this map</h2>
+      <button id="help-close" type="button" aria-label="Close help">&times;</button>
+    </div>
+    <div id="help-body">
+      <section>
+        <h3>What is this</h3>
+        <p>8,587,906 OpenAlex authors with 15 or more works, positioned by a
+          coauthorship ForceAtlas2 layout and colored by community. Hue
+          encodes position, so neighboring fields share hues.</p>
+      </section>
+      <section>
+        <h3>Reading the map</h3>
+        <p>Bright splats are highly-cited authors (60,000+ citations). The
+          faint grey web visible at deep zoom is repeat coauthorships - the
+          finest one-off collaborations only show up at max zoom. Grey dust
+          is authors without retained coauthor links.</p>
+      </section>
+      <section>
+        <h3>Controls</h3>
+        <ul>
+          <li>Search for an author by name.</li>
+          <li>Connect finds the shortest coauthor path between two authors
+            via the degree-of-separation engine.</li>
+          <li>Click a dot at deep zoom for author details.</li>
+          <li>Share copies a link to the exact view.</li>
+          <li>The gear opens display settings.</li>
+        </ul>
+      </section>
+      <section>
+        <h3>Data</h3>
+        <p>Built from an OpenAlex snapshot. See the
+          <a href="https://github.com/riptideiv/academic-degree-of-separation" target="_blank" rel="noopener">academic-degree-of-separation</a>
+          project for the path-finding engine.</p>
+      </section>
+      <section>
+        <h3>Keyboard shortcuts</h3>
+        <ul>
+          <li><kbd>/</kbd> focus search</li>
+          <li><kbd>?</kbd> toggle this help</li>
+          <li><kbd>Esc</kbd> close the topmost panel</li>
+          <li><kbd>&uarr;</kbd> / <kbd>&darr;</kbd> move through dropdown results</li>
+          <li><kbd>Enter</kbd> select the highlighted result</li>
+        </ul>
+      </section>
+    </div>
+  </div>
+</div>
 <button id="display-gear" type="button" aria-label="Display settings" aria-expanded="false">&#9881;</button>
 <div id="display-panel" role="region" aria-label="Display settings">
   <div class="dp-body">
@@ -496,19 +585,32 @@ searchInput.addEventListener("keydown", ev => {
     ev.preventDefault();
     const pick = searchResults[searchActive >= 0 ? searchActive : 0];
     if (pick) selectSearchEntry(pick);
-  } else if (ev.key === "Escape") {
-    searchInput.value = "";
-    clearTimeout(searchTimer);
-    searchGen++;
-    closeSearchDropdown();
-    clearSearchHighlight();
-    activeA = null;
-    pendingA = null;
-    writeHash();
   }
+  // Escape is handled by the single document-level capture-phase priority
+  // chain (see "keyboard shortcuts" (Task 4)), which calls
+  // searchDropdownEscape()/searchHighlightEscape() below instead of a
+  // listener local to this input.
 });
 
 searchInput.addEventListener("blur", () => setTimeout(closeSearchDropdown, 100));
+
+// Rung 3/4 of the Escape priority chain for the top search box (info card
+// and help overlay -- rungs 1/2 -- live near their own elements below).
+// Clearing the query text rides along with closing the dropdown, matching
+// the pre-Task-4 behavior for that half; the highlight is its own rung so a
+// second Escape is needed to drop it once the dropdown is already closed.
+function searchDropdownEscape() {
+  searchInput.value = "";
+  clearTimeout(searchTimer);
+  searchGen++;
+  closeSearchDropdown();
+}
+function searchHighlightEscape() {
+  clearSearchHighlight();
+  activeA = null;
+  pendingA = null;
+  writeHash();
+}
 
 // ---- degree-of-separation path overlay (Task 7) ----
 // Reuses the Task 6 lookup helpers (normalize/lookupSearchShard/rankSearchEntries)
@@ -552,7 +654,10 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect) {
     inputEl.value = name;
     close();
     inputEl.blur();
-    onSelect({ id, name, xw, yw });
+    // stripId so every connect selection stores a bare id, same as infoCard's
+    // "Connect from here" and the hash-restore path -- keeps connectA/connectB
+    // uniform no matter which route filled them.
+    onSelect({ id: stripId(id), name, xw, yw });
   }
 
   async function run(query) {
@@ -586,15 +691,22 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect) {
       ev.preventDefault();
       const pick = results[active >= 0 ? active : 0];
       if (pick) select(pick);
-    } else if (ev.key === "Escape") {
-      inputEl.value = "";
-      clearTimeout(timer);
-      gen++;
-      close();
-      onSelect(null);
     }
+    // Escape is handled by the single document-level capture-phase priority
+    // chain below (see "keyboard shortcuts" (Task 4)), which calls escape()
+    // exposed below instead of a listener local to this input.
   });
   inputEl.addEventListener("blur", () => setTimeout(close, 100));
+
+  function isOpen() { return dropdownEl.classList.contains("open"); }
+  function escape() {
+    inputEl.value = "";
+    clearTimeout(timer);
+    gen++;
+    close();
+    onSelect(null);
+  }
+  return { isOpen, escape };
 }
 
 const connectToggle = document.getElementById("connect-toggle");
@@ -606,12 +718,13 @@ const connectBDropdown = document.getElementById("connect-b-dropdown");
 const connectGo = document.getElementById("connect-go");
 const connectClear = document.getElementById("connect-clear");
 const connectStatus = document.getElementById("connect-status");
+const pathHopsEl = document.getElementById("path-hops");
 
 let connectA = null, connectB = null;    // {id, name, xw, yw} once selected
 // Editing either Connect input discards any not-yet-run p= from the hash:
 // the shared pair no longer matches what the user is about to run.
-createAuthorLookup(connectAInput, connectADropdown, sel => { connectA = sel; pendingP = null; });
-createAuthorLookup(connectBInput, connectBDropdown, sel => { connectB = sel; pendingP = null; });
+const connectALookup = createAuthorLookup(connectAInput, connectADropdown, sel => { connectA = sel; pendingP = null; });
+const connectBLookup = createAuthorLookup(connectBInput, connectBDropdown, sel => { connectB = sel; pendingP = null; });
 
 function setPathStatus(text) { connectStatus.textContent = text || ""; }
 
@@ -680,11 +793,38 @@ let pathEventSource = null;
 let pathMarkers = [];
 let pathGen = 0;                     // invalidates stale in-flight renders (labelGen pattern)
 
+// ---- Task 4 (night-polish): path hop list ----
+// One row per point renderPath actually drew (same array, same order), so a
+// hop click always flies to a position that's really on the map.
+function clearHopList() { pathHopsEl.innerHTML = ""; }
+function renderHopList(points) {
+  clearHopList();
+  points.forEach((p, i) => {
+    const row = document.createElement("div");
+    row.className = "hop";
+    const idx = document.createElement("span");
+    idx.className = "hop-i"; idx.textContent = String(i + 1);
+    const name = document.createElement("span");
+    name.className = "hop-name"; name.textContent = p.name;
+    row.append(idx, name);
+    if (p.ghost) {
+      const ghost = document.createElement("span");
+      ghost.className = "hop-ghost"; ghost.textContent = "ghost";
+      row.append(ghost);
+    }
+    row.addEventListener("click", () => {
+      map.flyTo({ center: toLngLat(p.xw, p.yw), zoom: 10.5 });
+    });
+    pathHopsEl.appendChild(row);
+  });
+}
+
 function clearPath() {
   pathGen++;                         // any in-flight renderPath is now stale
   if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
   pathMarkers.forEach(m => m.remove());
   pathMarkers = [];
+  clearHopList();
   if (map.getLayer("path-line")) map.removeLayer("path-line");
   if (map.getSource("path")) map.removeSource("path");
   safePaint("raster-opacity", 1.0);
@@ -722,6 +862,8 @@ async function renderPath(pathSteps, hops, idA, idB) {
       "line-blur": 1.5, "line-opacity": 0.9,
     },
   });
+
+  renderHopList(points);
 
   pathMarkers = points.map(p => {
     const el = document.createElement("div");
@@ -1092,17 +1234,9 @@ function openInfoCard(hit) {
 
 infoCardClose.addEventListener("click", closeInfoCard);
 
-// Escape closes the card before it reaches any focused input's own Escape
-// handler (search/connect dropdowns) -- capture phase + stopPropagation so
-// the card always wins the keypress when it's open, establishing the
-// priority order Task 4's help overlay/dropdowns will slot in beneath.
-document.addEventListener("keydown", ev => {
-  if (ev.key === "Escape" && infoCard.classList.contains("open")) {
-    ev.preventDefault();
-    ev.stopPropagation();
-    closeInfoCard();
-  }
-}, true);
+// Escape handling for the card (and every other panel) lives in the single
+// document-level capture-phase priority chain at the bottom of this script
+// (Task 4: "keyboard shortcuts") -- info card is rung 1 of that chain.
 
 infoCardOpenBtn.addEventListener("click", () => {
   if (!infoCardData) return;
@@ -1115,7 +1249,7 @@ infoCardConnectBtn.addEventListener("click", () => {
   connectPanel.classList.add("open");
   connectToggle.classList.add("active");
   connectAInput.value = name;
-  connectA = { id: bareId, name, xw, yw };   // same shape createAuthorLookup's select() hands to onSelect
+  connectA = { id: bareId, name, xw, yw };   // bare id, same shape createAuthorLookup's select() now hands to onSelect
   pendingP = null;
   connectBInput.focus();
 });
@@ -1210,6 +1344,68 @@ shareBtn.addEventListener("click", async () => {
   shareBtn.textContent = "copied";
   shareBtnTimer = setTimeout(() => { shareBtn.textContent = "Share"; }, 1200);
 });
+
+// ---- Task 4 (night-polish): help overlay ----
+const helpBtn = document.getElementById("help-btn");
+const helpOverlay = document.getElementById("help-overlay");
+const helpClose = document.getElementById("help-close");
+
+function openHelp() { helpOverlay.classList.add("open"); }
+function closeHelp() { helpOverlay.classList.remove("open"); }
+function toggleHelp() { helpOverlay.classList.toggle("open"); }
+
+helpBtn.addEventListener("click", openHelp);
+helpClose.addEventListener("click", closeHelp);
+// Click-outside: only a click on the backdrop itself (not the card, which is
+// a child and thus a different ev.target) closes the overlay.
+helpOverlay.addEventListener("click", ev => { if (ev.target === helpOverlay) closeHelp(); });
+
+// ---- Task 4 (night-polish): keyboard shortcuts ----
+// Single document-level capture-phase listener -- the sole owner of Escape,
+// "/" and "?" for the whole page. Capture phase + stopPropagation on the
+// Escape branches means whichever rung handles a press is the only thing
+// that reacts to it, giving Escape a real priority order instead of every
+// open panel independently racing to consume the same keypress:
+//   1. info card       2. help overlay
+//   3. search dropdowns (top search box, then Connect A, then Connect B)
+//   4. active search highlight
+// This replaces the standalone info-card-only capture listener from Task 3
+// (see the comment left at its old call site) plus the per-input Escape
+// branches that used to live in searchInput's and createAuthorLookup's own
+// keydown handlers.
+document.addEventListener("keydown", ev => {
+  if (ev.key === "Escape") {
+    if (infoCard.classList.contains("open")) {
+      ev.preventDefault(); ev.stopPropagation();
+      closeInfoCard();
+    } else if (helpOverlay.classList.contains("open")) {
+      ev.preventDefault(); ev.stopPropagation();
+      closeHelp();
+    } else if (searchDropdown.classList.contains("open")) {
+      ev.preventDefault(); ev.stopPropagation();
+      searchDropdownEscape();
+    } else if (connectALookup.isOpen()) {
+      ev.preventDefault(); ev.stopPropagation();
+      connectALookup.escape();
+    } else if (connectBLookup.isOpen()) {
+      ev.preventDefault(); ev.stopPropagation();
+      connectBLookup.escape();
+    } else if (activeA) {
+      ev.preventDefault(); ev.stopPropagation();
+      searchHighlightEscape();
+    }
+    return;
+  }
+  const tag = ev.target && ev.target.tagName;
+  const typing = tag === "INPUT" || tag === "TEXTAREA";
+  if (ev.key === "/" && !typing) {
+    ev.preventDefault();
+    searchInput.focus();
+  } else if (ev.key === "?" && !typing) {
+    ev.preventDefault();
+    toggleHelp();
+  }
+}, true);
 </script>
 </body>
 </html>
