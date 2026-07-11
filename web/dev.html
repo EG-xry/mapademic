@@ -451,10 +451,14 @@ async function fetchSearchShard(key) {
 // prefix). Queries that fail the gate, or that exhaust every prefix level
 // without finding a shard, fall through to the codepoint shard
 // `_<cp % 32>`, then the plain `_` catch-all.
-// Today's on-disk shards are still the old 2-char-only scheme (Task 8 adds
-// the 5..2 recursive split), so in practice every 3+ char attempt 404s and
-// this chain falls back to the 2-char shard -- exactly the behavior this
-// fallback is designed for.
+// Today's on-disk shards use the recursive split (build_index.py's
+// _split_prefix_shard): a prefix shard is broken into one-char-deeper
+// children only once it exceeds SHARD_SPLIT_BYTES, up to MAX_PREFIX_LEN (5)
+// chars deep, so the tree holds keys of length 2 through 5 depending on
+// how crowded that prefix is. Split parents always stay on disk (even if
+// small) and keep any entry whose name is exactly len(key) chars long or
+// whose next char isn't ascii-alpha -- those are what the descending 5..2
+// walk falls through to when the deepest existing child doesn't match.
 async function lookupSearchShard(norm) {
   const concat = norm.replace(/ /g, "");
   if (/^[a-z]{2}/.test(concat)) {
@@ -898,24 +902,38 @@ connectGo.addEventListener("click", () => {
   pathGen++;      // this Go owns the overlay from here (clearPath also bumps)
   const idA = stripId(connectA.id), idB = stripId(connectB.id);
   setPathStatus("searching…");
-  pathEventSource = new EventSource(
+  const es = new EventSource(
     `${API_BASE}/api/path?from=${encodeURIComponent(idA)}&to=${encodeURIComponent(idB)}&edges=coauthor`
   );
-  pathEventSource.addEventListener("progress", ev => {
+  pathEventSource = es;
+  es.addEventListener("progress", ev => {
     try { setPathStatus(JSON.parse(ev.data).message); } catch { /* ignore malformed frame */ }
   });
-  pathEventSource.addEventListener("result", ev => {
+  es.addEventListener("result", ev => {
     let data;
     try { data = JSON.parse(ev.data); } catch { return; }
-    if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
+    if (pathEventSource === es) pathEventSource = null;
+    es.close();
     if (!data.found) { setPathStatus(data.reason || "no path found"); return; }
     renderPath(data.path, data.hops, idA, idB);
   });
-  pathEventSource.addEventListener("app_error", ev => {
+  es.addEventListener("app_error", ev => {
     let msg = "error";
     try { msg = JSON.parse(ev.data).message || msg; } catch { /* ignore malformed frame */ }
     setPathStatus(msg);
-    if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
+    if (pathEventSource === es) pathEventSource = null;
+    es.close();
+  });
+  // Fires on backend-down / dropped-connection; EventSource retries silently
+  // otherwise, so without this the pill would say "searching…" forever. The
+  // identity check no-ops a stale error from an already-finished or
+  // already-superseded stream (result/app_error closed it, or a newer Go
+  // click replaced pathEventSource before this one's error arrived).
+  es.addEventListener("error", () => {
+    if (pathEventSource !== es) return;
+    es.close();
+    pathEventSource = null;
+    setPathStatus("path backend unreachable - is the degree-of-separation server running on :8000?");
   });
 });
 
