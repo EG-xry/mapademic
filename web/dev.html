@@ -459,31 +459,69 @@ async function fetchSearchShard(key) {
 // form: `key = head if len(head) == 2 and head.isascii() and head.isalpha()
 // else "_"`, so a name lives in the prefix-shard tree only when BOTH of
 // its first two chars are ascii letters ("sørensen" -> "_", not "so...").
-// Mirror the same two-char gate here: for queries that pass it, walk
-// prefix lengths from min(5, len) down to 2, deepest first, and stop at
-// the first shard that exists (a 404 falls through to the next, shorter,
-// prefix). Queries that fail the gate, or that exhaust every prefix level
-// without finding a shard, fall through to the codepoint shard
-// `_<cp % CATCHALL_BUCKETS>`, then the plain `_` catch-all.
-// Today's on-disk shards use the recursive split (build_index.py's
-// _split_prefix_shard): a prefix shard is broken into one-char-deeper
-// children only once it exceeds SHARD_SPLIT_BYTES, up to MAX_PREFIX_LEN (5)
-// chars deep, so the tree holds keys of length 2 through 5 depending on
-// how crowded that prefix is. Split parents always stay on disk (even if
-// small) and keep any entry whose name is exactly len(key) chars long or
-// whose next char isn't ascii-alpha -- those are what the descending 5..2
-// walk falls through to when the deepest existing child doesn't match.
+// An author is inserted under BOTH their first-token and last-token bucket
+// key (build_index.py's build_search_shards), so a single query can need
+// entries from more than one on-disk shard file to see everything it should.
+//
+// MERGE walk (not first-hit-stop): for a concat that passes the two-char
+// gate, fetch ALL existing prefix shards from min(5, concat.length) down to
+// 2 chars -- not just the first one found -- and concatenate their entries.
+// This matters because a name's entries can sit at whatever depth its OWNING
+// token's own split recursion (build_index.py's _split_prefix_shard) landed
+// on, which need not be the first depth the query's concat walk happens to
+// hit; stopping at the first existing file can silently skip a shallower or
+// deeper file that also holds relevant entries (e.g. "dresselhaus" returning
+// only a low-cited match while a higher-cited one sits at another level).
+// Missing levels just skip -- 404s cache as null same as before.
+//
+// Token-gated catch-all: ALWAYS ALSO fetch the codepoint catch-all bucket
+// `_<cp % CATCHALL_BUCKETS>` for the query's FIRST TOKEN's own first
+// character when that first token itself fails the two-char ascii-alpha
+// gate (token.length < 2, or its second char isn't ascii-alpha) -- e.g.
+// "m s dresselhaus" has concat "msdresselhaus" whose first two chars "ms"
+// pass the gate, but the entry was inserted at build time keyed off the
+// first TOKEN "m" alone, which fails its own gate and lands only in the
+// codepoint catch-all, never in a prefix shard the concat walk would ever
+// reach. This runs independent of the prefix walk's outcome. When the
+// whole concat fails the gate, the first token fails it too (concat's first
+// two chars are the first token's own first two chars whenever the first
+// token has length >= 2), so this fetch computes the same key the existing
+// catch-all fallback below would use anyway -- no special-casing needed,
+// that fallback path still runs unchanged.
+//
+// Dedup: rankSearchEntries dedupes by id before ranking, so entries that
+// land in more than one merged shard (or get fetched twice via an
+// overlapping key) are still shown once -- merging inputs here doesn't
+// break that.
+//
+// Perf: worst case is the 4-level prefix walk (5,4,3,2) plus one
+// token-catch-all fetch = 5 fetches, all going through the existing
+// searchShardCache so repeat queries and shared prefixes cost nothing extra.
 const CATCHALL_BUCKETS = 128;        // codepoint-modulus for the `_` catch-all split; mirrors pipeline/build_index.py's CATCHALL_BUCKETS
 async function lookupSearchShard(norm) {
   const concat = norm.replace(/ /g, "");
+  const merged = [];
+  const fetchInto = async (key) => {
+    const entries = await fetchSearchShard(key);
+    if (entries) merged.push(...entries);
+  };
+
   if (/^[a-z]{2}/.test(concat)) {
     for (let k = Math.min(5, concat.length); k >= 2; k--) {
-      const entries = await fetchSearchShard(concat.slice(0, k));
-      if (entries) return entries;
+      await fetchInto(concat.slice(0, k));
     }
-    // every prefix level 404ed: fall through to the catch-all chain below
-    // (belt and braces against future shard-scheme drift)
   }
+
+  const firstToken = norm.split(" ")[0] || "";
+  if (firstToken && !/^[a-z]{2}/.test(firstToken)) {
+    await fetchInto(`_${firstToken.codePointAt(0) % CATCHALL_BUCKETS}`);
+  }
+
+  if (merged.length > 0) return merged;
+
+  // gate failed on the whole concat, or every level (and the token
+  // catch-all, if any) 404ed: fall through to the catch-all chain below
+  // (belt and braces against future shard-scheme drift)
   if (concat.length > 0) {
     const entries = await fetchSearchShard(`_${concat.codePointAt(0) % CATCHALL_BUCKETS}`);
     if (entries) return entries;
