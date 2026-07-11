@@ -1722,21 +1722,16 @@ function drawRegions() {
 //     updateRasterOpacity() (see near safePaint), not this function.
 //   - z < 10.25 (R12b -- Eric: sizing was invisible here because raster
 //     pixels are fixed size, and isolate mode's shard dots "replicate that
-//     globally"): in pointMode "both", the global top_authors.json shard
-//     (50k, citation-sorted) renders, capped by shardCapForZoom same as
-//     isolate's per-community shard; the raster is NOT dimmed for this -- see
-//     updateRasterOpacity, whose "both"-mode vectorActive check stays gated
-//     on z >= VECTOR_POINTS_MIN_ZOOM, so this overlay only ever complements
-//     the raster there, never replaces it. R13: pointMode "vector" dims the
-//     raster to 0 at every zoom regardless (a separate, unconditional
-//     top-precedence branch in updateRasterOpacity). R14b: in that mode this
-//     zoom range no longer reuses the capped 50k shard -- Eric: with the
-//     raster hidden, capping to the top-cited 50k alone read as sparse and
-//     incoherent, not like a map. Instead it renders the uncapped 300k
-//     top_authors_xl.json shard (see fetchTopAuthorsXL/updateVectorPoints'
-//     xlActive branch), lazy-fetched once and built into GeoJSON features
-//     exactly once since the set never changes -- this is the only dots
-//     layer visible below 10.25 in "vector" mode either way.
+//     globally"): the global top_authors.json shard (50k, citation-sorted)
+//     renders instead, capped by shardCapForZoom same as isolate's
+//     per-community shard. In pointMode "both" the raster is NOT dimmed for
+//     this -- see updateRasterOpacity, whose "both"-mode vectorActive check
+//     stays gated on z >= VECTOR_POINTS_MIN_ZOOM, so this overlay only ever
+//     complements the raster there, never replaces it. R13: pointMode
+//     "vector" dims the raster to 0 at every zoom regardless (a separate,
+//     unconditional top-precedence branch in updateRasterOpacity), so at
+//     that point this same overlay IS the only dots layer visible below
+//     10.25 too.
 const VECTOR_POINTS_MIN_ZOOM = 10.25;
 // Hard cap on rendered features regardless of how many tiles are visible --
 // keeps the GeoJSON source (and MapLibre's rebuild of it) bounded on a very
@@ -1789,59 +1784,17 @@ function shardCapForZoom(z) {
 // Global top-authors shard (R12b): the mid-zoom (<10.25) counterpart of
 // isolate's per-community shard, fetched once and cached the same way
 // fetchCommunityShard is -- see updateVectorPoints' globalMidZoomActive
-// branch (pointMode "both" only as of R14b -- see below). Pre-sorted
-// citations-desc by the pipeline, same as community shards, so
-// shardEntriesToFeatures' slice-from-the-front cap keeps the highest-cited
-// entries.
-// R14b: the resolved entries are also stashed into topAuthorsEntries
-// (synchronously readable, unlike the promise) so updateVectorPoints' xlActive
-// branch can reuse them as an interim render while the much larger XL shard
-// below is still loading, without forcing its own fetch of this file.
+// branch. Pre-sorted citations-desc by the pipeline, same as community
+// shards, so shardEntriesToFeatures' slice-from-the-front cap keeps the
+// highest-cited entries.
 let topAuthorsPromise = null;
-let topAuthorsEntries = null;
 function fetchTopAuthors() {
   if (!topAuthorsPromise) {
     topAuthorsPromise = fetch("/data/index/top_authors.json")
       .then(r => r.ok ? r.json() : [])
-      .catch(() => [])
-      .then(entries => { topAuthorsEntries = entries; return entries; });
+      .catch(() => []);
   }
   return topAuthorsPromise;
-}
-
-// R14b: pointMode "vector"'s mid-zoom (<10.25) counterpart of the "both"-mode
-// top_authors.json above, but uncapped -- the top 300,000 authors by
-// citations, rather than 50,000 slice-capped by shardCapForZoom. Eric's ask:
-// "vector only" mode at mid/low zoom showed just the 50k capped shard with
-// the raster hidden, which read as sparse/incoherent; the full 300k field is
-// dense enough to look like a coherent map on its own.
-// Lazy: nothing here fetches until updateVectorPoints' xlActive branch
-// actually needs it (pointMode "vector", not isolating, z < 10.25) -- never
-// prefetched from "both"/"raster" mode. Fetched and built (entries -> circle
-// features via entryToFeature) exactly once and cached both as the promise
-// (topAuthorsXLPromise, for in-flight dedup) and the built feature array
-// itself (topAuthorsXLFeatures, read synchronously once settled) -- the data
-// never changes after that, so updateVectorPoints' xlActive branch reuses
-// topAuthorsXLFeatures directly on every subsequent call instead of re-fetching
-// or re-mapping entries -> features from scratch.
-let topAuthorsXLPromise = null;
-let topAuthorsXLFeatures = null;
-let topAuthorsXLSwapQueued = false;   // true while a single in-flight fetch's completion callback is queued
-// true only while the fully-built 300k XL feature set is ALREADY the live
-// "vector-points" source -- see updateVectorPoints' xlActive branch. Reset to
-// false by every other branch (including the interim-render sub-branch here)
-// so a mode/isolate transition back into xlActive always does one fresh
-// setData, while repeated pan/zoom calls within the same xlActive session do
-// none.
-let xlSourceIsCurrent = false;
-function fetchTopAuthorsXL() {
-  if (!topAuthorsXLPromise) {
-    topAuthorsXLPromise = fetch("/data/index/top_authors_xl.json")
-      .then(r => r.ok ? r.json() : [])
-      .catch(() => [])
-      .then(entries => { topAuthorsXLFeatures = entries.map(entryToFeature); return topAuthorsXLFeatures; });
-  }
-  return topAuthorsXLPromise;
 }
 
 // ---- Task 9 (R9) / R10a / R11a: citation size contrast knob ----
@@ -1973,34 +1926,25 @@ async function updateVectorPoints() {
   // "raster" mode suppresses that one same as everything else, per spec.
   const shardActive = isolateCommunity != null && z < VECTOR_POINTS_MIN_ZOOM;
   setIsolateShardActive(shardActive);
-  // R12b: below vector-points zoom, in "both" mode with no isolate active,
-  // render the global top_authors.json shard (50k, capped by shardCapForZoom)
-  // instead -- gated on isolateCommunity == null so isolate always takes
-  // precedence when active (its dim + filter behavior is unchanged).
-  // R14b: narrowed from "not raster" to "both" specifically -- pointMode
-  // "vector" now has its own uncapped xlActive branch just below instead of
-  // this capped one, so this stays the "both"-mode behavior only, unchanged
-  // from R12b/R13. Unlike shardActive, this DOES depend on pointMode: it's
-  // the mode's own mid-zoom rendering, not an isolate side effect.
-  // updateRasterOpacity's vectorActive check stays gated on pointMode "both"
-  // AND z >= VECTOR_POINTS_MIN_ZOOM, so this path never dims the raster on
-  // its own -- it only ever complements it.
-  const globalMidZoomActive = displaySettings.pointMode === "both" && !vectorActive && isolateCommunity == null;
-  // R14b: pointMode "vector"'s mid-zoom (<10.25) counterpart of
-  // globalMidZoomActive above, sourced from the uncapped 300k XL shard
-  // instead of the capped 50k one -- see the fetchTopAuthorsXL comment for
-  // why. Also gated on isolateCommunity == null so isolate keeps precedence.
-  const xlActive = displaySettings.pointMode === "vector" && !vectorActive && isolateCommunity == null;
-  if (!vectorActive && !shardActive && !globalMidZoomActive && !xlActive) {
+  // R12b: below vector-points zoom, when vector points are enabled and no
+  // isolate is active, render the global top_authors.json shard instead --
+  // gated on isolateCommunity == null so isolate always takes precedence
+  // when active (its dim + filter behavior is unchanged). Unlike shardActive,
+  // this DOES depend on pointMode (R13: not "raster"): it's the mode's own
+  // mid-zoom rendering, not an isolate side effect. updateRasterOpacity's
+  // vectorActive check stays gated on pointMode "both" AND z >=
+  // VECTOR_POINTS_MIN_ZOOM, so this path never dims the raster on its own --
+  // it only ever complements it (pointMode "vector" dims the raster
+  // separately, unconditionally, at the top of that resolver).
+  const globalMidZoomActive = displaySettings.pointMode !== "raster" && !vectorActive && isolateCommunity == null;
+  if (!vectorActive && !shardActive && !globalMidZoomActive) {
     if (map.getLayer("vector-points")) map.removeLayer("vector-points");
     if (map.getSource("vector-points")) map.removeSource("vector-points");
-    xlSourceIsCurrent = false;
     return;
   }
 
   let features;
   if (shardActive) {
-    xlSourceIsCurrent = false;
     const shard = await fetchCommunityShard(isolateCommunity);
     if (gen !== vectorGen) return;   // a newer call (isolate change/move/zoom) owns the source now
     // Shard entries are [name, id, xw, yw, cited] (already cited-desc from
@@ -2011,59 +1955,12 @@ async function updateVectorPoints() {
       .map(([name, id, xw, yw, cited]) => [name, id, xw, yw, cited, isolateCommunity]);
     features = shardEntriesToFeatures(entries, z);
   } else if (globalMidZoomActive) {
-    xlSourceIsCurrent = false;
     // top_authors.json entries already carry community (field 5), unlike
     // community shards, so no remapping is needed before capping.
     const entries = await fetchTopAuthors();
     if (gen !== vectorGen) return;   // a newer call (toggle/move/zoom) owns the source now
     features = shardEntriesToFeatures(entries, z);
-  } else if (xlActive) {
-    if (topAuthorsXLFeatures) {
-      // Already fetched and built (once, ever -- see fetchTopAuthorsXL).
-      // xlSourceIsCurrent tracks whether this exact 300k set is ALREADY the
-      // live source: pan/zoom re-invokes updateVectorPoints via the throttled
-      // "move" handler every ~180ms, but this data never changes and carries
-      // no zoom cap, so there is nothing to recompute or re-setData on a bare
-      // pan/zoom -- only a mode/isolate transition (which resets the flag
-      // via the branches above/below and the early return above) should
-      // trigger a fresh setData.
-      if (xlSourceIsCurrent) return;
-      features = topAuthorsXLFeatures;   // cached build, no re-map
-      xlSourceIsCurrent = true;
-    } else {
-      xlSourceIsCurrent = false;
-      // Lazy-fetch, first call only (topAuthorsXLPromise dedups repeats);
-      // topAuthorsXLSwapQueued makes sure only one completion callback is
-      // ever queued no matter how many times this branch runs while the
-      // fetch is still in flight (throttled "move" re-entry during a slow
-      // 25MB load). The callback re-runs updateVectorPoints() unconditionally
-      // rather than applying the fetched data directly -- by the time it
-      // fires, mode/isolate/zoom may have moved on, and re-running picks up
-      // whatever's actually current instead of racing stale data in.
-      if (!topAuthorsXLSwapQueued) {
-        topAuthorsXLSwapQueued = true;
-        setSearchStatus("loading full point cloud (25MB)…");
-        fetchTopAuthorsXL().then(() => {
-          topAuthorsXLSwapQueued = false;
-          if (searchStatusEl.textContent === "loading full point cloud (25MB)…") setSearchStatus("");
-          updateVectorPoints();
-        });
-      }
-      // Interim: the already-cached (if any) 50k top_authors.json set, capped
-      // same as "both" mode, rendered while the XL fetch is in flight so
-      // vector-only mode doesn't go blank on first activation. Only reuses an
-      // ALREADY-resolved fetch (topAuthorsEntries) -- never triggers its own
-      // fetch of top_authors.json, since "both" mode owns that file's fetch.
-      if (topAuthorsEntries) {
-        features = shardEntriesToFeatures(topAuthorsEntries, z);
-      } else {
-        if (map.getLayer("vector-points")) map.removeLayer("vector-points");
-        if (map.getSource("vector-points")) map.removeSource("vector-points");
-        return;
-      }
-    }
   } else {
-    xlSourceIsCurrent = false;
     const lists = await Promise.all(visibleTiles(9).map(([x, y]) => fetchTile(9, x, y)));
     if (gen !== vectorGen) return;     // a newer call (toggle/move/zoom) owns the source now
     let entries = lists.filter(Boolean).flatMap(t => t.l);
