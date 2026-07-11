@@ -130,7 +130,12 @@
     /* ---- Task 3 (search-v2): coauthor ray endpoint markers ---- */
     .coauthor-node { display: flex; flex-direction: column; align-items: center;
                       pointer-events: none; }
-    .coauthor-dot { width: 6px; height: 6px; border-radius: 50%; background: #7fae8e; }
+    /* R11a: white instead of the green accent, so the search highlight pulse
+       ring (still green) stays the one green affordance on screen; dark
+       stroke color matches vector-points' circle-stroke-color for the same
+       "dot on a light background" legibility. */
+    .coauthor-dot { width: 6px; height: 6px; border-radius: 50%; background: #f2f4f7;
+                     border: 1px solid #0a0a0c; box-sizing: border-box; }
     .coauthor-label { color: #fff; font: 11px system-ui; text-shadow: 0 0 4px #000, 0 0 8px #000;
                        white-space: nowrap; margin-top: 2px; pointer-events: none; }
     /* ---- Task 1 (night-polish): display settings panel ---- */
@@ -1343,7 +1348,8 @@ async function drawCoauthorRays(bareId, xw, yw) {
       });
       map.addLayer({
         id: "coauthor-rays", type: "line", source: "coauthor-rays",
-        paint: { "line-color": "#7fae8e", "line-width": 1.2, "line-opacity": 0.55 },
+        // R11a: white instead of the green accent -- see .coauthor-dot above.
+        paint: { "line-color": "#e9ecf1", "line-width": 1.2, "line-opacity": 0.55 },
       });
     }
 
@@ -1734,30 +1740,39 @@ function shardCapForZoom(z) {
   return Math.min(20000, Math.round(300 * Math.pow(4, z - 1)));
 }
 
-// ---- Task 9 (R9) / R10a: citation size contrast knob ----
+// ---- Task 9 (R9) / R10a / R11a: citation size contrast knob ----
 // The v1 circle-radius expression's inner sqrt(cited)-interpolate outputs a
-// "factor" around 1.0 (0.75 floor .. 3.8 top). `contrast` rescales that
-// factor ASYMMETRICALLY around 1.0 (R10a -- Eric: "stop making the smaller
-// citation authors have a smaller circle"):
+// "factor" around 1.0. `contrast` rescales that factor ASYMMETRICALLY around
+// 1.0 (R10a -- Eric: "stop making the smaller citation authors have a smaller
+// circle"):
 //   - stops at/above the floor (base >= 1): effectiveFactor =
 //     1 + (base - 1) * contrast for every contrast value, same as before --
 //     contrast 1.0 reproduces the original curve, 0 flattens to factor 1
 //     everywhere, and >1 amplifies without a ceiling (contrast 5 stretches
-//     the top stop to 1 + 2.8*5 = 15x).
-//   - the one below-floor stop (base < 1, i.e. the small-author 0.75 floor):
-//     effectiveFactor = base once contrast >= 1 -- it STOPS shrinking past
-//     the original baseline as contrast increases, instead of continuing
-//     toward 0 like the old symmetric formula did. Below contrast 1 it still
-//     follows the same 1 + (base - 1) * contrast curve as everything else,
-//     so contrast 0 still flattens ALL stops (including this one) to 1.
+//     the top stop to 1 + 3.0*5 = 16x).
+//   - stops below the floor (base < 1, i.e. the two small-author stops):
+//     effectiveFactor = base once contrast >= 1 -- they STOP shrinking past
+//     their original baseline as contrast increases, instead of continuing
+//     toward 0 like the old symmetric formula did. Below contrast 1 they still
+//     follow the same 1 + (base - 1) * contrast curve as everything else,
+//     so contrast 0 still flattens ALL stops (including these) to 1.
+// R11a recalibration (Eric: contrast changed single dots but not the overall
+// image -- root cause was the v1 stops starting at sqrt(cited)=70 (~5k
+// cited) while the median visible author sits around ~340 cited, so almost
+// every dot landed on the flat floor). Stops are now placed at the real
+// distribution instead: 0 -> 0.6, 18 (~330 cited) -> 0.85, 55 (~3k) -> 1.2,
+// 130 (~17k) -> 2.0, 250 (~60k) -> 3.0, 450 (~200k) -> 4.0. The pivot where
+// effectiveFactor == base (contrast 1.0, factor 1.0) now falls between the 18
+// and 55 stops at sqrt(cited) ~= 34 (~1.1k cited) -- the same "typical
+// author" neighborhood Eric estimated (~1.5k).
 // The final per-stop radius (after the zoom-outer multiply) is clamped to a
 // 0.7px floor via ["max", 0.7, ...] so a high contrast setting never shrinks
 // low-cited authors into invisibility. That max has to sit INSIDE each zoom
 // stop's output, not wrap the whole interpolate -- MapLibre only allows a
 // "zoom" expression as a top-level interpolate/step input (see the addLayer
 // comment above), so the zoom-interpolate must stay the outermost expression.
-const VECTOR_RADIUS_BASE_FACTORS = [0.75, 1.0, 2.0, 3.0, 3.8];   // original v1 stop outputs, contrast 1.0
-const VECTOR_RADIUS_SQRT_STOPS = [0, 70, 250, 450, 700];         // sqrt(cited) stops these factors sit at
+const VECTOR_RADIUS_BASE_FACTORS = [0.6, 0.85, 1.2, 2.0, 3.0, 4.0];   // R11a distribution-calibrated stop outputs, contrast 1.0
+const VECTOR_RADIUS_SQRT_STOPS = [0, 18, 55, 130, 250, 450];          // sqrt(cited) stops these factors sit at
 function vectorRadiusEffectiveFactor(base, contrast) {
   if (base >= 1) return 1 + (base - 1) * contrast;
   return contrast >= 1 ? base : 1 + (base - 1) * contrast;
@@ -1945,6 +1960,20 @@ async function updateBoundaries() {
   }
 }
 
+// ---- Task R11a: legend camera padding ----
+// While the #legend details is open it covers a 230px-wide strip along the
+// right edge (see #legend's CSS width above); map.setPadding tells MapLibre's
+// camera math (centering, flyTo, fitBounds, and pan clamping at low zoom)
+// to treat that strip as off-canvas, so a fly-to near the right edge (or the
+// low-zoom world view) doesn't land a point the legend then covers. 260 (not
+// 230) leaves a small gap past the panel itself. No padding is needed on the
+// other edges -- only the legend overlaps map content.
+const legendEl = document.getElementById("legend");
+function applyLegendPadding() {
+  map.setPadding({ top: 0, bottom: 0, left: 0, right: legendEl.open ? 260 : 0 });
+}
+legendEl.addEventListener("toggle", applyLegendPadding);
+
 // ---- Task R10a: legend author highlight + community isolate v1 ----
 // legendCommunityRows holds a row for every legend.json entry (all 37 big
 // communities -- the full roster is rendered, the rows container scrolls),
@@ -2093,7 +2122,14 @@ fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
       const label = document.createElement("span");
       label.textContent = name;
       const n = document.createElement("span");
-      n.className = "n"; n.textContent = (e.members / 1e6).toFixed(1) + "M";
+      n.className = "n";
+      // R11a: >=950k rounds to "1.0M" under the old raw /1e6 formatter, which
+      // read as "0.0M" for anything under 50k members -- switch to k below 1M
+      // (rounded, no decimal) and only use M once the community is close
+      // enough to round to at least 1.0M.
+      n.textContent = e.members >= 950000 ? (e.members / 1e6).toFixed(1) + "M"
+        : e.members >= 1000 ? Math.round(e.members / 1000) + "k"
+        : String(e.members);
       row.append(sw, label, n);
       row.addEventListener("click", () => toggleIsolateCommunity(e.community, row, name));
       box.appendChild(row);
@@ -2279,6 +2315,7 @@ map.on("load", () => {
   // from here on (vector-points handoff, path dimming) -- set once, since
   // it's a static paint config rather than a per-call value.
   safePaint("raster-opacity-transition", { duration: 300 });
+  applyLegendPadding();            // R11a: legend starts open, so this applies the initial 260px right pad
   if (initialHash && initialHash.view) {
     const v = initialHash.view;
     // parseHash already range-checks, but a throw here would kill the rest
