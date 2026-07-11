@@ -46,6 +46,9 @@
       70%  { box-shadow: 0 0 0 14px #7fae8e00; }
       100% { box-shadow: 0 0 0 0 #7fae8e00; }
     }
+    /* ---- Task 2 (night-polish): persistent name tag on a restored/selected highlight ---- */
+    .search-highlight-node { display: flex; flex-direction: column; align-items: center;
+                              pointer-events: none; }
     /* ---- Task 7: Connect / path overlay ---- */
     #search-top { display: flex; gap: 6px; align-items: stretch; }
     #search-top #search-input { width: auto; flex: 1; min-width: 0; }
@@ -54,6 +57,10 @@
                        cursor: pointer; white-space: nowrap; }
     #connect-toggle:hover { border-color: #7fae8e; }
     #connect-toggle.active { border-color: #7fae8e; color: #7fae8e; }
+    #share-btn { background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
+                  border-radius: 6px; padding: 6px 10px; font: 12px system-ui;
+                  cursor: pointer; white-space: nowrap; }
+    #share-btn:hover { border-color: #7fae8e; }
     #connect-panel { margin-top: 6px; display: none; flex-direction: column; gap: 6px; }
     #connect-panel.open { display: flex; }
     .connect-row { position: relative; }
@@ -114,6 +121,7 @@
   <div id="search-top">
     <input id="search-input" type="text" placeholder="Search authors…" autocomplete="off">
     <button id="connect-toggle" type="button">Connect</button>
+    <button id="share-btn" type="button" aria-label="Copy share link">Share</button>
   </div>
   <div id="search-dropdown"></div>
   <div id="connect-panel">
@@ -168,6 +176,45 @@ const HIT_ZOOM = 10;                 // hover/click active at or past this zoom
 const HIT_RADIUS = 14;               // px hit-test radius around the cursor
 // degree-of-separation backend (Task 7). Render URL goes here when deployed.
 const API_BASE = "http://localhost:8000";
+
+// ---- Task 2 (night-polish): shareable URL state ----
+// Custom hash codec: "#<zoom>/<lat>/<lng>" (2/5/5 decimals), plus optional
+// "&a=<bare id>" (active search highlight) and "&p=<bareA>,<bareB>" (active
+// path endpoints). MapLibre's own `hash` option is NOT used -- this codec
+// owns location.hash exclusively so the extra a=/p= params survive.
+let activeA = null;         // bare id of the active search highlight, or null
+let activeP = null;         // [bareA, bareB] of the active path, or null
+
+function parseHash() {
+  const raw = location.hash.replace(/^#/, "");
+  if (!raw) return null;
+  const parts = raw.split("&");
+  const m = /^(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)$/.exec(parts[0]);
+  const out = {};
+  if (m) out.view = { zoom: Number(m[1]), lat: Number(m[2]), lng: Number(m[3]) };
+  for (let i = 1; i < parts.length; i++) {
+    const eq = parts[i].indexOf("=");
+    if (eq < 0) continue;
+    const key = parts[i].slice(0, eq), val = parts[i].slice(eq + 1);
+    if (key === "a" && val) out.a = val;
+    if (key === "p" && val) {
+      const ids = val.split(",");
+      if (ids.length === 2 && ids[0] && ids[1]) out.p = ids;
+    }
+  }
+  return out;
+}
+
+function writeHash() {
+  const c = map.getCenter();
+  let h = `#${map.getZoom().toFixed(2)}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`;
+  if (activeA) h += `&a=${activeA}`;
+  if (activeP) h += `&p=${activeP[0]},${activeP[1]}`;
+  history.replaceState(null, "", h);
+}
+
+const initialHash = parseHash();
+
 const map = new maplibregl.Map({
   container: "map",
   style: {
@@ -295,6 +342,25 @@ function clearSearchHighlight() {
   if (highlightMarker) { highlightMarker.remove(); highlightMarker = null; }
 }
 
+// Places the pulsing highlight marker plus a persistent name tag -- used by
+// both a live search selection and an a=<id> hash restore (which has no
+// dropdown row to read the name from, so callers fetch it themselves).
+function setSearchHighlight(id, name, xw, yw) {
+  clearSearchHighlight();
+  const el = document.createElement("div");
+  el.className = "search-highlight-node";
+  const dot = document.createElement("div");
+  dot.className = "search-highlight";
+  const label = document.createElement("div");
+  label.className = "path-label";
+  label.textContent = name;
+  el.append(dot, label);
+  highlightMarker = new maplibregl.Marker({ element: el })
+    .setLngLat(toLngLat(xw, yw)).addTo(map);
+  activeA = stripId(id);
+  writeHash();
+}
+
 function renderSearchDropdown() {
   searchDropdown.innerHTML = "";
   if (searchResults.length === 0) {
@@ -326,13 +392,9 @@ function closeSearchDropdown() {
 }
 
 function selectSearchEntry(e) {
-  const [, , , xw, yw] = e;
+  const [, name, id, xw, yw] = e;
   map.flyTo({ center: toLngLat(xw, yw), zoom: 10.5 });
-  clearSearchHighlight();
-  const el = document.createElement("div");
-  el.className = "search-highlight";
-  highlightMarker = new maplibregl.Marker({ element: el })
-    .setLngLat(toLngLat(xw, yw)).addTo(map);
+  setSearchHighlight(id, name, xw, yw);
   closeSearchDropdown();
   searchInput.blur();
 }
@@ -375,6 +437,8 @@ searchInput.addEventListener("keydown", ev => {
     searchGen++;
     closeSearchDropdown();
     clearSearchHighlight();
+    activeA = null;
+    writeHash();
   }
 });
 
@@ -557,10 +621,12 @@ function clearPath() {
   if (map.getSource("path")) map.removeSource("path");
   map.setPaintProperty("dots", "raster-opacity", 1.0);
   setPathStatus("");
+  activeP = null;
+  writeHash();
 }
 connectClear.addEventListener("click", clearPath);
 
-async function renderPath(pathSteps, hops) {
+async function renderPath(pathSteps, hops, idA, idB) {
   const gen = pathGen;               // stale once clearPath / a newer Go bumps it
   // /api/path with edges=coauthor should only ever return author ids, but
   // filter defensively in case a work-type node (id starting "W") interleaves.
@@ -607,6 +673,8 @@ async function renderPath(pathSteps, hops) {
   );
   map.fitBounds(bounds, { padding: 60, maxZoom: 11 });
 
+  activeP = [idA, idB];
+  writeHash();
   setPathStatus(`${hops} hops`);
 }
 
@@ -627,7 +695,7 @@ connectGo.addEventListener("click", () => {
     try { data = JSON.parse(ev.data); } catch { return; }
     if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
     if (!data.found) { setPathStatus(data.reason || "no path found"); return; }
-    renderPath(data.path, data.hops);
+    renderPath(data.path, data.hops, idA, idB);
   });
   pathEventSource.addEventListener("app_error", ev => {
     let msg = "error";
@@ -636,6 +704,65 @@ connectGo.addEventListener("click", () => {
     if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
   });
 });
+
+// ---- Task 2 (night-polish): hash-restore helpers ----
+// Author names aren't in the id-coord shards, so a=/p= restores fetch them
+// lazily from OpenAlex's public People API; the bare id is a fine fallback
+// since it's still usable for Connect's Go button.
+const displayNameCache = new Map();  // bare id -> Promise<string>
+function fetchDisplayName(bareId) {
+  if (!displayNameCache.has(bareId)) {
+    displayNameCache.set(bareId, fetch(`https://api.openalex.org/people/${bareId}?select=display_name`)
+      .then(r => r.ok ? r.json() : null)
+      .then(j => (j && j.display_name) || bareId)
+      .catch(() => bareId));
+  }
+  return displayNameCache.get(bareId);
+}
+
+async function probeBackendHealth() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2000);
+  try {
+    const r = await fetch(`${API_BASE}/health`, { signal: ctrl.signal });
+    return r.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Applies a= and/or p= from the initial hash, once, at startup. View (zoom/
+// lat/lng) is handled separately in the map "load" handler via jumpTo.
+async function restoreFromHash(parsed) {
+  if (!parsed) return;
+  if (parsed.a) {
+    const bareA = stripId(parsed.a);
+    const bucket = await fetchIdBucket(idBucketNum(bareA));
+    const hit = bucket ? bucket.get(bareA) : null;
+    if (hit) {
+      const name = await fetchDisplayName(bareA);
+      setSearchHighlight(bareA, name, hit[0], hit[1]);
+    }
+  }
+  if (parsed.p) {
+    const [bareA, bareB] = parsed.p;
+    connectPanel.classList.add("open");
+    connectToggle.classList.add("active");
+    const [nameA, nameB] = await Promise.all([fetchDisplayName(bareA), fetchDisplayName(bareB)]);
+    connectAInput.value = nameA;
+    connectBInput.value = nameB;
+    connectA = { id: bareA, name: nameA };
+    connectB = { id: bareB, name: nameB };
+    const reachable = await probeBackendHealth();
+    if (reachable) {
+      connectGo.click();
+    } else {
+      setPathStatus("path backend offline - press Go to retry");
+    }
+  }
+}
 
 // Greedy screen-rect collision test shared by drawLabels and drawRegions.
 // `placed` holds {x, y, w, h} rects already committed for this redraw.
@@ -665,7 +792,12 @@ function saveDisplaySettings() {
   try { localStorage.setItem(DISPLAY_KEY, JSON.stringify(displaySettings)); } catch { /* ignore storage errors */ }
 }
 
+// Single choke point for all display-panel paint writes (carry-over fix from
+// Task 1 review): guarded so a pre-load slider drag can't throw. displaySettings
+// is still updated and saved immediately; the paint just applies once the style
+// is ready (the map "load" handler calls this again, catching anything missed).
 function applyDisplayPaint() {
+  if (!map.isStyleLoaded()) return;
   map.setPaintProperty("dots", "raster-brightness-max", displaySettings.brightness);
   map.setPaintProperty("dots", "raster-contrast", displaySettings.contrast);
   map.setPaintProperty("dots", "raster-saturation", displaySettings.saturation);
@@ -703,19 +835,19 @@ dpGear.addEventListener("click", () => {
 dpBrightness.addEventListener("input", () => {
   displaySettings.brightness = Number(dpBrightness.value);
   dpBrightnessN.textContent = displaySettings.brightness.toFixed(2);
-  map.setPaintProperty("dots", "raster-brightness-max", displaySettings.brightness);
+  applyDisplayPaint();
   saveDisplaySettings();
 });
 dpContrast.addEventListener("input", () => {
   displaySettings.contrast = Number(dpContrast.value);
   dpContrastN.textContent = displaySettings.contrast.toFixed(2);
-  map.setPaintProperty("dots", "raster-contrast", displaySettings.contrast);
+  applyDisplayPaint();
   saveDisplaySettings();
 });
 dpSaturation.addEventListener("input", () => {
   displaySettings.saturation = Number(dpSaturation.value);
   dpSaturationN.textContent = displaySettings.saturation.toFixed(2);
-  map.setPaintProperty("dots", "raster-saturation", displaySettings.saturation);
+  applyDisplayPaint();
   saveDisplaySettings();
 });
 dpDensityRadios.forEach(r => r.addEventListener("change", () => {
@@ -855,9 +987,34 @@ map.on("click", async ev => {
   const url = String(hit[1]).startsWith("http") ? hit[1] : "https://openalex.org/" + hit[1];
   window.open(url, "_blank", "noopener");
 });
-map.on("load", () => { applyDisplayPaint(); drawLabels(); drawRegions(); });
-map.on("moveend", () => { drawLabels(); drawRegions(); });
+map.on("load", () => {
+  if (initialHash && initialHash.view) {
+    const v = initialHash.view;
+    map.jumpTo({ center: [v.lng, v.lat], zoom: v.zoom });
+  }
+  applyDisplayPaint();
+  drawLabels();
+  drawRegions();
+  restoreFromHash(initialHash);   // async; resolves a=/p= independently of view restore
+});
+map.on("moveend", () => { drawLabels(); drawRegions(); writeHash(); });
 map.on("zoomend", () => { drawLabels(); drawRegions(); });
+
+// ---- Task 2 (night-polish): Share button ----
+const shareBtn = document.getElementById("share-btn");
+let shareBtnTimer = null;
+shareBtn.addEventListener("click", async () => {
+  writeHash();
+  const url = location.href;
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch {
+    prompt("Copy this link:", url);
+  }
+  clearTimeout(shareBtnTimer);
+  shareBtn.textContent = "copied";
+  shareBtnTimer = setTimeout(() => { shareBtn.textContent = "Share"; }, 1200);
+});
 </script>
 </body>
 </html>
