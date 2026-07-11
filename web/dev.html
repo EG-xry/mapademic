@@ -112,6 +112,24 @@
     #display-reset { background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
                       border-radius: 6px; padding: 6px 10px; font: 12px system-ui; cursor: pointer; }
     #display-reset:hover { border-color: #7fae8e; }
+    /* ---- Task 3 (night-polish): author info card ---- */
+    #info-card { position: fixed; left: 10px; bottom: 10px; background: #0b0b0bd9;
+                  color: #ddd; font: 12px system-ui; border-radius: 6px;
+                  width: 260px; z-index: 9; display: none; }
+    #info-card.open { display: block; }
+    #info-card .ic-head { display: flex; justify-content: space-between; align-items: center;
+                            gap: 8px; padding: 8px 10px; }
+    #info-card-name { font-weight: 600; font-size: 13px; }
+    #info-card-close { background: none; border: none; color: #ddd; font-size: 16px;
+                         line-height: 1; padding: 0 2px; cursor: pointer; flex: none; }
+    #info-card-close:hover { color: #7fae8e; }
+    #info-card-body { padding: 0 10px 8px; display: flex; flex-direction: column; gap: 4px; }
+    #info-card-body .row { display: flex; justify-content: space-between; gap: 8px; }
+    #info-card-body .row .k { color: #888; flex: none; }
+    .ic-actions { display: flex; gap: 6px; padding: 0 10px 10px; }
+    .ic-actions button { flex: 1; background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
+                           border-radius: 6px; padding: 6px 6px; font: 11px system-ui; cursor: pointer; }
+    .ic-actions button:hover { border-color: #7fae8e; }
   </style>
 </head>
 <body>
@@ -169,6 +187,18 @@
       Region names
     </label>
     <button id="display-reset" type="button">Reset</button>
+  </div>
+</div>
+<div id="info-card" role="region" aria-label="Author info">
+  <div class="ic-head">
+    <span id="info-card-name"></span>
+    <button id="info-card-close" type="button" aria-label="Close">&times;</button>
+  </div>
+  <div id="info-card-body"></div>
+  <div class="ic-actions">
+    <button id="info-card-open" type="button">Open on OpenAlex</button>
+    <button id="info-card-connect" type="button">Connect from here</button>
+    <button id="info-card-copy" type="button">Copy link</button>
   </div>
 </div>
 <script>
@@ -985,6 +1015,127 @@ fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
     }
   });
 
+// ---- Task 3 (night-polish): author info card on click ----
+// Instant content comes straight from the hit entry (name, citations); the
+// card then upgrades itself via a fetch to OpenAlex. infoCardGen guards that
+// fetch the same way labelGen/pathGen guard their async redraws: closing the
+// card (or opening a different one) bumps it, so a slow response for an
+// already-dismissed author can't write into a card that's since moved on.
+const infoCard = document.getElementById("info-card");
+const infoCardName = document.getElementById("info-card-name");
+const infoCardBody = document.getElementById("info-card-body");
+const infoCardClose = document.getElementById("info-card-close");
+const infoCardOpenBtn = document.getElementById("info-card-open");
+const infoCardConnectBtn = document.getElementById("info-card-connect");
+const infoCardCopyBtn = document.getElementById("info-card-copy");
+
+const infoCardCache = new Map();     // bare id -> Promise<details|null>; cap 50, FIFO
+let infoCardGen = 0;
+let infoCardData = null;             // {bareId, fullUrl, name, xw, yw} for the open card's footer buttons
+let infoCardCopyTimer = null;
+
+function addInfoRow(key, value) {
+  const row = document.createElement("div");
+  row.className = "row";
+  const k = document.createElement("span");
+  k.className = "k"; k.textContent = key;
+  const v = document.createElement("span");
+  v.textContent = value;
+  row.append(k, v);
+  infoCardBody.appendChild(row);
+}
+
+function closeInfoCard() {
+  infoCardGen++;                     // any in-flight fetch for this card is now stale
+  infoCard.classList.remove("open");
+  infoCardBody.innerHTML = "";
+  infoCardData = null;
+}
+
+async function fetchAuthorDetails(bareId) {
+  if (!infoCardCache.has(bareId)) {
+    infoCardCache.set(bareId, fetch(`https://api.openalex.org/people/${bareId}?select=display_name,works_count,cited_by_count,summary_stats,last_known_institutions,topics`)
+      .then(r => r.ok ? r.json() : null)
+      .catch(() => null));
+    if (infoCardCache.size > 50) infoCardCache.delete(infoCardCache.keys().next().value);
+  }
+  return infoCardCache.get(bareId);
+}
+
+// hit entry shape: [name, id, xw, yw, cited] (same as drawLabels/hitTest).
+function openInfoCard(hit) {
+  const [name, rawId, xw, yw, cited] = hit;
+  const bareId = stripId(rawId);
+  // Same id-normalization as the old click handler: entries may already carry
+  // a full "https://openalex.org/..." id or a bare one.
+  const fullUrl = String(rawId).startsWith("http") ? rawId : "https://openalex.org/" + rawId;
+  infoCardData = { bareId, fullUrl, name, xw, yw };
+  const gen = ++infoCardGen;
+
+  infoCardName.textContent = name;
+  infoCardBody.innerHTML = "";
+  addInfoRow("Citations", cited.toLocaleString());
+  infoCard.classList.add("open");
+
+  fetchAuthorDetails(bareId).then(data => {
+    if (gen !== infoCardGen) return;   // card closed, or replaced, since this fetch started
+    if (!data) { addInfoRow("Details", "couldn't load details"); return; }
+    const inst = data.last_known_institutions && data.last_known_institutions[0];
+    addInfoRow("Institution", inst ? inst.display_name : "unknown");
+    addInfoRow("Works", (data.works_count || 0).toLocaleString());
+    const hIndex = data.summary_stats ? data.summary_stats.h_index : null;
+    addInfoRow("h-index", hIndex != null ? hIndex : "-");
+    const topics = (data.topics || []).slice(0, 3).map(t => t.display_name).filter(Boolean);
+    if (topics.length) addInfoRow("Topics", topics.join(", "));
+  });
+}
+
+infoCardClose.addEventListener("click", closeInfoCard);
+
+// Escape closes the card before it reaches any focused input's own Escape
+// handler (search/connect dropdowns) -- capture phase + stopPropagation so
+// the card always wins the keypress when it's open, establishing the
+// priority order Task 4's help overlay/dropdowns will slot in beneath.
+document.addEventListener("keydown", ev => {
+  if (ev.key === "Escape" && infoCard.classList.contains("open")) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    closeInfoCard();
+  }
+}, true);
+
+infoCardOpenBtn.addEventListener("click", () => {
+  if (!infoCardData) return;
+  window.open(infoCardData.fullUrl, "_blank", "noopener");
+});
+
+infoCardConnectBtn.addEventListener("click", () => {
+  if (!infoCardData) return;
+  const { bareId, name, xw, yw } = infoCardData;
+  connectPanel.classList.add("open");
+  connectToggle.classList.add("active");
+  connectAInput.value = name;
+  connectA = { id: bareId, name, xw, yw };   // same shape createAuthorLookup's select() hands to onSelect
+  pendingP = null;
+  connectBInput.focus();
+});
+
+infoCardCopyBtn.addEventListener("click", async () => {
+  if (!infoCardData) return;
+  const { bareId, name, xw, yw } = infoCardData;
+  setSearchHighlight(bareId, name, xw, yw);   // sets activeA and writes the hash, like a search select
+  const url = location.href;
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch {
+    prompt("Copy this link:", url);   // the prompt itself is the feedback
+    return;
+  }
+  clearTimeout(infoCardCopyTimer);
+  infoCardCopyBtn.textContent = "copied";
+  infoCardCopyTimer = setTimeout(() => { infoCardCopyBtn.textContent = "Copy link"; }, 1200);
+});
+
 const tip = document.getElementById("tip");
 async function hitTest(pt) {
   if (map.getZoom() < HIT_ZOOM) return null;
@@ -1024,8 +1175,7 @@ map.on("mousemove", async ev => {
 map.on("click", async ev => {
   const hit = await hitTest(ev.point);
   if (!hit) return;
-  const url = String(hit[1]).startsWith("http") ? hit[1] : "https://openalex.org/" + hit[1];
-  window.open(url, "_blank", "noopener");
+  openInfoCard(hit);
 });
 map.on("load", () => {
   styleReady = true;               // safePaint writes are safe from here on
