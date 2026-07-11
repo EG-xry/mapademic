@@ -55,7 +55,16 @@
                               pointer-events: none; }
     /* ---- Task 7: Connect / path overlay ---- */
     #search-top { display: flex; gap: 6px; align-items: stretch; }
-    #search-top #search-input { width: auto; flex: 1; min-width: 0; }
+    #search-top .search-input-wrap { position: relative; flex: 1; min-width: 0; }
+    #search-top .search-input-wrap #search-input { width: 100%; padding-right: 24px; }
+    /* ---- Task 5 (data-pipeline): un-search / clear-search button ---- */
+    #search-clear { display: none; align-items: center; justify-content: center;
+                     position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+                     width: 18px; height: 18px; padding: 0; margin: 0;
+                     background: transparent; color: #888; border: none; border-radius: 4px;
+                     font: 14px system-ui; line-height: 1; cursor: pointer; }
+    #search-clear.visible { display: flex; }
+    #search-clear:hover { color: #7fae8e; }
     #connect-toggle { background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
                        border-radius: 6px; padding: 6px 10px; font: 12px system-ui;
                        cursor: pointer; white-space: nowrap; }
@@ -184,7 +193,10 @@
 <div id="tip"></div>
 <div id="search">
   <div id="search-top">
-    <input id="search-input" type="text" placeholder="Search authors…" autocomplete="off">
+    <div class="search-input-wrap">
+      <input id="search-input" type="text" placeholder="Search authors…" autocomplete="off">
+      <button id="search-clear" type="button" aria-label="Clear search">&times;</button>
+    </div>
     <button id="connect-toggle" type="button">Connect</button>
     <button id="share-btn" type="button" aria-label="Copy share link">Share</button>
   </div>
@@ -583,14 +595,26 @@ function rankSearchEntries(entries, norm) {
 
 const searchInput = document.getElementById("search-input");
 const searchDropdown = document.getElementById("search-dropdown");
+const searchClearBtn = document.getElementById("search-clear");
 let searchResults = [];
 let searchActive = -1;
 let searchGen = 0;      // invalidates stale in-flight lookups
 let searchTimer = null;
 let highlightMarker = null;
 
+// ---- un-search / clear-search button ----
+// Visible whenever there's something to clear: a placed highlight or leftover
+// query text. Called from every spot that changes either of those two things
+// rather than wired to a single event, since both the search box and the
+// highlight can change independently (typing, Escape, a search select, a
+// path draw stealing the highlight, an a=<id> hash restore).
+function updateSearchClearVisibility() {
+  searchClearBtn.classList.toggle("visible", !!(highlightMarker || searchInput.value));
+}
+
 function clearSearchHighlight() {
   if (highlightMarker) { highlightMarker.remove(); highlightMarker = null; }
+  updateSearchClearVisibility();
 }
 
 // Places the pulsing highlight marker plus a persistent name tag -- used by
@@ -610,6 +634,7 @@ function setSearchHighlight(id, name, xw, yw) {
     .setLngLat(toLngLat(xw, yw)).addTo(map);
   activeA = stripId(id);
   pendingA = null;             // the real highlight owns a= from here
+  updateSearchClearVisibility();
   writeHash();
 }
 
@@ -667,6 +692,7 @@ searchInput.addEventListener("input", () => {
   clearTimeout(searchTimer);
   const query = searchInput.value;
   searchTimer = setTimeout(() => runSearch(query), 150);
+  updateSearchClearVisibility();
 });
 
 searchInput.addEventListener("keydown", ev => {
@@ -703,14 +729,27 @@ function searchDropdownEscape() {
   clearTimeout(searchTimer);
   searchGen++;
   closeSearchDropdown();
+  updateSearchClearVisibility();
 }
-function searchHighlightEscape() {
+// Drops the search highlight and any coauthor rays without touching the
+// hash -- shared by searchHighlightEscape (which does own the hash write)
+// and renderPath (Task 5, data-pipeline), which clears the highlight when a
+// path is about to own the map's one highlight slot but writes p= itself
+// right after, so a second writeHash here would just be redundant.
+function clearSearchAndRays() {
   clearSearchHighlight();
   clearRays();
   activeA = null;
   pendingA = null;
+}
+function searchHighlightEscape() {
+  clearSearchAndRays();
   writeHash();
 }
+searchClearBtn.addEventListener("click", () => {
+  searchDropdownEscape();
+  searchHighlightEscape();
+});
 
 // ---- degree-of-separation path overlay (Task 7) ----
 // Reuses the Task 6 lookup helpers (normalize/lookupSearchShard/rankSearchEntries)
@@ -949,6 +988,14 @@ async function renderPath(pathSteps, hops, idA, idB) {
   if (gen !== pathGen) return;       // a newer Go/Clear owns the overlay now
   const points = resolved.filter(Boolean);
   if (points.length < 2) { setPathStatus(`${hops} hops (too few resolved to draw)`); return; }
+
+  // One visual mode at a time: a path about to draw takes over the highlight
+  // slot, so drop any active search highlight (and its rays) first -- covers
+  // the case where the searched author is also an endpoint/hop of this path,
+  // which would otherwise leave two name labels on top of each other and a=
+  // stale in the hash alongside the new p=. writeHash below (which sets p=)
+  // is this call's own hash write, so clearSearchAndRays must not write here.
+  clearSearchAndRays();
 
   const coords = points.map(p => toLngLat(p.xw, p.yw).toArray());
   map.addSource("path", {
@@ -1590,6 +1637,38 @@ map.on("load", () => {
   drawRegions();
   restoreFromHash(initialHash);   // async; resolves a=/p= independently of view restore
 });
+// ---- Task 5 (data-pipeline): live label/region updates while panning/zooming ----
+// "move" fires repeatedly for the whole duration of a gesture (pan, zoom,
+// pinch) unlike moveend/zoomend, which only fire once it settles -- without
+// this, author/region names from the pre-gesture view linger on screen until
+// the user's hand comes off the trackpad, most noticeably zooming out fast
+// from a deep zoom. Throttled (leading+trailing, ~180ms) so a fast gesture
+// doesn't spam drawLabels'/drawRegions' tile-fetch + collision-pack work on
+// every frame; leading-edge means the z < 5.5 label clear (see drawLabels)
+// still fires within one throttle window of crossing the threshold, not just
+// at gesture end. drawLabels is safe to call this often: labelGen makes a
+// superseded in-flight call a no-op, and the marker swap it does happen in
+// one synchronous block after its await, so there's no visible flicker.
+function throttle(fn, wait) {
+  let last = 0, timer = null, lastArgs = null;
+  return (...args) => {
+    lastArgs = args;
+    const now = Date.now();
+    const elapsed = now - last;
+    if (elapsed >= wait) {
+      last = now;
+      fn(...lastArgs);
+    } else if (!timer) {
+      timer = setTimeout(() => {
+        last = Date.now();
+        timer = null;
+        fn(...lastArgs);
+      }, wait - elapsed);
+    }
+  };
+}
+const throttledMoveRedraw = throttle(() => { drawLabels(); drawRegions(); }, 180);
+map.on("move", throttledMoveRedraw);
 map.on("moveend", () => { drawLabels(); drawRegions(); writeHash(); });
 map.on("zoomend", () => { drawLabels(); drawRegions(); });
 
