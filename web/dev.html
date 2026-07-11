@@ -224,7 +224,8 @@
           <li>Search for an author by name.</li>
           <li>Connect finds the shortest coauthor path between two authors
             via the degree-of-separation engine.</li>
-          <li>Click a dot at deep zoom for author details.</li>
+          <li>Hover a dot at deep zoom to see the author's name and
+            citations; click it for full details.</li>
           <li>Share copies a link to the exact view.</li>
           <li>The gear opens display settings.</li>
         </ul>
@@ -1368,7 +1369,8 @@ helpOverlay.addEventListener("click", ev => { if (ev.target === helpOverlay) clo
 // open panel independently racing to consume the same keypress:
 //   1. info card       2. help overlay
 //   3. search dropdowns (top search box, then Connect A, then Connect B)
-//   4. active search highlight
+//   4. focused Connect input holding a selection or leftover text
+//   5. active search highlight
 // This replaces the standalone info-card-only capture listener from Task 3
 // (see the comment left at its old call site) plus the per-input Escape
 // branches that used to live in searchInput's and createAuthorLookup's own
@@ -1390,6 +1392,15 @@ document.addEventListener("keydown", ev => {
     } else if (connectBLookup.isOpen()) {
       ev.preventDefault(); ev.stopPropagation();
       connectBLookup.escape();
+    } else if (document.activeElement === connectAInput && (connectA || connectAInput.value)) {
+      // Dropdown-closed Escape in a Connect input still clears a selected
+      // author (or leftover text), matching the pre-Task-4 per-input
+      // behavior; escape() also fires onSelect(null) to null the selection.
+      ev.preventDefault(); ev.stopPropagation();
+      connectALookup.escape();
+    } else if (document.activeElement === connectBInput && (connectB || connectBInput.value)) {
+      ev.preventDefault(); ev.stopPropagation();
+      connectBLookup.escape();
     } else if (activeA) {
       ev.preventDefault(); ev.stopPropagation();
       searchHighlightEscape();
@@ -1397,7 +1408,7 @@ document.addEventListener("keydown", ev => {
     return;
   }
   const tag = ev.target && ev.target.tagName;
-  const typing = tag === "INPUT" || tag === "TEXTAREA";
+  const typing = tag === "INPUT" || tag === "TEXTAREA" || (ev.target && ev.target.isContentEditable);
   if (ev.key === "/" && !typing) {
     ev.preventDefault();
     searchInput.focus();

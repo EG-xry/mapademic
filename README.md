@@ -27,7 +27,7 @@ Run stages via `python -m pipeline <stage>`. Data checkpoints live under
     .venv/bin/python -m pipeline extract
 
     # 3. Tune --min-works until the kept count lands in 5-10M
-    .venv/bin/python -m pipeline filter --min-works 5
+    .venv/bin/python -m pipeline filter --min-works 15  # (production run: 15 -> 8.59M authors)
 
     # 4. Build edges (prints edge count; expect 50-200M rows)
     .venv/bin/python -m pipeline edges
