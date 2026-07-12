@@ -106,24 +106,36 @@ def test_ordering_by_cited_desc(tmp_path):
     assert xs == [0.4, 0.3, 0.2, 0.1, 0.0]  # highest cited_by_count (A4) first
 
 
-def test_colors_big_community_matches_palette_small_and_ring_share_grey(tmp_path):
+def test_colors_big_community_matches_palette_small_grey_ring_excluded(tmp_path):
     web = tmp_path / "web.parquet"
     big_community, big_n, cx, cy = write_web_with_big_community(web)
     out = tmp_path / "vector_experiment"
     meta = export_points(str(web), out)
+    # R0 is is_ring -> dropped entirely; order: cited_by_count DESC -> S0 (5000), then B0..B999 (1000..1)
+    assert meta["count"] == big_n + 1
     attrs = _load_attrs(out, meta["count"])
-    # order: cited_by_count DESC -> R0 (9999), S0 (5000), then B0..B999 (1000..1)
     expected_big_rgb = community_rgb(big_community, big_n, cx, cy, min_members=MIN_MEMBERS)
     expected_big_u8 = np.clip(np.round(np.array(expected_big_rgb) * 255), 0, 255).astype(np.uint8)
     grey_u8 = np.clip(np.round(np.array(GREY_RGB) * 255), 0, 255).astype(np.uint8)
 
-    ring_row = attrs[0, :3]     # R0, ring/dust singleton community -> grey
-    small_row = attrs[1, :3]    # S0, community 999 with 1 member -> below MIN_MEMBERS -> grey
-    big_row = attrs[2, :3]      # B0, community `big_community` with big_n members -> colored
+    small_row = attrs[0, :3]    # S0, community 999 with 1 member -> below MIN_MEMBERS -> grey
+    big_row = attrs[1, :3]      # B0, community `big_community` with big_n members -> colored
 
-    assert np.array_equal(ring_row, grey_u8)
     assert np.array_equal(small_row, grey_u8)
     assert np.array_equal(big_row, expected_big_u8)
+
+
+def test_ring_rows_excluded(tmp_path):
+    web = tmp_path / "web.parquet"
+    rows = [
+        ("A0", 0.1, 0.1, 1, 100, False),
+        ("A1", 0.2, 0.2, 1, 200, True),   # is_ring -> dust, dropped
+        ("A2", 0.3, 0.3, 1, 300, False),
+    ]
+    write_web(web, rows)
+    out = tmp_path / "vector_experiment"
+    meta = export_points(str(web), out)
+    assert meta["count"] == 2
 
 
 def test_sample_flag_limits_and_keeps_top(tmp_path):

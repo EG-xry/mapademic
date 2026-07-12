@@ -1,16 +1,21 @@
 """Binary point-cloud export for a WebGL vector-points experiment (R15a).
 
 Standalone experiment script, not a pipeline stage: reads coords_web.parquet
-(all rows, including ring/dust) and writes two flat little-endian arrays
-under data/vector_experiment/ for GPU-friendly progressive loading --
-positions.bin (x,y uint16, 4 bytes/point) and attrs.bin (r,g,b,size uint8,
-4 bytes/point) -- plus meta.json. data/index and data/tiles are untouched.
+and writes two flat little-endian arrays under data/vector_experiment/ for
+GPU-friendly progressive loading -- positions.bin (x,y uint16, 4 bytes/point)
+and attrs.bin (r,g,b,size uint8, 4 bytes/point) -- plus meta.json. data/index
+and data/tiles are untouched.
+
+R16: rows with is_ring=true (re-scattered dust authors with no retained
+coauthor links -- see pipeline/webcoords.py's ring_pred) are dropped from
+the export entirely. They stay searchable via data/index but are no longer
+drawn as interactive point-cloud dots.
 
 Colors reuse pipeline.palette (same min_members=1000 rule as the production
-legend); points whose community falls below that threshold -- including
-every ring/dust singleton community -- share one fixed grey rather than
-each getting its own tiny per-community jitter, so the tail reads as a
-single consistent dust color (close to the viewer's #565660).
+legend); points whose community falls below that threshold share one fixed
+grey rather than each getting its own tiny per-community jitter, so the
+tail reads as a single consistent dust color (close to the viewer's
+#565660).
 """
 import argparse
 import json
@@ -74,6 +79,7 @@ def export_points(web_path: str, out_dir: Path, sample: int | None = None) -> di
         f"""SELECT CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw,
                    cited_by_count, community
             FROM read_parquet('{web_path}')
+            WHERE NOT is_ring
             ORDER BY cited_by_count DESC, id
             {limit_clause}"""
     ).fetchnumpy()
@@ -111,6 +117,7 @@ def export_points(web_path: str, out_dir: Path, sample: int | None = None) -> di
         "quantization": QUANT,
         "size_scale": SIZE_SCALE,
         "generated_from": "coords_web.parquet",
+        "filters": "WHERE NOT is_ring (dust authors excluded; kept searchable via data/index, not in the point cloud)",
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     return meta

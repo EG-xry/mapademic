@@ -277,10 +277,12 @@
         <p>Bright splats are highly-cited authors (60,000+ citations). The
           faint grey web visible at z8-9 is repeat coauthorships - at max
           zoom the map stays clean, and you see a researcher's coauthorships
-          by searching them or via the info card's Coauthors button. Grey
-          dust is authors without retained coauthor links. The gear's Points
-          setting sizes and colors dots by citations and community at every
-          zoom, not just up close, and can hide the raster splats entirely.</p>
+          by searching them or via the info card's Coauthors button. The
+          faint grey speckle in dark areas is background dust - authors with
+          no retained coauthor links, kept searchable but not rendered as
+          interactive dots. The gear's Points setting sizes and colors dots
+          by citations and community at every zoom, not just up close, and
+          can hide the raster splats entirely.</p>
       </section>
       <section>
         <h3>Controls</h3>
@@ -370,7 +372,7 @@
          communities, contradicting the isolate contract); the checkbox stays
          checked and the cloud comes back when the isolate ends -- see
          syncPointCloudVisible. -->
-    <label class="dp-check" title="Renders all 8.6M authors (69MB download). Temporarily hidden while a community isolate is active.">
+    <label class="dp-check" title="Renders all 8.6M authors (69MB download), below zoom 10.25; the precise interactive layer takes over deeper. Temporarily hidden while a community isolate is active.">
       <input id="dp-all-points" type="checkbox">
       All points (experimental)
     </label>
@@ -1652,6 +1654,12 @@ dpSizeContrast.addEventListener("input", () => {
   dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
   saveDisplaySettings();
   applyVectorRadius();
+  // R16: the point cloud's u_contrast is read fresh every render() frame
+  // (see pointCloudLayer.render), but MapLibre only repaints on camera
+  // changes/triggerRepaint -- an input event alone never causes one, so the
+  // slider would otherwise look dead until an unrelated repaint happened to
+  // fire. Force one here whenever the cloud is actually visible.
+  if (pointCloudEffectivelyOn()) map.triggerRepaint();
 });
 dpReset.addEventListener("click", () => {
   displaySettings = { ...DISPLAY_DEFAULTS };
@@ -1663,6 +1671,9 @@ dpReset.addEventListener("click", () => {
   updateVectorPoints();
   applyVectorRadius();
   updateRasterOpacity();
+  // R16: reset can change sizeContrast too -- same live-repaint need as the
+  // slider's own input handler above.
+  if (pointCloudEffectivelyOn()) map.triggerRepaint();
 });
 
 let markers = [];
@@ -2098,13 +2109,24 @@ const pointCloudLayer = {
   // is the Float32Array MapLibre itself owns and reuses per frame.
   render(gl, matrix) {
     if (!this.visible || this.loadedCount === 0) return;
+    // R16: below VECTOR_POINTS_MIN_ZOOM (10.25) the cloud is the only dense
+    // point layer and draws everyone; at/above it, the label-tile vector
+    // layer takes over with precise, interactive, filtered (non-dust) dots
+    // -- letting the cloud keep drawing there would duplicate every one of
+    // those dots with a slightly-off quantized copy and add back low-cited/
+    // non-interactive noise the vector handoff exists to hide. Cheap
+    // per-frame check, no layer/visibility churn; camera changes (including
+    // the zoom crossing) already trigger their own repaint, so no extra
+    // triggerRepaint wiring is needed here.
+    const zoom = map.getZoom();
+    if (zoom >= VECTOR_POINTS_MIN_ZOOM) return;
     gl.useProgram(this.program);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
     gl.uniformMatrix4fv(this.uMatrix, false, matrix);
     const dpr = window.devicePixelRatio || 1;
-    gl.uniform1f(this.uBase, pointCloudBaseSizePx(map.getZoom()) * dpr);
+    gl.uniform1f(this.uBase, pointCloudBaseSizePx(zoom) * dpr);
     gl.uniform1f(this.uContrast, displaySettings.sizeContrast);
     gl.uniform1f(this.uMin, POINT_CLOUD_MIN_PX * dpr);
 
