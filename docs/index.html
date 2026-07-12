@@ -164,6 +164,11 @@
     #display-reset { background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
                       border-radius: 6px; padding: 6px 10px; font: 12px system-ui; cursor: pointer; }
     #display-reset:hover { border-color: #7fae8e; }
+    /* ---- R15b: experimental full point-cloud toggle ---- */
+    /* Status pill, same visual language as #search-status/#connect-status. */
+    #dp-all-points-status:empty { display: none; }
+    #dp-all-points-status { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
+                              border-radius: 6px; padding: 4px 8px; }
     /* ---- Task 3 (night-polish): author info card ---- */
     #info-card { position: fixed; left: 10px; bottom: 10px; background: #0b0b0bd9;
                   color: #ddd; font: 12px system-ui; border-radius: 6px;
@@ -272,10 +277,12 @@
         <p>Bright splats are highly-cited authors (60,000+ citations). The
           faint grey web visible at z8-9 is repeat coauthorships - at max
           zoom the map stays clean, and you see a researcher's coauthorships
-          by searching them or via the info card's Coauthors button. Grey
-          dust is authors without retained coauthor links. The gear's Points
-          setting sizes and colors dots by citations and community at every
-          zoom, not just up close, and can hide the raster splats entirely.</p>
+          by searching them or via the info card's Coauthors button. The
+          faint grey speckle in dark areas is background dust - authors with
+          no retained coauthor links, kept searchable but not rendered as
+          interactive dots. The gear's Points setting sizes and colors dots
+          by citations and community at every zoom, not just up close, and
+          can hide the raster splats entirely.</p>
       </section>
       <section>
         <h3>Controls</h3>
@@ -359,6 +366,18 @@
       <div class="dp-row-head"><label for="dp-size-contrast">Citation size contrast</label><span id="dp-size-contrast-n" class="n"></span></div>
       <input id="dp-size-contrast" type="range" min="0" max="5" step="0.1" value="1.0">
     </div>
+    <!-- R17: full-cloud WebGL layer, graduated from the R15b experiment --
+         persisted as displaySettings.allPoints (default off, see
+         DISPLAY_DEFAULTS), so a visitor who turns it on keeps it on. A
+         community isolate temporarily suppresses the cloud (it renders all
+         communities, contradicting the isolate contract); the checkbox stays
+         checked and the cloud comes back when the isolate ends -- see
+         syncPointCloudVisible. -->
+    <label class="dp-check" title="Renders all 8.6M authors (69MB download), below zoom 10.25; the precise interactive layer takes over deeper. Temporarily hidden while a community isolate is active.">
+      <input id="dp-all-points" type="checkbox">
+      All points
+    </label>
+    <div id="dp-all-points-status"></div>
     <button id="display-reset" type="button">Reset</button>
   </div>
 </div>
@@ -464,6 +483,11 @@ if (initialHash) {
   if (initialHash.p) pendingP = initialHash.p.map(stripId);
 }
 
+// R17: remote R2-hosted tiles have higher per-request latency than the old
+// same-origin dev server, so more in-flight requests keeps the raster/vector
+// tile pipeline fed (default is 16).
+maplibregl.setMaxParallelImageRequests(32);
+
 const map = new maplibregl.Map({
   container: "map",
   style: {
@@ -502,28 +526,38 @@ function safePaint(prop, v) {
 // exist) never fight over the same paint property. renderPath/clearPath only
 // ever set pathDimActive and call this -- they no longer touch raster-opacity
 // directly. Precedence (R13: pointMode replaces the old vectorPoints
-// checkbox): pointMode "vector" always wins outright, forcing the raster
-// fully out at every zoom (not just deep zoom) since that mode's whole point
-// is vector-only rendering; otherwise pointMode "both" at deep zoom (zoom >=
-// VECTOR_POINTS_MIN_ZOOM) fades the raster out the same way the old
-// vectorPoints-enabled behavior did, so vector circles are the only dots
-// layer visible there (isolate filtering happens inside updateVectorPoints
-// itself in that case); otherwise a path in flight dims the raster to 0.45
-// (unchanged pre-vector-points behavior); otherwise a community isolate in
-// effect (Task R10a) dims the raster to 0.2 at ALL zooms -- this is the
-// isolate's only effect below vector zoom (or in pointMode "raster" at any
-// zoom), since the raster itself isn't filterable per-community until R10b's
-// per-community shards ship; otherwise full opacity. pointMode "raster"
-// never forces 0 here -- see updateVectorPoints for how its isolate shard
-// dots still render as vector points regardless (deliberate, isolate is an
-// explicit action) without this resolver treating that as "vector active".
+// checkbox; R15b: the experimental full point-cloud layer added a new
+// top-precedence case, see allPointsCloudOn below): the cloud, when
+// EFFECTIVELY on (checkbox on AND no active isolate -- an isolate suppresses
+// the cloud, see pointCloudEffectivelyOn), always wins outright (same as
+// pointMode "vector" -- the cloud renders every author itself, so the
+// raster splats underneath would just be redundant double-drawing); while
+// an isolate suppresses the cloud, the resolver falls through to the
+// pre-cloud precedence below, so the isolate's own 0.2 dim applies exactly
+// as with the cloud off; otherwise pointMode "vector" always wins outright,
+// forcing the raster fully out at every zoom (not just deep zoom) since that
+// mode's whole point is vector-only rendering; otherwise pointMode "both" at
+// deep zoom (zoom >= VECTOR_POINTS_MIN_ZOOM) fades the raster out the same
+// way the old vectorPoints-enabled behavior did, so vector circles are the
+// only dots layer visible there (isolate filtering happens inside
+// updateVectorPoints itself in that case); otherwise a path in flight dims
+// the raster to 0.45 (unchanged pre-vector-points behavior); otherwise a
+// community isolate in effect (Task R10a) dims the raster to 0.2 at ALL
+// zooms -- this is the isolate's only effect below vector zoom (or in
+// pointMode "raster" at any zoom), since the raster itself isn't filterable
+// per-community until R10b's per-community shards ship; otherwise full
+// opacity. pointMode "raster" never forces 0 here -- see updateVectorPoints
+// for how its isolate shard dots still render as vector points regardless
+// (deliberate, isolate is an explicit action) without this resolver treating
+// that as "vector active".
 let pathDimActive = false;   // true while renderPath owns a drawn path, cleared by clearPath
 function updateRasterOpacity() {
   const vectorActive = displaySettings.pointMode === "both" && map.getZoom() >= VECTOR_POINTS_MIN_ZOOM;
   // Deliberate precedence: a drawn path's dim (0.45) wins over isolate's
   // deeper dim (0.2) when both are active, since the path is the fresher,
   // more specific intent and path drawing doesn't clear isolate state.
-  const opacity = displaySettings.pointMode === "vector" ? 0
+  const opacity = pointCloudEffectivelyOn() ? 0
+    : displaySettings.pointMode === "vector" ? 0
     : vectorActive ? 0
     : pathDimActive ? 0.45
     : isolateCommunity != null ? 0.2
@@ -1502,7 +1536,11 @@ function collides(placed, x, y, w, h) {
 // Sliders only ever touch brightness/contrast/saturation; raster-opacity stays
 // owned by updateRasterOpacity() (see near safePaint above), which renderPath/
 // clearPath and the vector-points toggle all defer to, so the three stay orthogonal.
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 1.0 };
+// R17: allPoints defaults to false -- the full point-cloud fetch is 69MB, so
+// a public visitor has to opt in rather than have it silently kick off on
+// their first page load just because a previous session (or the default
+// itself) turned it on.
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 1.0, allPoints: false };
 const DISPLAY_KEY = "mapademic.display";
 
 // R12b: a stale localStorage value still carrying the removed "boundaries"
@@ -1633,6 +1671,12 @@ dpSizeContrast.addEventListener("input", () => {
   dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
   saveDisplaySettings();
   applyVectorRadius();
+  // R16: the point cloud's u_contrast is read fresh every render() frame
+  // (see pointCloudLayer.render), but MapLibre only repaints on camera
+  // changes/triggerRepaint -- an input event alone never causes one, so the
+  // slider would otherwise look dead until an unrelated repaint happened to
+  // fire. Force one here whenever the cloud is actually visible.
+  if (pointCloudEffectivelyOn()) map.triggerRepaint();
 });
 dpReset.addEventListener("click", () => {
   displaySettings = { ...DISPLAY_DEFAULTS };
@@ -1644,6 +1688,16 @@ dpReset.addEventListener("click", () => {
   updateVectorPoints();
   applyVectorRadius();
   updateRasterOpacity();
+  // R17: allPoints resets to false too -- sync the checkbox and turn the
+  // cloud off if it was on. This just hides the layer (pointCloudLayer.visible
+  // -> false via setPointCloudActive); any already-fetched buffers stay
+  // cached in memory for the rest of the session, same as an ordinary
+  // uncheck.
+  dpAllPoints.checked = displaySettings.allPoints;
+  setPointCloudActive(displaySettings.allPoints);
+  // R16: reset can change sizeContrast too -- same live-repaint need as the
+  // slider's own input handler above.
+  if (pointCloudEffectivelyOn()) map.triggerRepaint();
 });
 
 let markers = [];
@@ -1743,7 +1797,10 @@ function drawRegions() {
 //     "vector" dims the raster to 0 at every zoom regardless (a separate,
 //     unconditional top-precedence branch in updateRasterOpacity), so at
 //     that point this same overlay IS the only dots layer visible below
-//     10.25 too.
+//     10.25 too. R15b: same idea, one more layer up -- when the experimental
+//     full point-cloud is on, it supersedes this overlay below 10.25 (see
+//     updateVectorPoints' hiddenByCloud), since the cloud already draws
+//     every author itself; at/above 10.25 this overlay is unaffected.
 const VECTOR_POINTS_MIN_ZOOM = 10.25;
 // Hard cap on rendered features regardless of how many tiles are visible --
 // keeps the GeoJSON source (and MapLibre's rebuild of it) bounded on a very
@@ -1868,11 +1925,377 @@ function buildVectorRadiusExpression(contrast) {
 // Guarded by layer existence (not safePaint/styleReady) since vector-points
 // is a dynamically added/removed layer, not part of the initial style --
 // map.getLayer is itself the right pre-load guard here.
+// R15b: also skipped while the layer is hidden (visibility "none") -- most
+// commonly because the full point-cloud layer has taken over below vector
+// zoom (see updateVectorPoints' hiddenByCloud branch). A hidden layer's
+// circle-radius paint write is pure waste: nothing reads it until the layer
+// is shown again, at which point updateVectorPoints already rebuilds it with
+// the live contrast value anyway. This is what keeps a contrast-slider drag
+// with the cloud on a uniform-only op (point-cloud's u_contrast is read
+// fresh every render() frame straight from displaySettings, no JS call
+// needed) instead of also paying for a wasted style write here.
 function applyVectorRadius() {
-  if (map.getLayer("vector-points")) {
+  if (map.getLayer("vector-points") && map.getLayoutProperty("vector-points", "visibility") !== "none") {
     map.setPaintProperty("vector-points", "circle-radius", buildVectorRadiusExpression(displaySettings.sizeContrast));
   }
 }
+
+// ---- R15b/R17: full-cloud WebGL point layer ----
+// docs/superpowers/plans/2026-07-11-vector-points-experiment.md's v1
+// candidate list. Renders all 8,587,906 authors as a single WebGL
+// gl.POINTS draw via a MapLibre CustomLayerInterface layer ("point-cloud"),
+// bypassing the GeoJSON/vector-tile pipeline (and its per-feature JS object
+// + MapLibre worker-reparse cost) entirely. Data comes from
+// data/vector_experiment/{positions,attrs}.bin (see
+// scripts/export_points_bin.py) -- flat little-endian u16 xw/yw + u8
+// r/g/b/s arrays, points pre-sorted cited-desc so a partial upload already
+// draws the "important" skeleton first.
+//
+// allPointsCloudOn itself stays a plain in-memory flag, same as before R17 --
+// it is not written to localStorage directly. What changed in R17 is that it
+// is now seeded from the persisted displaySettings.allPoints (default false,
+// see DISPLAY_DEFAULTS) in the map "load" handler below, and the checkbox's
+// change handler writes back to displaySettings.allPoints/saveDisplaySettings
+// so the choice survives a reload. isolateCommunity (below) remains
+// deliberately unpersisted -- that one is a transient view, not a user
+// preference like allPoints.
+//
+// Toggle cost is O(1) after the first enable: the custom layer is added to
+// the map lazily on first enable (compiling its program + allocating its two
+// GL buffers), the two .bin files are fetched once and uploaded in 8
+// progressive chunks (pill text mirrors the fetch/upload progress), and the
+// layer is then left in the style for the rest of the session -- every
+// toggle after that just flips pointCloudLayer.visible (checked at the top
+// of render()) and calls map.triggerRepaint(), never touching the fetch/
+// upload path again. See setPointCloudActive below.
+//
+// Isolate interaction (R15b follow-up): an active community isolate
+// temporarily suppresses the cloud -- the cloud renders ALL communities, so
+// leaving it up would contradict the isolate's "only this community's dots"
+// contract (and the first cut's hiddenByCloud gate made it worse by ALSO
+// hiding the isolate's own filtered shard dots underneath it). Effective
+// visibility is therefore allPointsCloudOn && no active isolate
+// (pointCloudEffectivelyOn); isolate entry/exit re-syncs it via
+// syncPointCloudVisible without touching the checkbox, so the cloud comes
+// straight back when the isolate ends.
+let allPointsCloudOn = false;
+// isolateCommunity is declared with `let` further down this file (the R10a
+// isolate section); every caller of this function runs long after the whole
+// script has executed top-to-bottom, so the TDZ is never an issue.
+function pointCloudEffectivelyOn() {
+  return allPointsCloudOn && isolateCommunity == null;
+}
+
+// GLSL ES 1.00 (no #version pragma) -- valid under both a WebGL1 and a
+// WebGL2 context (MapLibre picks whichever the browser supports), per the
+// task's WebGL1-compatible requirement.
+const POINT_CLOUD_VERT_SRC = `
+attribute vec2 a_pos;
+attribute vec4 a_attr;
+uniform mat4 u_matrix;
+uniform float u_base;
+uniform float u_contrast;
+uniform float u_min;
+varying vec3 v_color;
+void main() {
+  // a_pos arrives as raw (non-normalized) unsigned-short values (0..65535)
+  // cast to float by vertexAttribPointer -- the /65535.0 here is the
+  // "manual" normalize step back to world space [0,1].
+  vec2 world = a_pos / 65535.0;
+  // World y is stored up-positive (see the pipeline's coords_web.parquet /
+  // this file's own toLngLat: mercator y = 1 - yw), so the flip has to
+  // happen here too for the cloud to land on the same pixels as the raster.
+  float mercX = world.x;
+  float mercY = 1.0 - world.y;
+  gl_Position = u_matrix * vec4(mercX, mercY, 0.0, 1.0);
+  // a_attr arrives pre-normalized to [0,1] (UNSIGNED_BYTE, normalized=true);
+  // a_attr.a is the citation-size byte (s = sqrt(cited)/700*255, clamped).
+  // sizeFactor approximates (not exactly reproduces) the GeoJSON layer's
+  // sqrt(cited) radius curve -- monotone, tunable via u_contrast, "exact
+  // stops not required" per spec.
+  float sizeFactor = mix(0.6, 4.0, a_attr.a);
+  gl_PointSize = clamp(u_base * mix(1.0, sizeFactor, u_contrast), u_min, 64.0);
+  v_color = a_attr.rgb;
+}`;
+const POINT_CLOUD_FRAG_SRC = `
+precision mediump float;
+varying vec3 v_color;
+void main() {
+  // Circular point sprite: discard the square gl_PointCoord's corners.
+  vec2 d = gl_PointCoord - vec2(0.5);
+  if (dot(d, d) > 0.25) discard;
+  // Premultiplied-alpha output, paired with render()'s
+  // gl.blendFunc(ONE, ONE_MINUS_SRC_ALPHA) -- MapLibre custom layers are
+  // expected to composite this way onto its own premultiplied framebuffer.
+  float alpha = 0.9;
+  gl_FragColor = vec4(v_color * alpha, alpha);
+}`;
+
+function compilePointCloudShader(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    const info = gl.getShaderInfoLog(sh);
+    gl.deleteShader(sh);
+    throw new Error("point-cloud shader compile failed: " + info);
+  }
+  return sh;
+}
+
+// u_base interpolation: 1.5px at z2 -> 3.5px at z8 -> 4px at z10, held flat
+// past either end -- computed fresh every render() call from the live zoom,
+// no caching needed (it's four comparisons and a lerp, not worth memoizing).
+function pointCloudBaseSizePx(zoom) {
+  if (zoom <= 2) return 1.5;
+  if (zoom <= 8) return 1.5 + (zoom - 2) * ((3.5 - 1.5) / 6);
+  if (zoom <= 10) return 3.5 + (zoom - 8) * ((4.0 - 3.5) / 2);
+  return 4.0;
+}
+const POINT_CLOUD_MIN_PX = 1.0;   // gl_PointSize floor, before devicePixelRatio
+
+// CustomLayerInterface implementation. Plain method object (not a class) so
+// `this` inside onAdd/render is the layer instance MapLibre calls them on.
+const pointCloudLayer = {
+  id: "point-cloud",
+  type: "custom",
+  renderingMode: "2d",
+
+  visible: false,       // checkbox state; render() no-ops entirely while false
+  loaded: false,
+  loading: false,
+  loadedCount: 0,        // points actually uploaded so far (drives the draw count)
+  totalCount: 0,
+  gl: null, program: null, posBuffer: null, attrBuffer: null,
+  aPos: -1, aAttr: -1,
+  uMatrix: null, uBase: null, uContrast: null, uMin: null,
+  // R15c: raw ArrayBuffers from the last successful fetch, retained for the
+  // lifetime of the page (~69MB) purely so a GL context restore can
+  // re-upload without re-fetching -- see onAdd below and
+  // ensurePointCloudLoaded where these are populated.
+  cachedPosBuf: null, cachedAttrBuf: null,
+
+  // Re-fires whenever the layer is (re-)added, including MapLibre's replay
+  // after a WebGL context restore: on "webglcontextlost" MapLibre snapshots
+  // the current style, and on "webglcontextrestored" it reloads that style,
+  // which removes and re-adds every layer -- for a custom layer that means
+  // onRemove then onAdd fire again with a fresh gl (verified against the
+  // maplibre-gl 4.x Map source: the _lostContextStyle snapshot/reload path).
+  // So onAdd always rebuilds the program/buffers from scratch, and if the
+  // cloud had already been fetched (cachedPosBuf/cachedAttrBuf set), it
+  // re-uploads straight from those cached buffers instead of re-fetching.
+  onAdd(_map, gl) {
+    const vs = compilePointCloudShader(gl, gl.VERTEX_SHADER, POINT_CLOUD_VERT_SRC);
+    const fs = compilePointCloudShader(gl, gl.FRAGMENT_SHADER, POINT_CLOUD_FRAG_SRC);
+    const program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error("point-cloud program link failed: " + gl.getProgramInfoLog(program));
+    }
+    this.gl = gl;
+    this.program = program;
+    this.aPos = gl.getAttribLocation(program, "a_pos");
+    this.aAttr = gl.getAttribLocation(program, "a_attr");
+    this.uMatrix = gl.getUniformLocation(program, "u_matrix");
+    this.uBase = gl.getUniformLocation(program, "u_base");
+    this.uContrast = gl.getUniformLocation(program, "u_contrast");
+    this.uMin = gl.getUniformLocation(program, "u_min");
+    this.posBuffer = gl.createBuffer();
+    this.attrBuffer = gl.createBuffer();
+    this.loadedCount = 0;
+    if (this.cachedPosBuf && this.cachedAttrBuf) {
+      const count = Math.min(this.cachedPosBuf.byteLength, this.cachedAttrBuf.byteLength) >>> 2;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(this.cachedPosBuf, 0, count * 4), gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.attrBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(this.cachedAttrBuf, 0, count * 4), gl.STATIC_DRAW);
+      this.totalCount = count;
+      this.loadedCount = count;
+      this.loaded = true;
+    }
+  },
+
+  // Defensive; the layer is never removed today (setPointCloudActive only
+  // ever adds it), but MapLibre calls onRemove for every layer when it
+  // reloads the style on webglcontextrestored (see onAdd above), and a
+  // future caller could call map.removeLayer directly -- either way, free
+  // the GL objects rather than leaking them.
+  onRemove(_map, gl) {
+    if (this.posBuffer) gl.deleteBuffer(this.posBuffer);
+    if (this.attrBuffer) gl.deleteBuffer(this.attrBuffer);
+    if (this.program) gl.deleteProgram(this.program);
+    this.posBuffer = null;
+    this.attrBuffer = null;
+    this.program = null;
+  },
+
+  // No per-frame JS allocation: every value here is either a primitive
+  // (numbers) or a buffer/uniform-location already held on `this`; `matrix`
+  // is the Float32Array MapLibre itself owns and reuses per frame.
+  render(gl, matrix) {
+    if (!this.visible || this.loadedCount === 0) return;
+    // R16: below VECTOR_POINTS_MIN_ZOOM (10.25) the cloud is the only dense
+    // point layer and draws everyone; at/above it, the label-tile vector
+    // layer takes over with precise, interactive, filtered (non-dust) dots
+    // -- letting the cloud keep drawing there would duplicate every one of
+    // those dots with a slightly-off quantized copy and add back low-cited/
+    // non-interactive noise the vector handoff exists to hide. Cheap
+    // per-frame check, no layer/visibility churn; camera changes (including
+    // the zoom crossing) already trigger their own repaint, so no extra
+    // triggerRepaint wiring is needed here.
+    const zoom = map.getZoom();
+    if (zoom >= VECTOR_POINTS_MIN_ZOOM) return;
+    gl.useProgram(this.program);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+    gl.uniformMatrix4fv(this.uMatrix, false, matrix);
+    const dpr = window.devicePixelRatio || 1;
+    gl.uniform1f(this.uBase, pointCloudBaseSizePx(zoom) * dpr);
+    gl.uniform1f(this.uContrast, displaySettings.sizeContrast);
+    gl.uniform1f(this.uMin, POINT_CLOUD_MIN_PX * dpr);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
+    gl.enableVertexAttribArray(this.aPos);
+    // normalized=false: leaves the raw 0..65535 integer value as a float,
+    // per POINT_CLOUD_VERT_SRC's manual /65535.0 divide.
+    gl.vertexAttribPointer(this.aPos, 2, gl.UNSIGNED_SHORT, false, 4, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.attrBuffer);
+    gl.enableVertexAttribArray(this.aAttr);
+    // normalized=true: r/g/b/s bytes arrive pre-divided to [0,1] floats.
+    gl.vertexAttribPointer(this.aAttr, 4, gl.UNSIGNED_BYTE, true, 4, 0);
+
+    gl.drawArrays(gl.POINTS, 0, this.loadedCount);
+  },
+};
+
+const dpAllPoints = document.getElementById("dp-all-points");
+const pointCloudStatusEl = document.getElementById("dp-all-points-status");
+function setPointCloudStatus(text) { pointCloudStatusEl.textContent = text || ""; }
+// R17: dpAllPoints doesn't exist yet at syncDisplayUI's own definition/first
+// call further up the file (it's declared here, after pointCloudLayer), so
+// its initial checkbox state is set directly here instead of from inside
+// syncDisplayUI. The actual cloud enable (fetch + layer add) happens later,
+// in the map "load" handler, once setPointCloudActive exists and the style
+// is ready -- see the R17 comment there.
+dpAllPoints.checked = displaySettings.allPoints;
+
+// Fetches both .bin files in parallel, then uploads in POINT_CLOUD_CHUNKS
+// progressive slices via bufferSubData into one full-size-allocated buffer
+// pair -- loadedCount grows after each slice and triggerRepaint() draws the
+// partially-uploaded cloud immediately, so (since points are cited-desc) the
+// most important "skeleton" of the map appears first. Guarded so this ever
+// only runs once per session (loaded/loading flags) -- every toggle after
+// the first is pointCloudLayer.visible flip only, see setPointCloudActive.
+const POINT_CLOUD_CHUNKS = 8;
+async function ensurePointCloudLoaded() {
+  if (pointCloudLayer.loaded || pointCloudLayer.loading) return;
+  pointCloudLayer.loading = true;
+  setPointCloudStatus("loading 8.6M points (69MB)…");
+  try {
+    const [posBuf, attrBuf] = await Promise.all([
+      fetch(DATA_BASE + "/data/vector_experiment/positions.bin").then(r => r.arrayBuffer()),
+      fetch(DATA_BASE + "/data/vector_experiment/attrs.bin").then(r => r.arrayBuffer()),
+    ]);
+    const count = Math.min(posBuf.byteLength, attrBuf.byteLength) >>> 2;   // 4 bytes/point in both files
+    pointCloudLayer.totalCount = count;
+    // Retained for onAdd's context-restore re-upload path (~69MB kept in JS
+    // memory for the rest of the session -- see the cachedPosBuf/
+    // cachedAttrBuf comment above pointCloudLayer).
+    pointCloudLayer.cachedPosBuf = posBuf;
+    pointCloudLayer.cachedAttrBuf = attrBuf;
+    const gl = pointCloudLayer.gl;
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, pointCloudLayer.posBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, count * 4, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, pointCloudLayer.attrBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, count * 4, gl.STATIC_DRAW);
+
+    const chunkSize = Math.ceil(count / POINT_CLOUD_CHUNKS);
+    for (let i = 0; i < POINT_CLOUD_CHUNKS; i++) {
+      const start = i * chunkSize;
+      const end = Math.min(count, start + chunkSize);
+      if (end <= start) break;
+      const posChunk = new Uint8Array(posBuf, start * 4, (end - start) * 4);
+      const attrChunk = new Uint8Array(attrBuf, start * 4, (end - start) * 4);
+      gl.bindBuffer(gl.ARRAY_BUFFER, pointCloudLayer.posBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, start * 4, posChunk);
+      gl.bindBuffer(gl.ARRAY_BUFFER, pointCloudLayer.attrBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, start * 4, attrChunk);
+      pointCloudLayer.loadedCount = end;
+      setPointCloudStatus(`loading 8.6M points (69MB)… ${Math.round(end / count * 100)}%`);
+      map.triggerRepaint();
+      await new Promise(r => requestAnimationFrame(r));   // let the growing cloud actually paint
+    }
+    pointCloudLayer.loaded = true;
+    setPointCloudStatus("");
+  } catch (err) {
+    setPointCloudStatus("failed to load point cloud");
+    console.error("point-cloud load failed:", err);
+  } finally {
+    pointCloudLayer.loading = false;
+  }
+}
+
+// Single owner of pointCloudLayer.visible: recomputes the effective
+// visibility (checkbox AND no active isolate) and repaints. Called on every
+// checkbox change (setPointCloudActive) and on every isolate entry/exit
+// (setIsolate/clearIsolate), so the cloud reacts to both without either
+// site duplicating the rule. O(1) -- a flag write + triggerRepaint.
+function syncPointCloudVisible() {
+  pointCloudLayer.visible = pointCloudEffectivelyOn();
+  map.triggerRepaint();
+}
+
+function setPointCloudActive(on) {
+  allPointsCloudOn = on;
+  if (on) {
+    if (!map.getLayer("point-cloud")) {
+      // Anchored directly above "dots" -- if "vector-points" already sits
+      // there (it does from map load onward, see setupVectorPointsLayer),
+      // this lands point-cloud directly below it, matching the spec's
+      // "above dots, below GeoJSON overlays"; path-line/coauthor-rays are
+      // always appended with no beforeId, so they stay on top regardless.
+      map.addLayer(pointCloudLayer, beforeIdAbove("dots"));
+    }
+    // Checking the box during an active isolate still preloads the data
+    // (cheap head start); the cloud just stays suppressed until the isolate
+    // ends (pointCloudEffectivelyOn above).
+    ensurePointCloudLoaded();   // no-op if already loaded/loading
+  }
+  syncPointCloudVisible();
+  updateVectorPoints();   // hides the now-redundant capped GeoJSON overlay below 10.25
+  updateRasterOpacity();  // dims the raster to 0 while the cloud is on
+}
+dpAllPoints.addEventListener("change", () => {
+  // R17: persist the choice (default false, see DISPLAY_DEFAULTS) before
+  // acting on it, same order as the other dp* listeners.
+  displaySettings.allPoints = dpAllPoints.checked;
+  saveDisplaySettings();
+  setPointCloudActive(dpAllPoints.checked);
+});
+
+// R15c: the actual GL recovery lives in pointCloudLayer.onAdd (it replays
+// automatically -- see the comment above onAdd for why). These two listeners
+// are just user-visible bookkeeping around that replay: surface the outage
+// in the existing status pill, and clear it once the layer's own onAdd has
+// had a chance to run. Deliberately not touching gl/program/buffers here --
+// poking at a WebGLRenderingContext from outside onAdd/onRemove/render isn't
+// part of the CustomLayerInterface contract and MapLibre doesn't expose the
+// restored context on the event itself (MapContextEvent only carries the
+// raw WebGLContextEvent, no context reference).
+map.on("webglcontextlost", () => {
+  console.warn("point-cloud: WebGL context lost");
+  if (pointCloudLayer.visible) setPointCloudStatus("WebGL context lost, recovering…");
+});
+map.on("webglcontextrestored", () => {
+  console.warn("point-cloud: WebGL context restored");
+  setPointCloudStatus("");
+  map.triggerRepaint();
+});
 
 let vectorGen = 0;           // invalidates stale in-flight tile/shard fetches (labelGen pattern)
 // community (label-tile/shard entry field 5) -> raster palette hex, resolved
@@ -1912,6 +2335,74 @@ function shardEntriesToFeatures(entries, z) {
   return entries.slice(0, cap).map(entryToFeature);
 }
 
+// ---- R15b Part 2: persistent vector-points source/layer ----
+// Previously this function tore down and rebuilt the "vector-points" GeoJSON
+// source/layer (removeLayer + removeSource) on every fully-inactive
+// transition, then recreated them from scratch on the next active one --
+// the expensive part of a mode/isolate switch the owner reported as slow.
+// The source+layer are now created ONCE, empty, right after the style loads
+// (setupVectorPointsLayer, called from the "load" handler below) and never
+// removed for the rest of the session; on/off transitions here now just flip
+// the layer's "visibility" layout property (setVectorPointsVisible), and a
+// content-fingerprint cache (vectorPointsLastKey) skips setData outright
+// when the computed feature set can't have changed -- e.g. a pointMode radio
+// bounce back to the same mode, or a pan/zoom tick that lands in the same
+// shard-cap bucket with no isolate/legend change. The label-tile branch's
+// key includes the actual visible-tile set (not just a zoom bucket) since
+// that branch's feature set genuinely is pan-sensitive, unlike the two
+// shard-based branches below, whose output depends only on the isolate id,
+// the zoom-derived cap, and whether community colors have resolved yet.
+let vectorPointsLastKey = null;
+function setVectorPointsVisible(visible) {
+  if (!map.getLayer("vector-points")) return;
+  const want = visible ? "visible" : "none";
+  if (map.getLayoutProperty("vector-points", "visibility") !== want) {
+    map.setLayoutProperty("vector-points", "visibility", want);
+  }
+}
+function setupVectorPointsLayer() {
+  map.addSource("vector-points", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+  // Anchored directly above "dots" -- read the live style order via
+  // beforeIdAbove instead of hardcoding, since at setup time "dots" is still
+  // the topmost content layer (R15b's point-cloud custom layer, when it
+  // exists, is added later using this same helper against "dots", which
+  // then lands it directly below this layer -- see setPointCloudActive).
+  map.addLayer({
+    id: "vector-points",
+    type: "circle",
+    source: "vector-points",
+    layout: { visibility: "none" },
+    paint: {
+      // radius = (zoom-interpolated base px) * (sqrt(cited)-interpolated factor),
+      // so highly-cited authors render as visibly larger dots without the
+      // raster splat treatment. MapLibre only allows a "zoom" expression as
+      // the input of a top-level step/interpolate, so the zoom-interpolate
+      // has to be the outer expression, with the (zoom-independent)
+      // data-driven factor nested inside its stop outputs instead of the
+      // other way around -- a bare ["*", zoomInterpolate, dataInterpolate]
+      // throws "zoom expression may only be used... as a top-level
+      // interpolate" at addLayer time.
+      "circle-radius": buildVectorRadiusExpression(displaySettings.sizeContrast),
+      // color resolved per feature in JS (feature property "color", set
+      // above from communityColors) rather than a giant match expression --
+      // matches the raster palette's 37 big communities, dust grey fallback
+      // for the tail/unknown/undefined case.
+      "circle-color": ["get", "color"],
+      "circle-opacity": 0.9,
+      // R14b perf: zoom-interpolated instead of a flat 0.5 -- at low zoom
+      // (vector-only mode's 300k-point field) a 0.5px stroke is sub-pixel
+      // and invisible anyway, but GL still pays for a second stroke draw
+      // per circle. 0 below z6, ramping to the original 0.5 by z8 where
+      // circles are large enough for the stroke to actually read.
+      "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 6, 0, 8, 0.5],
+      "circle-stroke-color": "#0a0a0c",
+    },
+  }, beforeIdAbove("dots"));
+}
+
 async function updateVectorPoints() {
   const gen = ++vectorGen;
   const z = map.getZoom();
@@ -1949,14 +2440,32 @@ async function updateVectorPoints() {
   // it only ever complements it (pointMode "vector" dims the raster
   // separately, unconditionally, at the top of that resolver).
   const globalMidZoomActive = displaySettings.pointMode !== "raster" && !vectorActive && isolateCommunity == null;
+
+  // R15b: the full point-cloud custom layer renders every author itself, so
+  // below vector-points zoom the capped GeoJSON overlay (shard/global-top,
+  // whichever would otherwise be active) is redundant -- both would draw the
+  // same "top authors" skeleton on top of each other. Deep zoom (>=10.25,
+  // the authoritative full-population label-tile path + hover) is
+  // unchanged: the cloud and the GeoJSON overlay simply coexist there.
+  // Gated on EFFECTIVE cloud visibility (pointCloudEffectivelyOn), not the
+  // raw checkbox: an active isolate suppresses the cloud, and the isolate's
+  // filtered shard dots must then render exactly as with the cloud off.
+  const hiddenByCloud = pointCloudEffectivelyOn() && z < VECTOR_POINTS_MIN_ZOOM;
+
   if (!vectorActive && !shardActive && !globalMidZoomActive) {
-    if (map.getLayer("vector-points")) map.removeLayer("vector-points");
-    if (map.getSource("vector-points")) map.removeSource("vector-points");
+    setVectorPointsVisible(false);
+    return;
+  }
+  if (hiddenByCloud) {
+    setVectorPointsVisible(false);
     return;
   }
 
-  let features;
+  let features, setKey;
   if (shardActive) {
+    const cap = shardCapForZoom(z);
+    setKey = `shard:${isolateCommunity}:${cap}:${communityColors.size}`;
+    if (setKey === vectorPointsLastKey) { setVectorPointsVisible(true); return; }
     const shard = await fetchCommunityShard(isolateCommunity);
     if (gen !== vectorGen) return;   // a newer call (isolate change/move/zoom) owns the source now
     // Shard entries are [name, id, xw, yw, cited] (already cited-desc from
@@ -1967,13 +2476,20 @@ async function updateVectorPoints() {
       .map(([name, id, xw, yw, cited]) => [name, id, xw, yw, cited, isolateCommunity]);
     features = shardEntriesToFeatures(entries, z);
   } else if (globalMidZoomActive) {
+    const cap = shardCapForZoom(z);
+    setKey = `top:${cap}:${communityColors.size}`;
+    if (setKey === vectorPointsLastKey) { setVectorPointsVisible(true); return; }
     // top_authors.json entries already carry community (field 5), unlike
     // community shards, so no remapping is needed before capping.
     const entries = await fetchTopAuthors();
     if (gen !== vectorGen) return;   // a newer call (toggle/move/zoom) owns the source now
     features = shardEntriesToFeatures(entries, z);
   } else {
-    const lists = await Promise.all(visibleTiles(9).map(([x, y]) => fetchTile(9, x, y)));
+    const tiles = visibleTiles(9);
+    const tilesKey = tiles.map(([x, y]) => `${x}.${y}`).join(",");
+    setKey = `tiles:${isolateCommunity}:${tilesKey}:${communityColors.size}`;
+    if (setKey === vectorPointsLastKey) { setVectorPointsVisible(true); return; }
+    const lists = await Promise.all(tiles.map(([x, y]) => fetchTile(9, x, y)));
     if (gen !== vectorGen) return;     // a newer call (toggle/move/zoom) owns the source now
     let entries = lists.filter(Boolean).flatMap(t => t.l);
     // Task R10a: community isolate v1 -- filters vector points to the isolated
@@ -1988,50 +2504,10 @@ async function updateVectorPoints() {
     }
     features = entries.map(entryToFeature);
   }
-  const data = { type: "FeatureCollection", features };
-  const src = map.getSource("vector-points");
-  if (src) {
-    src.setData(data);
-  } else {
-    map.addSource("vector-points", { type: "geojson", data });
-  }
-  if (!map.getLayer("vector-points")) {
-    // Anchored directly above "dots", below whatever else already sits above
-    // that (path-line / coauthor-rays, when present) -- read the live style
-    // order via beforeIdAbove instead of hardcoding, since those overlay
-    // layers are added/removed dynamically by renderPath/drawCoauthorRays.
-    const beforeId = beforeIdAbove("dots");
-    map.addLayer({
-      id: "vector-points",
-      type: "circle",
-      source: "vector-points",
-      paint: {
-        // radius = (zoom-interpolated base px) * (sqrt(cited)-interpolated factor),
-        // so highly-cited authors render as visibly larger dots without the
-        // raster splat treatment. MapLibre only allows a "zoom" expression as
-        // the input of a top-level step/interpolate, so the zoom-interpolate
-        // has to be the outer expression, with the (zoom-independent)
-        // data-driven factor nested inside its stop outputs instead of the
-        // other way around -- a bare ["*", zoomInterpolate, dataInterpolate]
-        // throws "zoom expression may only be used... as a top-level
-        // interpolate" at addLayer time.
-        "circle-radius": buildVectorRadiusExpression(displaySettings.sizeContrast),
-        // color resolved per feature in JS (feature property "color", set
-        // above from communityColors) rather than a giant match expression --
-        // matches the raster palette's 37 big communities, dust grey fallback
-        // for the tail/unknown/undefined case.
-        "circle-color": ["get", "color"],
-        "circle-opacity": 0.9,
-        // R14b perf: zoom-interpolated instead of a flat 0.5 -- at low zoom
-        // (vector-only mode's 300k-point field) a 0.5px stroke is sub-pixel
-        // and invisible anyway, but GL still pays for a second stroke draw
-        // per circle. 0 below z6, ramping to the original 0.5 by z8 where
-        // circles are large enough for the stroke to actually read.
-        "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 6, 0, 8, 0.5],
-        "circle-stroke-color": "#0a0a0c",
-      },
-    }, beforeId);
-  }
+
+  vectorPointsLastKey = setKey;
+  map.getSource("vector-points").setData({ type: "FeatureCollection", features });
+  setVectorPointsVisible(true);
 }
 
 // ---- Task R11a: legend camera padding ----
@@ -2146,6 +2622,7 @@ function setIsolate(community, row, name) {
   row.setAttribute("aria-pressed", "true");
   updateIsolatePillText();
   legendIsolatePill.style.display = "block";
+  syncPointCloudVisible();   // R15b: isolate suppresses the experimental cloud (checkbox untouched)
   updateVectorPoints();
   updateRasterOpacity();
   drawRegions();
@@ -2159,6 +2636,7 @@ function clearIsolate() {
   isolateShardActive = false;
   legendIsolatePill.style.display = "none";
   legendIsolatePill.textContent = "";
+  syncPointCloudVisible();   // R15b: restore the cloud if its checkbox is still on
   updateVectorPoints();
   updateRasterOpacity();
   drawRegions();
@@ -2373,10 +2851,12 @@ async function hitTestTiles(pt) {
 // R13: z < HIT_ZOOM -- hover/click on whatever's actually rendered in the
 // "vector-points" layer (isolate's shard dots, the global mid-zoom overlay,
 // or nothing at all in pointMode "raster" with no isolate active), rather
-// than the old dead zone below HIT_ZOOM. Guarded on layer existence:
-// queryRenderedFeatures throws for a layer id absent from the current style,
-// and vector-points is added/removed dynamically (not part of the initial
-// style) depending on pointMode/isolate/zoom.
+// than the old dead zone below HIT_ZOOM. Guarded on layer existence mostly
+// for defensiveness pre-style-load: R15b Part 2 made "vector-points" a
+// persistent layer (created once in setupVectorPointsLayer, toggled via the
+// "visibility" layout property rather than added/removed) -- a hidden layer
+// still passes this getLayer check but queryRenderedFeatures correctly
+// returns no features for it, same net result as the old removed-layer case.
 // Small (12x12px) query box -- vector dots are small and can sit close
 // together at low zoom, so a tight box plus the nearest-of-candidates pick
 // below keeps the hit test precise instead of always grabbing whichever
@@ -2473,6 +2953,14 @@ map.on("load", () => {
     try { map.jumpTo({ center: [v.lng, v.lat], zoom: v.zoom }); }
     catch { /* keep the default view */ }
   }
+  setupVectorPointsLayer();        // R15b Part 2: persistent empty source+layer, created once here
+  // R17: if the persisted setting is on, run it through the exact same
+  // enable path a checkbox click uses (must come after setupVectorPointsLayer
+  // -- see setPointCloudActive's "vector-points" beforeId comment). This is
+  // what starts the 69MB fetch "lazily" -- it only ever runs once, on the
+  // first effective enable, whether that's this load-time call or a later
+  // manual check; ensurePointCloudLoaded's loaded/loading guard is unchanged.
+  if (displaySettings.allPoints) setPointCloudActive(true);
   applyDisplayPaint();
   drawLabels();
   drawRegions();
