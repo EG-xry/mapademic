@@ -2031,7 +2031,21 @@ const pointCloudLayer = {
   gl: null, program: null, posBuffer: null, attrBuffer: null,
   aPos: -1, aAttr: -1,
   uMatrix: null, uBase: null, uContrast: null, uMin: null,
+  // R15c: raw ArrayBuffers from the last successful fetch, retained for the
+  // lifetime of the page (~69MB) purely so a GL context restore can
+  // re-upload without re-fetching -- see onAdd below and
+  // ensurePointCloudLoaded where these are populated.
+  cachedPosBuf: null, cachedAttrBuf: null,
 
+  // Re-fires whenever the layer is (re-)added, including MapLibre's replay
+  // after a WebGL context restore: on "webglcontextlost" MapLibre snapshots
+  // the current style, and on "webglcontextrestored" it reloads that style,
+  // which removes and re-adds every layer -- for a custom layer that means
+  // onRemove then onAdd fire again with a fresh gl (verified against the
+  // maplibre-gl 4.x Map source: the _lostContextStyle snapshot/reload path).
+  // So onAdd always rebuilds the program/buffers from scratch, and if the
+  // cloud had already been fetched (cachedPosBuf/cachedAttrBuf set), it
+  // re-uploads straight from those cached buffers instead of re-fetching.
   onAdd(_map, gl) {
     const vs = compilePointCloudShader(gl, gl.VERTEX_SHADER, POINT_CLOUD_VERT_SRC);
     const fs = compilePointCloudShader(gl, gl.FRAGMENT_SHADER, POINT_CLOUD_FRAG_SRC);
@@ -2052,6 +2066,31 @@ const pointCloudLayer = {
     this.uMin = gl.getUniformLocation(program, "u_min");
     this.posBuffer = gl.createBuffer();
     this.attrBuffer = gl.createBuffer();
+    this.loadedCount = 0;
+    if (this.cachedPosBuf && this.cachedAttrBuf) {
+      const count = Math.min(this.cachedPosBuf.byteLength, this.cachedAttrBuf.byteLength) >>> 2;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(this.cachedPosBuf, 0, count * 4), gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.attrBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(this.cachedAttrBuf, 0, count * 4), gl.STATIC_DRAW);
+      this.totalCount = count;
+      this.loadedCount = count;
+      this.loaded = true;
+    }
+  },
+
+  // Defensive; the layer is never removed today (setPointCloudActive only
+  // ever adds it), but MapLibre calls onRemove for every layer when it
+  // reloads the style on webglcontextrestored (see onAdd above), and a
+  // future caller could call map.removeLayer directly -- either way, free
+  // the GL objects rather than leaking them.
+  onRemove(_map, gl) {
+    if (this.posBuffer) gl.deleteBuffer(this.posBuffer);
+    if (this.attrBuffer) gl.deleteBuffer(this.attrBuffer);
+    if (this.program) gl.deleteProgram(this.program);
+    this.posBuffer = null;
+    this.attrBuffer = null;
+    this.program = null;
   },
 
   // No per-frame JS allocation: every value here is either a primitive
@@ -2107,6 +2146,11 @@ async function ensurePointCloudLoaded() {
     ]);
     const count = Math.min(posBuf.byteLength, attrBuf.byteLength) >>> 2;   // 4 bytes/point in both files
     pointCloudLayer.totalCount = count;
+    // Retained for onAdd's context-restore re-upload path (~69MB kept in JS
+    // memory for the rest of the session -- see the cachedPosBuf/
+    // cachedAttrBuf comment above pointCloudLayer).
+    pointCloudLayer.cachedPosBuf = posBuf;
+    pointCloudLayer.cachedAttrBuf = attrBuf;
     const gl = pointCloudLayer.gl;
 
     gl.bindBuffer(gl.ARRAY_BUFFER, pointCloudLayer.posBuffer);
@@ -2171,6 +2215,25 @@ function setPointCloudActive(on) {
   updateRasterOpacity();  // dims the raster to 0 while the cloud is on
 }
 dpAllPoints.addEventListener("change", () => setPointCloudActive(dpAllPoints.checked));
+
+// R15c: the actual GL recovery lives in pointCloudLayer.onAdd (it replays
+// automatically -- see the comment above onAdd for why). These two listeners
+// are just user-visible bookkeeping around that replay: surface the outage
+// in the existing status pill, and clear it once the layer's own onAdd has
+// had a chance to run. Deliberately not touching gl/program/buffers here --
+// poking at a WebGLRenderingContext from outside onAdd/onRemove/render isn't
+// part of the CustomLayerInterface contract and MapLibre doesn't expose the
+// restored context on the event itself (MapContextEvent only carries the
+// raw WebGLContextEvent, no context reference).
+map.on("webglcontextlost", () => {
+  console.warn("point-cloud: WebGL context lost");
+  if (pointCloudLayer.visible) setPointCloudStatus("WebGL context lost, recovering…");
+});
+map.on("webglcontextrestored", () => {
+  console.warn("point-cloud: WebGL context restored");
+  setPointCloudStatus("");
+  map.triggerRepaint();
+});
 
 let vectorGen = 0;           // invalidates stale in-flight tile/shard fetches (labelGen pattern)
 // community (label-tile/shard entry field 5) -> raster palette hex, resolved
