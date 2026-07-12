@@ -378,8 +378,13 @@
 <script>
 const HIT_ZOOM = 10;                 // hover/click active at or past this zoom
 const HIT_RADIUS = 14;               // px hit-test radius around the cursor
+// Deploy config: a page that sets window.MAPADEMIC_CONFIG (script tag before
+// this one) points data/api at a deployed host; unset, both fall back to the
+// same local defaults this file has always used (same-origin /data, :8000).
+const CFG = window.MAPADEMIC_CONFIG || {};
+const DATA_BASE = CFG.dataBase || "";        // e.g. "https://pub-xxx.r2.dev" when deployed; "" = same-origin /data paths as now
 // degree-of-separation backend (Task 7). Render URL goes here when deployed.
-const API_BASE = "http://localhost:8000";
+const API_BASE = CFG.apiBase || "http://localhost:8000";
 
 // ---- Task 2 (night-polish): shareable URL state ----
 // Custom hash codec: "#<zoom>/<lat>/<lng>" (2/5/5 decimals), plus optional
@@ -457,7 +462,7 @@ const map = new maplibregl.Map({
   style: {
     version: 8,
     sources: {
-      dots: { type: "raster", tiles: [location.origin + "/data/tiles/{z}/{x}/{y}.png"],
+      dots: { type: "raster", tiles: [(DATA_BASE || location.origin) + "/data/tiles/{z}/{x}/{y}.png"],
               tileSize: 256, minzoom: 0, maxzoom: 10 }
     },
     layers: [
@@ -523,7 +528,7 @@ const tileCache = new Map();         // "z/x/y" -> {l:[...]} or null
 async function fetchTile(z, x, y) {
   const k = `${z}/${x}/${y}`;
   if (!tileCache.has(k)) {
-    tileCache.set(k, fetch(`/data/index/labels/${k}.json`)
+    tileCache.set(k, fetch(DATA_BASE + `/data/index/labels/${k}.json`)
       .then(r => r.ok ? r.json() : null).catch(() => null));
     if (tileCache.size > 600) tileCache.delete(tileCache.keys().next().value);
   }
@@ -563,7 +568,7 @@ function normalize(name) {
 const searchShardCache = new Map();  // shard key -> Promise<entries|null>; 404s cache as null; cap 20 FIFO
 async function fetchSearchShard(key) {
   if (searchShardCache.has(key)) return searchShardCache.get(key);
-  const p = fetch(`/data/index/search/${key}.json`)
+  const p = fetch(DATA_BASE + `/data/index/search/${key}.json`)
     .then(r => r.ok ? r.json() : null)
     .catch(() => null);
   searchShardCache.set(key, p);
@@ -1052,7 +1057,7 @@ function idBucketNum(id) {
 const idBucketCache = new Map();     // bucket number -> Promise<Map<bareId,[xw,yw]>|null>
 async function fetchIdBucket(bucket) {
   if (!idBucketCache.has(bucket)) {
-    idBucketCache.set(bucket, fetch(`/data/index/ids/${bucket}.json`)
+    idBucketCache.set(bucket, fetch(DATA_BASE + `/data/index/ids/${bucket}.json`)
       .then(r => r.ok ? r.json() : null)
       .then(raw => {
         if (!raw) return null;
@@ -1676,7 +1681,7 @@ async function drawLabels() {
 }
 
 let regions = [];
-fetch("/data/regions.json").then(r => r.ok ? r.json() : []).catch(() => [])
+fetch(DATA_BASE + "/data/regions.json").then(r => r.ok ? r.json() : []).catch(() => [])
   .then(j => { regions = j; drawRegions(); });
 let regionMarkers = [];
 function drawRegions() {
@@ -1767,7 +1772,7 @@ function beforeIdAbove(afterId) {
 const communityShardCache = new Map();   // community id -> Promise<entries|null>; 404s cache as null
 async function fetchCommunityShard(community) {
   if (!communityShardCache.has(community)) {
-    communityShardCache.set(community, fetch(`/data/index/communities/${community}.json`)
+    communityShardCache.set(community, fetch(DATA_BASE + `/data/index/communities/${community}.json`)
       .then(r => r.ok ? r.json() : null)
       .catch(() => null));
     if (communityShardCache.size > 5) communityShardCache.delete(communityShardCache.keys().next().value);
@@ -1790,7 +1795,7 @@ function shardCapForZoom(z) {
 let topAuthorsPromise = null;
 function fetchTopAuthors() {
   if (!topAuthorsPromise) {
-    topAuthorsPromise = fetch("/data/index/top_authors.json")
+    topAuthorsPromise = fetch(DATA_BASE + "/data/index/top_authors.json")
       .then(r => r.ok ? r.json() : [])
       .catch(() => []);
   }
@@ -2157,7 +2162,7 @@ function toggleIsolateCommunity(community, row, name) {
   else setIsolate(community, row, name);
 }
 
-fetch("/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
+fetch(DATA_BASE + "/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
   .then(entries => {
     // All 37 big communities go into the color map, so vector points match
     // the raster palette regardless of which community a point belongs to.
