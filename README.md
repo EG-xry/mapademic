@@ -8,6 +8,10 @@ required for panning, zooming, or search; live path-finding between two
 researchers is provided by a companion project,
 [academic-degree-of-separation](https://github.com/riptideiv/academic-degree-of-separation).
 
+**Live map: [eg-xry.github.io/mapademic](https://eg-xry.github.io/mapademic/)**
+
+![The full map at zoom 4: communities colored by their position around the map center, brightness by author density](docs/map.jpg)
+
 ## Features
 
 - Continuous zoom z0-11, with native pre-rendered tiles through z10.
