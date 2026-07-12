@@ -1,0 +1,2615 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>mapademic dev preview</title>
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+  <style>
+    html, body, #map { margin: 0; height: 100%; background: #000; }
+    .lbl { color: #fff; font-family: system-ui, sans-serif;
+           text-shadow: 0 0 4px #000, 0 0 8px #000; pointer-events: none;
+           white-space: nowrap; }
+    /* ---- Task 9 (R9): faint author-label mode ----
+       !important is required here: MapLibre's Marker sets a plain (non-!important)
+       inline opacity on its element every render frame (its occlusion-fade
+       logic), which would silently clobber a bare el.style.opacity write on
+       the next frame. An author-stylesheet !important rule outranks that
+       normal-priority inline style in the cascade, so it sticks. */
+    .lbl.lbl-faint { opacity: .32 !important; }
+    .region { color: #9ab; font: 600 15px system-ui; letter-spacing: .08em;
+              text-transform: uppercase; text-shadow: 0 0 6px #000;
+              pointer-events: none; opacity: .85; }
+    #tip { position: fixed; display: none; background: #111c; color: #eee;
+           font: 12px system-ui; padding: 4px 8px; border-radius: 4px;
+           pointer-events: none; z-index: 10; }
+    /* Task R10a follow-up: the scroll lives on #legend-rows, not #legend, so
+       the summary header and the isolate pill anchored right under it stay
+       visible while the (now full 37-community) roster scrolls beneath. The
+       calc reserves room for summary + pill within the 70vh panel cap. */
+    #legend { position: fixed; right: 10px; top: 10px; background: #0b0b0bd9;
+              color: #ddd; font: 12px system-ui; border-radius: 6px;
+              max-height: 70vh; z-index: 9; width: 230px; }
+    #legend-rows { max-height: calc(70vh - 80px); overflow-y: auto; }
+    #legend summary { cursor: pointer; padding: 6px 10px; font-weight: 600; }
+    #legend .row { display: flex; gap: 6px; align-items: center; padding: 2px 10px; }
+    /* ---- Task R10a: legend rows are now interactive (community isolate) ---- */
+    #legend button.row { all: unset; box-sizing: border-box; width: 100%;
+                          display: flex; gap: 6px; align-items: center; padding: 2px 10px;
+                          color: #ddd; font: 12px system-ui; cursor: pointer; }
+    #legend .row:hover:not(.legend-note) { background: #ffffff1a; }
+    #legend .row.legend-active { border-left: 3px solid #7fae8e; padding-left: 7px; color: #fff; }
+    #legend .row.legend-isolated { background: #7fae8e26; }
+    #legend .row.legend-note { color: #888; font-style: italic; cursor: default; }
+    #legend-isolate-pill { display: none; margin: 6px 10px 10px; padding: 4px 8px;
+                             background: #7fae8e26; border: 1px solid #7fae8e; border-radius: 4px;
+                             color: #ddd; font: 11px system-ui; }
+    #legend .sw { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+    #legend .n { color: #888; margin-left: auto; }
+    #search { position: fixed; left: 10px; top: 10px; z-index: 9; width: 260px;
+              font: 12px system-ui; }
+    #search-input { width: 100%; box-sizing: border-box; background: #0b0b0bd9;
+                     color: #ddd; border: 1px solid #333; border-radius: 6px;
+                     padding: 6px 10px; font: 13px system-ui; outline: none; }
+    #search-input:focus { border-color: #7fae8e; }
+    #search-dropdown { position: absolute; left: 0; top: 100%; margin-top: 4px;
+                        width: 100%; background: #0b0b0bd9; border-radius: 6px;
+                        max-height: 300px; overflow-y: auto; display: none; }
+    #search-dropdown.open { display: block; }
+    /* ---- Task 3 (search-v2): coauthor-ray status pill ---- */
+    #search-status:empty { display: none; }
+    #search-status { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
+                       border-radius: 6px; padding: 4px 10px; margin-top: 6px; }
+    #search-dropdown .row { padding: 6px 10px; cursor: pointer; display: flex;
+                             justify-content: space-between; gap: 8px; color: #ddd; }
+    #search-dropdown .row:hover, #search-dropdown .row.active { background: #ffffff1a; }
+    #search-dropdown .row .n { color: #888; }
+    #search-dropdown .row.empty { color: #888; cursor: default; }
+    .search-highlight { width: 22px; height: 22px; border-radius: 50%;
+                         border: 3px solid #7fae8e; box-sizing: border-box;
+                         animation: search-pulse 1.4s ease-out infinite; }
+    @keyframes search-pulse {
+      0%   { box-shadow: 0 0 0 0 #7fae8e99; }
+      70%  { box-shadow: 0 0 0 14px #7fae8e00; }
+      100% { box-shadow: 0 0 0 0 #7fae8e00; }
+    }
+    /* ---- Task 2 (night-polish): persistent name tag on a restored/selected highlight ---- */
+    .search-highlight-node { display: flex; flex-direction: column; align-items: center;
+                              pointer-events: none; }
+    /* ---- Task 7: Connect / path overlay ---- */
+    #search-top { display: flex; gap: 6px; align-items: stretch; }
+    #search-top .search-input-wrap { position: relative; flex: 1; min-width: 0; }
+    #search-top .search-input-wrap #search-input { width: 100%; padding-right: 24px; }
+    /* ---- Task 5 (data-pipeline): un-search / clear-search button ---- */
+    #search-clear { display: none; align-items: center; justify-content: center;
+                     position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+                     width: 18px; height: 18px; padding: 0; margin: 0;
+                     background: transparent; color: #888; border: none; border-radius: 4px;
+                     font: 14px system-ui; line-height: 1; cursor: pointer; }
+    #search-clear.visible { display: flex; }
+    #search-clear:hover { color: #7fae8e; }
+    #connect-toggle { background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
+                       border-radius: 6px; padding: 6px 10px; font: 12px system-ui;
+                       cursor: pointer; white-space: nowrap; }
+    #connect-toggle:hover { border-color: #7fae8e; }
+    #connect-toggle.active { border-color: #7fae8e; color: #7fae8e; }
+    #share-btn { background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
+                  border-radius: 6px; padding: 6px 10px; font: 12px system-ui;
+                  cursor: pointer; white-space: nowrap; }
+    #share-btn:hover { border-color: #7fae8e; }
+    #connect-panel { margin-top: 6px; display: none; flex-direction: column; gap: 6px; }
+    #connect-panel.open { display: flex; }
+    .connect-row { position: relative; }
+    .connect-row input { width: 100%; box-sizing: border-box; background: #0b0b0bd9;
+                          color: #ddd; border: 1px solid #333; border-radius: 6px;
+                          padding: 6px 10px; font: 13px system-ui; outline: none; }
+    .connect-row input:focus { border-color: #7fae8e; }
+    .connect-dropdown { position: absolute; left: 0; top: 100%; margin-top: 4px;
+                         width: 100%; background: #0b0b0bd9; border-radius: 6px;
+                         max-height: 220px; overflow-y: auto; display: none; z-index: 10; }
+    .connect-dropdown.open { display: block; }
+    .connect-dropdown .row { padding: 6px 10px; cursor: pointer; display: flex;
+                              justify-content: space-between; gap: 8px; color: #ddd; }
+    .connect-dropdown .row:hover, .connect-dropdown .row.active { background: #ffffff1a; }
+    .connect-dropdown .row .n { color: #888; }
+    .connect-dropdown .row.empty { color: #888; cursor: default; }
+    .connect-actions { display: flex; gap: 6px; }
+    .connect-actions button { flex: 1; background: #0b0b0bd9; color: #ddd;
+                               border: 1px solid #333; border-radius: 6px;
+                               padding: 6px 10px; font: 12px system-ui; cursor: pointer; }
+    .connect-actions button:hover { border-color: #7fae8e; }
+    #connect-status { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
+                       border-radius: 6px; padding: 4px 10px; min-height: 14px; }
+    .path-node { display: flex; flex-direction: column; align-items: center;
+                 pointer-events: none; }
+    .path-dot { width: 10px; height: 10px; border-radius: 50%;
+                background: #7fae8e; border: 2px solid #7fae8e; box-sizing: border-box; }
+    .path-node.ghost .path-dot { background: transparent; }
+    .path-label { color: #fff; font: 12px system-ui; text-shadow: 0 0 4px #000, 0 0 8px #000;
+                  white-space: nowrap; margin-top: 2px; }
+    /* ---- Task 3 (search-v2): coauthor ray endpoint markers ---- */
+    .coauthor-node { display: flex; flex-direction: column; align-items: center;
+                      pointer-events: none; }
+    /* R11a: white instead of the green accent, so the search highlight pulse
+       ring (still green) stays the one green affordance on screen; dark
+       stroke color matches vector-points' circle-stroke-color for the same
+       "dot on a light background" legibility. */
+    .coauthor-dot { width: 6px; height: 6px; border-radius: 50%; background: #f2f4f7;
+                     border: 1px solid #0a0a0c; box-sizing: border-box; }
+    .coauthor-label { color: #fff; font: 11px system-ui; text-shadow: 0 0 4px #000, 0 0 8px #000;
+                       white-space: nowrap; margin-top: 2px; pointer-events: none; }
+    /* ---- Task 1 (night-polish): display settings panel ---- */
+    #display-gear { position: fixed; right: 10px; bottom: 46px; z-index: 9;
+                     width: 30px; height: 30px; background: #0b0b0bd9; color: #ddd;
+                     border: 1px solid #333; border-radius: 6px; cursor: pointer;
+                     font: 15px system-ui; line-height: 1; }
+    #display-gear:hover { border-color: #7fae8e; }
+    #display-panel { position: fixed; right: 10px; bottom: 82px; background: #0b0b0bd9;
+                      color: #ddd; font: 12px system-ui; border-radius: 6px;
+                      width: 230px; z-index: 9; display: none; }
+    #display-panel.open { display: block; }
+    #display-panel .dp-body { padding: 4px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+    #display-panel .dp-row { display: flex; flex-direction: column; gap: 2px; }
+    #display-panel .dp-row-head { display: flex; justify-content: space-between; align-items: center; }
+    #display-panel .dp-row-head .n { color: #888; }
+    #display-panel input[type="range"] { width: 100%; }
+    /* R13: flex-wrap keeps the new "Points" row's longer "Raster + vector"
+       label from breaking word-by-word (word-wrap inside a squeezed flex
+       item); an item that doesn't fit now wraps to its own line instead.
+       Existing rows (Label density, Author names) already fit on one line
+       and are unaffected. */
+    #display-panel .dp-radios { display: flex; flex-wrap: wrap; gap: 10px; }
+    #display-panel .dp-radios label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+    #display-panel .dp-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    #display-reset { background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
+                      border-radius: 6px; padding: 6px 10px; font: 12px system-ui; cursor: pointer; }
+    #display-reset:hover { border-color: #7fae8e; }
+    /* ---- Task 3 (night-polish): author info card ---- */
+    #info-card { position: fixed; left: 10px; bottom: 10px; background: #0b0b0bd9;
+                  color: #ddd; font: 12px system-ui; border-radius: 6px;
+                  width: 260px; z-index: 9; display: none; }
+    #info-card.open { display: block; }
+    #info-card .ic-head { display: flex; justify-content: space-between; align-items: center;
+                            gap: 8px; padding: 8px 10px; }
+    #info-card-name { font-weight: 600; font-size: 13px; }
+    #info-card-close { background: none; border: none; color: #ddd; font-size: 16px;
+                         line-height: 1; padding: 0 2px; cursor: pointer; flex: none; }
+    #info-card-close:hover { color: #7fae8e; }
+    #info-card-body { padding: 0 10px 8px; display: flex; flex-direction: column; gap: 4px; }
+    #info-card-body .row { display: flex; justify-content: space-between; gap: 8px; }
+    #info-card-body .row .k { color: #888; flex: none; }
+    .ic-actions { display: flex; gap: 6px; padding: 0 10px 10px; }
+    .ic-actions button { flex: 1; background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
+                           border-radius: 6px; padding: 6px 6px; font: 11px system-ui; cursor: pointer; }
+    .ic-actions button:hover { border-color: #7fae8e; }
+    /* ---- Task 4 (night-polish): help overlay, path hop list, a11y sweep ---- */
+    button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-visible {
+      outline: 2px solid #7fae8e; outline-offset: 2px;
+    }
+    #help-btn { position: fixed; right: 250px; top: 10px; z-index: 9;
+                 width: 30px; height: 30px; background: #0b0b0bd9; color: #ddd;
+                 border: 1px solid #333; border-radius: 6px; cursor: pointer;
+                 font: 15px system-ui; line-height: 1; }
+    #help-btn:hover { border-color: #7fae8e; }
+    #help-overlay { position: fixed; inset: 0; background: #000000b3; z-index: 20;
+                     display: none; align-items: center; justify-content: center; }
+    #help-overlay.open { display: flex; }
+    #help-card { background: #0b0b0bf5; color: #ddd; font: 13px system-ui;
+                  border-radius: 8px; width: 520px; max-width: 90vw; max-height: 80vh;
+                  overflow-y: auto; border: 1px solid #333; }
+    #help-card .hc-head { display: flex; justify-content: space-between; align-items: center;
+                            padding: 12px 16px; border-bottom: 1px solid #222;
+                            position: sticky; top: 0; background: #0b0b0bf5; }
+    #help-card h2 { margin: 0; font-size: 15px; }
+    #help-close { background: none; border: none; color: #ddd; font-size: 18px;
+                   line-height: 1; padding: 0 2px; cursor: pointer; }
+    #help-close:hover { color: #7fae8e; }
+    #help-body { padding: 12px 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+    #help-body h3 { margin: 0 0 4px; font-size: 13px; color: #9ab; }
+    #help-body p { margin: 0; line-height: 1.5; }
+    #help-body ul { margin: 4px 0 0; padding-left: 18px; line-height: 1.5; }
+    #help-body a { color: #7fae8e; }
+    #help-body kbd { background: #222; border: 1px solid #444; border-radius: 3px;
+                       padding: 1px 5px; font: 11px monospace; }
+    #path-hops { display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow-y: auto; }
+    #path-hops .hop { display: flex; gap: 6px; align-items: center; padding: 4px 8px;
+                        background: #0b0b0bd9; border-radius: 4px; cursor: pointer;
+                        color: #ddd; font: 12px system-ui; border: 1px solid transparent; }
+    #path-hops .hop:hover { background: #ffffff1a; }
+    #path-hops .hop .hop-i { color: #888; flex: none; width: 18px; text-align: right; }
+    #path-hops .hop .hop-name { flex: 1; }
+    #path-hops .hop .hop-ghost { color: #888; font-size: 10px; flex: none; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div id="tip"></div>
+<div id="search">
+  <div id="search-top">
+    <div class="search-input-wrap">
+      <input id="search-input" type="text" placeholder="Search authors…" autocomplete="off">
+      <button id="search-clear" type="button" aria-label="Clear search">&times;</button>
+    </div>
+    <button id="connect-toggle" type="button">Connect</button>
+    <button id="share-btn" type="button" aria-label="Copy share link">Share</button>
+  </div>
+  <div id="search-dropdown"></div>
+  <div id="search-status"></div>
+  <div id="connect-panel">
+    <div class="connect-row">
+      <input id="connect-a-input" type="text" placeholder="Author A…" autocomplete="off">
+      <div id="connect-a-dropdown" class="connect-dropdown"></div>
+    </div>
+    <div class="connect-row">
+      <input id="connect-b-input" type="text" placeholder="Author B…" autocomplete="off">
+      <div id="connect-b-dropdown" class="connect-dropdown"></div>
+    </div>
+    <div class="connect-actions">
+      <button id="connect-go" type="button">Go</button>
+      <button id="connect-clear" type="button">Clear</button>
+    </div>
+    <div id="connect-status"></div>
+    <div id="path-hops"></div>
+  </div>
+</div>
+<button id="help-btn" type="button" aria-label="Help">?</button>
+<details id="legend" open><summary>Legend</summary><div id="legend-isolate-pill"></div><div id="legend-rows"></div></details>
+<div id="help-overlay" role="dialog" aria-modal="true" aria-labelledby="help-title">
+  <div id="help-card">
+    <div class="hc-head">
+      <h2 id="help-title">About this map</h2>
+      <button id="help-close" type="button" aria-label="Close help">&times;</button>
+    </div>
+    <div id="help-body">
+      <section>
+        <h3>What is this</h3>
+        <p>8,587,906 OpenAlex authors with 15 or more works, positioned by a
+          coauthorship ForceAtlas2 layout and colored by community. Hue
+          encodes position, so neighboring fields share hues.</p>
+      </section>
+      <section>
+        <h3>Reading the map</h3>
+        <p>Bright splats are highly-cited authors (60,000+ citations). The
+          faint grey web visible at z8-9 is repeat coauthorships - at max
+          zoom the map stays clean, and you see a researcher's coauthorships
+          by searching them or via the info card's Coauthors button. Grey
+          dust is authors without retained coauthor links. The gear's Points
+          setting sizes and colors dots by citations and community at every
+          zoom, not just up close, and can hide the raster splats entirely.</p>
+      </section>
+      <section>
+        <h3>Controls</h3>
+        <ul>
+          <li>Search finds one researcher and draws rays to their top
+            coauthorships.</li>
+          <li>Connect finds the shortest coauthor path between two
+            researchers via the degree-of-separation engine.</li>
+          <li>Hover a dot at deep zoom to see the author's name and
+            citations; click it for full details.</li>
+          <li>Share copies a link to the exact view.</li>
+          <li>The gear opens display settings.</li>
+        </ul>
+      </section>
+      <section>
+        <h3>Data</h3>
+        <p>Built from an OpenAlex snapshot. See the
+          <a href="https://github.com/riptideiv/academic-degree-of-separation" target="_blank" rel="noopener">academic-degree-of-separation</a>
+          project for the path-finding engine.</p>
+      </section>
+      <section>
+        <h3>Keyboard shortcuts</h3>
+        <ul>
+          <li><kbd>/</kbd> focus search</li>
+          <li><kbd>?</kbd> toggle this help</li>
+          <li><kbd>Esc</kbd> close the topmost panel</li>
+          <li><kbd>&uarr;</kbd> / <kbd>&darr;</kbd> move through dropdown results</li>
+          <li><kbd>Enter</kbd> select the highlighted result</li>
+        </ul>
+      </section>
+    </div>
+  </div>
+</div>
+<button id="display-gear" type="button" aria-label="Display settings" aria-expanded="false">&#9881;</button>
+<div id="display-panel" role="region" aria-label="Display settings">
+  <div class="dp-body">
+    <div class="dp-row">
+      <div class="dp-row-head"><label for="dp-brightness">Brightness</label><span id="dp-brightness-n" class="n"></span></div>
+      <input id="dp-brightness" type="range" min="0.6" max="1.0" step="0.02" value="1.0">
+    </div>
+    <div class="dp-row">
+      <div class="dp-row-head"><label for="dp-contrast">Contrast</label><span id="dp-contrast-n" class="n"></span></div>
+      <input id="dp-contrast" type="range" min="-0.4" max="0.4" step="0.04" value="0">
+    </div>
+    <div class="dp-row">
+      <div class="dp-row-head"><label for="dp-saturation">Saturation</label><span id="dp-saturation-n" class="n"></span></div>
+      <input id="dp-saturation" type="range" min="-0.6" max="0.6" step="0.06" value="0">
+    </div>
+    <div class="dp-row">
+      <div class="dp-row-head"><span>Label density</span></div>
+      <div class="dp-radios" role="radiogroup" aria-label="Label density">
+        <label><input type="radio" name="dp-density" value="0.5"> 0.5x</label>
+        <label><input type="radio" name="dp-density" value="1" checked> 1x</label>
+        <label><input type="radio" name="dp-density" value="2"> 2x</label>
+      </div>
+    </div>
+    <div class="dp-row">
+      <div class="dp-row-head"><span>Author names</span></div>
+      <div class="dp-radios" role="radiogroup" aria-label="Author names">
+        <label><input type="radio" name="dp-label-mode" value="normal" checked> Normal</label>
+        <label><input type="radio" name="dp-label-mode" value="faint"> Faint</label>
+        <label><input type="radio" name="dp-label-mode" value="hover"> Hover only</label>
+      </div>
+    </div>
+    <label class="dp-check">
+      <input id="dp-regions" type="checkbox" checked>
+      Region names
+    </label>
+    <!-- R12b: category-boundaries UI removed (pipeline builder + data/index/boundaries.json stay dormant on disk). -->
+    <!-- R13: replaced the old "Vector points" on/off checkbox with a
+         three-way mode -- see displaySettings.pointMode. -->
+    <div class="dp-row">
+      <div class="dp-row-head"><span>Points</span></div>
+      <div class="dp-radios" role="radiogroup" aria-label="Points">
+        <label><input type="radio" name="dp-point-mode" value="both" checked> Raster + vector</label>
+        <label><input type="radio" name="dp-point-mode" value="vector"> Vector only</label>
+        <label><input type="radio" name="dp-point-mode" value="raster"> Raster only</label>
+      </div>
+    </div>
+    <div class="dp-row">
+      <div class="dp-row-head"><label for="dp-size-contrast">Citation size contrast</label><span id="dp-size-contrast-n" class="n"></span></div>
+      <input id="dp-size-contrast" type="range" min="0" max="5" step="0.1" value="1.0">
+    </div>
+    <button id="display-reset" type="button">Reset</button>
+  </div>
+</div>
+<div id="info-card" role="region" aria-label="Author info">
+  <div class="ic-head">
+    <span id="info-card-name"></span>
+    <button id="info-card-close" type="button" aria-label="Close">&times;</button>
+  </div>
+  <div id="info-card-body"></div>
+  <div class="ic-actions">
+    <button id="info-card-coauthors" type="button">Coauthors</button>
+    <button id="info-card-open" type="button">Open on OpenAlex</button>
+    <button id="info-card-connect" type="button">Connect from here</button>
+    <button id="info-card-copy" type="button">Copy link</button>
+  </div>
+</div>
+<script>
+window.MAPADEMIC_CONFIG = {
+  dataBase: "https://pub-3627024db5924826912107ea4f16e739.r2.dev"
+  // apiBase intentionally unset: path/ray features probe localhost:8000 and
+  // stay gracefully disabled for public visitors without a running backend.
+};
+</script>
+<script>
+const HIT_ZOOM = 10;                 // hover/click active at or past this zoom
+const HIT_RADIUS = 14;               // px hit-test radius around the cursor
+// Deploy config: a page that sets window.MAPADEMIC_CONFIG (script tag before
+// this one) points data/api at a deployed host; unset, both fall back to the
+// same local defaults this file has always used (same-origin /data, :8000).
+const CFG = window.MAPADEMIC_CONFIG || {};
+const DATA_BASE = CFG.dataBase || "";        // e.g. "https://pub-xxx.r2.dev" when deployed; "" = same-origin /data paths as now
+// degree-of-separation backend (Task 7). Render URL goes here when deployed.
+const API_BASE = CFG.apiBase || "http://localhost:8000";
+
+// ---- Task 2 (night-polish): shareable URL state ----
+// Custom hash codec: "#<zoom>/<lat>/<lng>" (2/5/5 decimals), plus optional
+// "&a=<bare id>" (active search highlight) and "&p=<bareA>,<bareB>" (active
+// path endpoints). MapLibre's own `hash` option is NOT used -- this codec
+// owns location.hash exclusively so the extra a=/p= params survive.
+let activeA = null;         // bare id of the active search highlight, or null
+let activeP = null;         // [bareA, bareB] of the active path, or null
+// a=/p= from the initial hash, carried by writeHash until the real state
+// takes over (highlight placed / path drawn) or the user discards it
+// (Escape, Clear, editing a Connect input). Without these, the initial
+// jumpTo's synchronous moveend -> writeHash would wipe a=/p= from the URL
+// before restoreFromHash runs -- permanently, in the backend-offline case.
+// When both a= and p= are present in the initial hash, p= wins from the
+// start: restoreFromHash's a= branch is gated on `!parsed.p`, so it never
+// runs at all -- no highlight/rays are ever placed, rather than placing them
+// and having the path clear them right after (matches the
+// path-clears-highlight rule with no render flash). This gate doesn't
+// depend on backend reachability, so it applies the same way whether the
+// p= branch's probe succeeds or fails: pendingA is left set either way, and
+// still keeps a= alive in the URL via writeHash above until either a path
+// actually draws (renderPath's pre-existing clearSearchAndRays call drops
+// pendingA/activeA too, once it owns the highlight slot) or the user
+// re-searches; if the backend probe fails, p= itself stays pending and
+// nothing ever claims the highlight slot, so a= simply lingers, unapplied,
+// until the user acts.
+let pendingA = null;
+let pendingP = null;
+
+function parseHash() {
+  const raw = location.hash.replace(/^#/, "");
+  if (!raw) return null;
+  const parts = raw.split("&");
+  const m = /^(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)$/.exec(parts[0]);
+  const out = {};
+  if (m) {
+    const zoom = Number(m[1]), lat = Number(m[2]), lng = Number(m[3]);
+    // Out-of-range views (hand-mangled hashes) are dropped rather than fed
+    // to jumpTo, where an invalid LngLat would throw mid-"load" handler.
+    if (zoom >= 0 && zoom <= 11 && Math.abs(lat) <= 85 && Math.abs(lng) <= 180) {
+      out.view = { zoom, lat, lng };
+    }
+  }
+  for (let i = 1; i < parts.length; i++) {
+    const eq = parts[i].indexOf("=");
+    if (eq < 0) continue;
+    const key = parts[i].slice(0, eq), val = parts[i].slice(eq + 1);
+    if (key === "a" && val) out.a = val;
+    if (key === "p" && val) {
+      const ids = val.split(",");
+      if (ids.length === 2 && ids[0] && ids[1]) out.p = ids;
+    }
+  }
+  return out;
+}
+
+function writeHash() {
+  const c = map.getCenter();
+  let h = `#${map.getZoom().toFixed(2)}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`;
+  const a = activeA || pendingA;
+  const p = activeP || pendingP;
+  if (a) h += `&a=${a}`;
+  if (p) h += `&p=${p[0]},${p[1]}`;
+  history.replaceState(null, "", h);
+}
+
+const initialHash = parseHash();
+if (initialHash) {
+  if (initialHash.a) pendingA = stripId(initialHash.a);
+  if (initialHash.p) pendingP = initialHash.p.map(stripId);
+}
+
+const map = new maplibregl.Map({
+  container: "map",
+  style: {
+    version: 8,
+    sources: {
+      dots: { type: "raster", tiles: [(DATA_BASE || location.origin) + "/data/tiles/{z}/{x}/{y}.png"],
+              tileSize: 256, minzoom: 0, maxzoom: 10 }
+    },
+    layers: [
+      { id: "bg", type: "background", paint: { "background-color": "#000000" } },
+      { id: "dots", type: "raster", source: "dots",
+        paint: { "raster-fade-duration": 150 } }
+    ]
+  },
+  center: [0, 0], zoom: 1, minZoom: 0, maxZoom: 11, renderWorldCopies: false
+});
+map.addControl(new maplibregl.NavigationControl());
+
+// Single guarded gateway for every setPaintProperty on the dots layer: a
+// pre-load call (slider drag, stray clearPath) must not throw. Anything
+// skipped here is reapplied by the map "load" handler (applyDisplayPaint)
+// or is the layer's default already (raster-opacity 1.0).
+// Gates on a styleReady flag, NOT map.isStyleLoaded(): the latter also
+// reports false whenever any source/tile is still in flight (e.g. right
+// after renderPath's addSource), which would silently drop paint writes
+// long after the style itself is usable.
+let styleReady = false;
+function safePaint(prop, v) {
+  if (!styleReady) return;
+  map.setPaintProperty("dots", prop, v);
+}
+
+// Single resolver owning every raster-opacity write on the dots layer, so
+// path-dimming, vector-points handoff, and community isolate (added later in
+// this file, once displaySettings/VECTOR_POINTS_MIN_ZOOM/isolateCommunity
+// exist) never fight over the same paint property. renderPath/clearPath only
+// ever set pathDimActive and call this -- they no longer touch raster-opacity
+// directly. Precedence (R13: pointMode replaces the old vectorPoints
+// checkbox): pointMode "vector" always wins outright, forcing the raster
+// fully out at every zoom (not just deep zoom) since that mode's whole point
+// is vector-only rendering; otherwise pointMode "both" at deep zoom (zoom >=
+// VECTOR_POINTS_MIN_ZOOM) fades the raster out the same way the old
+// vectorPoints-enabled behavior did, so vector circles are the only dots
+// layer visible there (isolate filtering happens inside updateVectorPoints
+// itself in that case); otherwise a path in flight dims the raster to 0.45
+// (unchanged pre-vector-points behavior); otherwise a community isolate in
+// effect (Task R10a) dims the raster to 0.2 at ALL zooms -- this is the
+// isolate's only effect below vector zoom (or in pointMode "raster" at any
+// zoom), since the raster itself isn't filterable per-community until R10b's
+// per-community shards ship; otherwise full opacity. pointMode "raster"
+// never forces 0 here -- see updateVectorPoints for how its isolate shard
+// dots still render as vector points regardless (deliberate, isolate is an
+// explicit action) without this resolver treating that as "vector active".
+let pathDimActive = false;   // true while renderPath owns a drawn path, cleared by clearPath
+function updateRasterOpacity() {
+  const vectorActive = displaySettings.pointMode === "both" && map.getZoom() >= VECTOR_POINTS_MIN_ZOOM;
+  // Deliberate precedence: a drawn path's dim (0.45) wins over isolate's
+  // deeper dim (0.2) when both are active, since the path is the fresher,
+  // more specific intent and path drawing doesn't clear isolate state.
+  const opacity = displaySettings.pointMode === "vector" ? 0
+    : vectorActive ? 0
+    : pathDimActive ? 0.45
+    : isolateCommunity != null ? 0.2
+    : 1.0;
+  safePaint("raster-opacity", opacity);
+}
+
+const tileCache = new Map();         // "z/x/y" -> {l:[...]} or null
+async function fetchTile(z, x, y) {
+  const k = `${z}/${x}/${y}`;
+  if (!tileCache.has(k)) {
+    tileCache.set(k, fetch(DATA_BASE + `/data/index/labels/${k}.json`)
+      .then(r => r.ok ? r.json() : null).catch(() => null));
+    if (tileCache.size > 600) tileCache.delete(tileCache.keys().next().value);
+  }
+  return tileCache.get(k);
+}
+function visibleTiles(lz) {
+  const n = 1 << lz, b = map.getBounds();
+  const m0 = maplibregl.MercatorCoordinate.fromLngLat(b.getNorthWest());
+  const m1 = maplibregl.MercatorCoordinate.fromLngLat(b.getSouthEast());
+  const tiles = [];
+  const x0 = Math.max(0, Math.floor(m0.x * n)), x1 = Math.min(n - 1, Math.floor(m1.x * n));
+  const y0 = Math.max(0, Math.floor(m0.y * n)), y1 = Math.min(n - 1, Math.floor(m1.y * n));
+  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) tiles.push([x, y]);
+  return tiles;
+}
+const toLngLat = (xw, yw) => new maplibregl.MercatorCoordinate(xw, 1 - yw, 0).toLngLat();
+
+// ---- author search ----
+// normalize(): JS mirror of pipeline/build_index.py normalize(). Each step
+// maps to the python line it must match bit-for-bit (shard keys are built
+// server-side with the python version, so any drift here breaks lookups):
+//   unicodedata.normalize("NFKD", name)                       -> name.normalize("NFKD")
+//   "".join(c for c in s if not unicodedata.combining(c))     -> replace(/\p{M}/gu, "")
+//   .lower()                                                  -> .toLowerCase()
+//   c if (c.isalnum() or c == " ") else " " (per char;        -> replace(/[^\p{L}\p{N}]/gu, " ")
+//     python isalnum() covers unicode letters+digits, not just ascii)
+//   " ".join(s.split())                                       -> trim + collapse whitespace
+function normalize(name) {
+  let s = name.normalize("NFKD");
+  s = s.replace(/\p{M}/gu, "");
+  s = s.toLowerCase();
+  s = s.replace(/[^\p{L}\p{N}]/gu, " ");
+  s = s.trim().replace(/\s+/g, " ");
+  return s;
+}
+
+const searchShardCache = new Map();  // shard key -> Promise<entries|null>; 404s cache as null; cap 20 FIFO
+async function fetchSearchShard(key) {
+  if (searchShardCache.has(key)) return searchShardCache.get(key);
+  const p = fetch(DATA_BASE + `/data/index/search/${key}.json`)
+    .then(r => r.ok ? r.json() : null)
+    .catch(() => null);
+  searchShardCache.set(key, p);
+  if (searchShardCache.size > 20) searchShardCache.delete(searchShardCache.keys().next().value);
+  return p;
+}
+
+// Shard fallback chain per pipeline/build_index.py's build_search_shards /
+// _split_prefix_shard / _split_catchall_shard contract. The build side
+// buckets each name by the first TWO chars of its concatenated normalized
+// form: `key = head if len(head) == 2 and head.isascii() and head.isalpha()
+// else "_"`, so a name lives in the prefix-shard tree only when BOTH of
+// its first two chars are ascii letters ("sørensen" -> "_", not "so...").
+// An author is inserted under BOTH their first-token and last-token bucket
+// key (build_index.py's build_search_shards), so a single query can need
+// entries from more than one on-disk shard file to see everything it should.
+//
+// MERGE walk (not first-hit-stop): for a concat that passes the two-char
+// gate, fetch ALL existing prefix shards from min(5, concat.length) down to
+// 2 chars -- not just the first one found -- and concatenate their entries.
+// This matters because a name's entries can sit at whatever depth its OWNING
+// token's own split recursion (build_index.py's _split_prefix_shard) landed
+// on, which need not be the first depth the query's concat walk happens to
+// hit; stopping at the first existing file can silently skip a shallower or
+// deeper file that also holds relevant entries (e.g. "dresselhaus" returning
+// only a low-cited match while a higher-cited one sits at another level).
+// Missing levels just skip -- 404s cache as null same as before.
+//
+// Token-gated catch-all: ALWAYS ALSO fetch the codepoint catch-all bucket
+// `_<cp % CATCHALL_BUCKETS>` for the query's FIRST TOKEN's own first
+// character when that first token itself fails the two-char ascii-alpha
+// gate (token.length < 2, or its second char isn't ascii-alpha) -- e.g.
+// "m s dresselhaus" has concat "msdresselhaus" whose first two chars "ms"
+// pass the gate, but the entry was inserted at build time keyed off the
+// first TOKEN "m" alone, which fails its own gate and lands only in the
+// codepoint catch-all, never in a prefix shard the concat walk would ever
+// reach. This runs independent of the prefix walk's outcome. When the
+// whole concat fails the gate, the first token fails it too (concat's first
+// two chars are the first token's own first two chars whenever the first
+// token has length >= 2), so this fetch computes the same key the existing
+// catch-all fallback below would use anyway -- no special-casing needed,
+// that fallback path still runs unchanged.
+//
+// Dedup: rankSearchEntries dedupes by id before ranking, so entries that
+// land in more than one merged shard (or get fetched twice via an
+// overlapping key) are still shown once -- merging inputs here doesn't
+// break that.
+//
+// Perf: worst case is the 4-level prefix walk (5,4,3,2) plus one
+// token-catch-all fetch = 5 fetches, issued in parallel via Promise.all so a
+// cold query costs ~1 RTT instead of up to 5. All go through the existing
+// searchShardCache so repeat queries and shared prefixes cost nothing extra.
+const CATCHALL_BUCKETS = 128;        // codepoint-modulus for the `_` catch-all split; mirrors pipeline/build_index.py's CATCHALL_BUCKETS
+const MAX_PREFIX_LEN = 5;            // deepest prefix-shard key length; mirrors pipeline/build_index.py's MAX_PREFIX_LEN
+async function lookupSearchShard(norm) {
+  const concat = norm.replace(/ /g, "");
+  const merged = [];
+
+  // Keys are collected deepest-prefix-first, then the token catch-all, and
+  // fetched together via Promise.all -- the merge order stays deterministic
+  // (it mirrors `keys`) while the RTTs run concurrently instead of serially,
+  // so a cold query costs ~1 RTT instead of up to 5.
+  const keys = [];
+  if (/^[a-z]{2}/.test(concat)) {
+    for (let k = Math.min(MAX_PREFIX_LEN, concat.length); k >= 2; k--) {
+      keys.push(concat.slice(0, k));
+    }
+  }
+
+  const firstToken = norm.split(" ")[0] || "";
+  if (firstToken && !/^[a-z]{2}/.test(firstToken)) {
+    keys.push(`_${firstToken.codePointAt(0) % CATCHALL_BUCKETS}`);
+  }
+
+  if (keys.length > 0) {
+    const results = await Promise.all(keys.map(fetchSearchShard));
+    for (const entries of results) {
+      if (entries) merged.push(...entries);
+    }
+  }
+
+  if (merged.length > 0) return merged;
+
+  // gate failed on the whole concat, or every level (and the token
+  // catch-all, if any) 404ed: fall through to the catch-all chain below
+  // (belt and braces against future shard-scheme drift)
+  if (concat.length > 0) {
+    const entries = await fetchSearchShard(`_${concat.codePointAt(0) % CATCHALL_BUCKETS}`);
+    if (entries) return entries;
+  }
+  return (await fetchSearchShard("_")) || [];
+}
+
+// tokenMatch(queryTokens, entryTokens): true if every query token, in order,
+// prefix-matches a distinct entry token as a subsequence over the entry's
+// tokens (greedy two-pointer: for each query token, advance the entry-token
+// cursor until a prefix match is found, then move past it; fail if the
+// entry tokens run out first). Order is preserved, not a bag-of-tokens
+// match: "terrence sejnowski" matches "terrence j sejnowski"; "j sejnowski"
+// matches; "sejnowski" alone matches (single token, any position);
+// "sejnowski terrence" does NOT match (wrong order).
+function tokenMatch(queryTokens, entryTokens) {
+  let j = 0;
+  for (const qt of queryTokens) {
+    while (j < entryTokens.length && !entryTokens[j].startsWith(qt)) j++;
+    if (j >= entryTokens.length) return false;
+    j++;
+  }
+  return true;
+}
+
+// entry shape: [norm, display_name, id, xw, yw, cited]
+// Dedupes by id first -- Task 1's dual first/last-token search shards insert
+// an author under both their first-token and last-token bucket key, and
+// those two keys can collide (e.g. "Anna Anderson" buckets to "an" via
+// either token), landing the same entry twice in a single shard file. This
+// is a cheap guard against showing/ranking a person twice.
+// Then buckets into three ranked groups: (1) entry norm starts with the
+// full query norm; (2) tokenMatch passed AND the first query token
+// prefix-matches the entry's first token; (3) any other tokenMatch hit.
+// cited desc within each group; top 12 overall.
+// NOTE: bare-surname queries (e.g. "sejnowski") only reach the right entry
+// once the production index is rebuilt with Task 1's last-token shards
+// (Task 5) -- lookupSearchShard today still only buckets by first token, so
+// tokenMatch here can be willing to match a surname-only query while the
+// shard lookup upstream never hands it the entry to test in the first place.
+function rankSearchEntries(entries, norm) {
+  const seen = new Set();
+  const queryTokens = norm.split(" ").filter(Boolean);
+  const g1 = [], g2 = [], g3 = [];
+  for (const e of entries) {
+    if (seen.has(e[2])) continue;
+    seen.add(e[2]);
+    if (e[0].startsWith(norm)) { g1.push(e); continue; }
+    const entryTokens = e[0].split(" ").filter(Boolean);
+    if (!tokenMatch(queryTokens, entryTokens)) continue;
+    if (entryTokens[0].startsWith(queryTokens[0])) g2.push(e);
+    else g3.push(e);
+  }
+  g1.sort((a, b) => b[5] - a[5]);
+  g2.sort((a, b) => b[5] - a[5]);
+  g3.sort((a, b) => b[5] - a[5]);
+  return [...g1, ...g2, ...g3].slice(0, 12);
+}
+
+const searchInput = document.getElementById("search-input");
+const searchDropdown = document.getElementById("search-dropdown");
+const searchClearBtn = document.getElementById("search-clear");
+let searchResults = [];
+let searchActive = -1;
+let searchGen = 0;      // invalidates stale in-flight lookups
+let searchTimer = null;
+let highlightMarker = null;
+let highlightOverlayId = null;   // bare id currently claimed under "highlight" in overlayLabelOwners, or null
+
+// ---- Task 9 (R9): overlay-label dedupe ----
+// Bare ids that already have an explicit overlay name tag on the map (a
+// search highlight, a path node, or a coauthor-ray endpoint) -- drawLabels
+// skips these entries so a regular label never doubles up with an overlay
+// one. Maintained by setSearchHighlight/clearSearchHighlight,
+// renderPath/clearPath and drawCoauthorRays/clearRays, each of which also
+// calls drawLabels() immediately after a change so the dedupe is visible
+// without waiting for the next move/zoom-triggered redraw.
+//
+// Ownership-tracked (review fix on the first cut's plain Set): the same id
+// can be claimed by more than one overlay at once -- e.g. search A draws
+// rays that include B, then the user searches B: B briefly holds both a
+// stale "ray" claim and a fresh "highlight" claim, and drawCoauthorRays'
+// internal clearRays() runs AFTER the highlight is placed. With a plain
+// Set, that clear would delete B outright, taking the fresh highlight's
+// claim with it and bringing B's regular label back beside its highlight
+// tag (doubled name). Same shape via path hops (Connect A-B whose path
+// includes C, then search C). Per-id owner sets make a clear remove only
+// its own owner's claim, so ordering can never drop someone else's.
+const overlayLabelOwners = new Map();   // bareId -> Set of "highlight"|"path"|"ray"
+function overlayLabelAdd(owner, ids) {
+  for (const id of ids) {
+    let owners = overlayLabelOwners.get(id);
+    if (!owners) { owners = new Set(); overlayLabelOwners.set(id, owners); }
+    owners.add(owner);
+  }
+}
+function overlayLabelClear(owner, ids) {
+  for (const id of ids) {
+    const owners = overlayLabelOwners.get(id);
+    if (!owners) continue;
+    owners.delete(owner);
+    if (owners.size === 0) overlayLabelOwners.delete(id);
+  }
+}
+function overlayLabeled(id) { return overlayLabelOwners.has(id); }
+
+// ---- un-search / clear-search button ----
+// Visible whenever there's something to clear: a placed highlight or leftover
+// query text. Called from every spot that changes either of those two things
+// rather than wired to a single event, since both the search box and the
+// highlight can change independently (typing, Escape, a search select, a
+// path draw stealing the highlight, an a=<id> hash restore).
+function updateSearchClearVisibility() {
+  searchClearBtn.classList.toggle("visible", !!(highlightMarker || searchInput.value));
+}
+
+function clearSearchHighlight() {
+  if (highlightMarker) { highlightMarker.remove(); highlightMarker = null; }
+  if (highlightOverlayId) {
+    overlayLabelClear("highlight", [highlightOverlayId]);
+    highlightOverlayId = null;
+    drawLabels();       // the regular label for this author may now reappear
+  }
+  updateSearchClearVisibility();
+  clearLegendHighlight();   // Task R10a: no author selected -> no legend row highlighted
+}
+
+// Places the pulsing highlight marker plus a persistent name tag -- used by
+// both a live search selection and an a=<id> hash restore (which has no
+// dropdown row to read the name from, so callers fetch it themselves).
+function setSearchHighlight(id, name, xw, yw) {
+  clearSearchHighlight();
+  const el = document.createElement("div");
+  el.className = "search-highlight-node";
+  const dot = document.createElement("div");
+  dot.className = "search-highlight";
+  const label = document.createElement("div");
+  label.className = "path-label";
+  label.textContent = name;
+  el.append(dot, label);
+  highlightMarker = new maplibregl.Marker({ element: el })
+    .setLngLat(toLngLat(xw, yw)).addTo(map);
+  activeA = stripId(id);
+  pendingA = null;             // the real highlight owns a= from here
+  highlightOverlayId = activeA;
+  overlayLabelAdd("highlight", [highlightOverlayId]);
+  updateSearchClearVisibility();
+  writeHash();
+  drawLabels();                // hide this author's regular label immediately
+  // Task R10a: search-shard entries don't carry community, so resolve it by
+  // fetching the z9 label tile at this author's coords (info-card selections
+  // skip this -- they already have community from the hit entry, see
+  // openInfoCard below).
+  highlightLegendForCoords(activeA, xw, yw);
+}
+
+function renderSearchDropdown() {
+  searchDropdown.innerHTML = "";
+  if (searchResults.length === 0) {
+    const row = document.createElement("div");
+    row.className = "row empty";
+    row.textContent = "no matches";
+    searchDropdown.appendChild(row);
+  } else {
+    searchResults.forEach((e, i) => {
+      const row = document.createElement("div");
+      row.className = "row" + (i === searchActive ? " active" : "");
+      const name = document.createElement("span");
+      name.textContent = e[1];
+      const n = document.createElement("span");
+      n.className = "n"; n.textContent = e[5].toLocaleString();
+      row.append(name, n);
+      row.addEventListener("mousedown", ev => { ev.preventDefault(); selectSearchEntry(e); });
+      searchDropdown.appendChild(row);
+    });
+  }
+  searchDropdown.classList.add("open");
+}
+
+function closeSearchDropdown() {
+  searchDropdown.classList.remove("open");
+  searchDropdown.innerHTML = "";
+  searchResults = [];
+  searchActive = -1;
+}
+
+function selectSearchEntry(e) {
+  const [, name, id, xw, yw] = e;
+  map.flyTo({ center: toLngLat(xw, yw), zoom: 10.5 });
+  setSearchHighlight(id, name, xw, yw);
+  closeSearchDropdown();
+  searchInput.blur();
+  drawCoauthorRays(stripId(id), xw, yw);
+}
+
+async function runSearch(query) {
+  const gen = ++searchGen;
+  const norm = normalize(query);
+  if (!norm) { closeSearchDropdown(); return; }
+  const entries = await lookupSearchShard(norm);
+  if (gen !== searchGen) return;    // a newer query took over
+  searchResults = rankSearchEntries(entries, norm);
+  searchActive = -1;
+  renderSearchDropdown();
+}
+
+searchInput.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  const query = searchInput.value;
+  searchTimer = setTimeout(() => runSearch(query), 150);
+  updateSearchClearVisibility();
+});
+
+searchInput.addEventListener("keydown", ev => {
+  if (ev.key === "ArrowDown") {
+    ev.preventDefault();
+    if (searchResults.length) { searchActive = (searchActive + 1) % searchResults.length; renderSearchDropdown(); }
+  } else if (ev.key === "ArrowUp") {
+    ev.preventDefault();
+    if (searchResults.length) {
+      // from no selection (-1), wrap to the last row
+      searchActive = (searchActive <= 0 ? searchResults.length : searchActive) - 1;
+      renderSearchDropdown();
+    }
+  } else if (ev.key === "Enter") {
+    ev.preventDefault();
+    const pick = searchResults[searchActive >= 0 ? searchActive : 0];
+    if (pick) selectSearchEntry(pick);
+  }
+  // Escape is handled by the single document-level capture-phase priority
+  // chain (see "keyboard shortcuts" (Task 4)), which calls
+  // searchDropdownEscape()/searchHighlightEscape() below instead of a
+  // listener local to this input.
+});
+
+searchInput.addEventListener("blur", () => setTimeout(closeSearchDropdown, 100));
+
+// Rung 3/4 of the Escape priority chain for the top search box (info card
+// and help overlay -- rungs 1/2 -- live near their own elements below).
+// Clearing the query text rides along with closing the dropdown, matching
+// the pre-Task-4 behavior for that half; the highlight is its own rung so a
+// second Escape is needed to drop it once the dropdown is already closed.
+function searchDropdownEscape() {
+  searchInput.value = "";
+  clearTimeout(searchTimer);
+  searchGen++;
+  closeSearchDropdown();
+  updateSearchClearVisibility();
+}
+// Drops the search highlight and any coauthor rays without touching the
+// hash -- shared by searchHighlightEscape (which does own the hash write)
+// and renderPath (Task 5, data-pipeline), which clears the highlight when a
+// path is about to own the map's one highlight slot but writes p= itself
+// right after, so a second writeHash here would just be redundant.
+function clearSearchAndRays() {
+  clearSearchHighlight();
+  clearRays();
+  activeA = null;
+  pendingA = null;
+}
+function searchHighlightEscape() {
+  clearSearchAndRays();
+  writeHash();
+}
+searchClearBtn.addEventListener("click", () => {
+  searchDropdownEscape();
+  searchHighlightEscape();
+});
+
+// ---- degree-of-separation path overlay (Task 7) ----
+// Reuses the Task 6 lookup helpers (normalize/lookupSearchShard/rankSearchEntries)
+// but keeps its own dropdown state per instance rather than reusing the global
+// searchInput/searchDropdown/searchResults state above, since Connect needs two
+// independent lookups (A and B) live at once.
+function createAuthorLookup(inputEl, dropdownEl, onSelect) {
+  let results = [], active = -1, gen = 0, timer = null;
+
+  function render() {
+    dropdownEl.innerHTML = "";
+    if (results.length === 0) {
+      const row = document.createElement("div");
+      row.className = "row empty";
+      row.textContent = "no matches";
+      dropdownEl.appendChild(row);
+    } else {
+      results.forEach((e, i) => {
+        const row = document.createElement("div");
+        row.className = "row" + (i === active ? " active" : "");
+        const name = document.createElement("span");
+        name.textContent = e[1];
+        const n = document.createElement("span");
+        n.className = "n"; n.textContent = e[5].toLocaleString();
+        row.append(name, n);
+        row.addEventListener("mousedown", ev => { ev.preventDefault(); select(e); });
+        dropdownEl.appendChild(row);
+      });
+    }
+    dropdownEl.classList.add("open");
+  }
+
+  function close() {
+    dropdownEl.classList.remove("open");
+    dropdownEl.innerHTML = "";
+    results = []; active = -1;
+  }
+
+  function select(e) {
+    const [, name, id, xw, yw] = e;   // entry shape: [norm, display_name, id, xw, yw, cited]
+    inputEl.value = name;
+    close();
+    inputEl.blur();
+    // stripId so every connect selection stores a bare id, same as infoCard's
+    // "Connect from here" and the hash-restore path -- keeps connectA/connectB
+    // uniform no matter which route filled them.
+    onSelect({ id: stripId(id), name, xw, yw });
+  }
+
+  async function run(query) {
+    const g = ++gen;
+    const norm = normalize(query);
+    if (!norm) { close(); return; }
+    const entries = await lookupSearchShard(norm);
+    if (g !== gen) return;
+    results = rankSearchEntries(entries, norm);
+    active = -1;
+    render();
+  }
+
+  inputEl.addEventListener("input", () => {
+    onSelect(null);            // typing invalidates any prior selection
+    clearTimeout(timer);
+    const query = inputEl.value;
+    timer = setTimeout(() => run(query), 150);
+  });
+  inputEl.addEventListener("keydown", ev => {
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      if (results.length) { active = (active + 1) % results.length; render(); }
+    } else if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      if (results.length) {
+        active = (active <= 0 ? results.length : active) - 1;
+        render();
+      }
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      const pick = results[active >= 0 ? active : 0];
+      if (pick) select(pick);
+    }
+    // Escape is handled by the single document-level capture-phase priority
+    // chain below (see "keyboard shortcuts" (Task 4)), which calls escape()
+    // exposed below instead of a listener local to this input.
+  });
+  inputEl.addEventListener("blur", () => setTimeout(close, 100));
+
+  function isOpen() { return dropdownEl.classList.contains("open"); }
+  function escape() {
+    inputEl.value = "";
+    clearTimeout(timer);
+    gen++;
+    close();
+    onSelect(null);
+  }
+  return { isOpen, escape };
+}
+
+const connectToggle = document.getElementById("connect-toggle");
+const connectPanel = document.getElementById("connect-panel");
+const connectAInput = document.getElementById("connect-a-input");
+const connectADropdown = document.getElementById("connect-a-dropdown");
+const connectBInput = document.getElementById("connect-b-input");
+const connectBDropdown = document.getElementById("connect-b-dropdown");
+const connectGo = document.getElementById("connect-go");
+const connectClear = document.getElementById("connect-clear");
+const connectStatus = document.getElementById("connect-status");
+const pathHopsEl = document.getElementById("path-hops");
+
+let connectA = null, connectB = null;    // {id, name, xw, yw} once selected
+// Editing either Connect input discards any not-yet-run p= from the hash:
+// the shared pair no longer matches what the user is about to run.
+const connectALookup = createAuthorLookup(connectAInput, connectADropdown, sel => { connectA = sel; pendingP = null; });
+const connectBLookup = createAuthorLookup(connectBInput, connectBDropdown, sel => { connectB = sel; pendingP = null; });
+
+function setPathStatus(text) { connectStatus.textContent = text || ""; }
+
+connectToggle.addEventListener("click", () => {
+  const on = connectPanel.classList.toggle("open");
+  connectToggle.classList.toggle("active", on);
+});
+
+// /api/path expects the bare OpenAlex id ("A5108093963"); the map's own data
+// (search entries, id-bucket shards) stores the full "https://openalex.org/..."
+// form, so every id touched by the path feature is normalized through this.
+function stripId(id) { return String(id).replace(/^https?:\/\/openalex\.org\//, ""); }
+function idBucketNum(id) {
+  const digits = stripId(id).replace(/\D/g, "");
+  return digits ? parseInt(digits, 10) % 1000 : 0;
+}
+
+const idBucketCache = new Map();     // bucket number -> Promise<Map<bareId,[xw,yw]>|null>
+async function fetchIdBucket(bucket) {
+  if (!idBucketCache.has(bucket)) {
+    idBucketCache.set(bucket, fetch(DATA_BASE + `/data/index/ids/${bucket}.json`)
+      .then(r => r.ok ? r.json() : null)
+      .then(raw => {
+        if (!raw) return null;
+        const m = new Map();
+        for (const [k, v] of Object.entries(raw)) m.set(stripId(k), v);
+        return m;
+      })
+      .catch(() => null));
+  }
+  return idBucketCache.get(bucket);
+}
+
+// nodes: [{id, name}] in path order. Returns an aligned array where each entry
+// is either {xw, yw, ghost, name} or null (skipped: no resolved anchor on one
+// side). Missing authors get ghost positions interpolated proportionally along
+// the segment between the nearest resolved anchor on each side (a run of k
+// unresolved nodes spreads out at t = 1/(k+1), 2/(k+1), ... instead of
+// stacking at the midpoint); if there's no resolved anchor on one side
+// (including being at either end of the path) the node is skipped.
+async function resolvePathCoords(nodes) {
+  const buckets = await Promise.all(nodes.map(n => fetchIdBucket(idBucketNum(n.id))));
+  const hits = nodes.map((n, i) => {
+    const m = buckets[i];
+    const hit = m ? m.get(stripId(n.id)) : null;
+    return hit ? { xw: hit[0], yw: hit[1] } : null;
+  });
+  return nodes.map((n, i) => {
+    if (hits[i]) return { ...hits[i], ghost: false, name: n.name, id: n.id };
+    let prevIdx = -1;
+    for (let j = i - 1; j >= 0; j--) if (hits[j]) { prevIdx = j; break; }
+    let nextIdx = -1;
+    for (let j = i + 1; j < nodes.length; j++) if (hits[j]) { nextIdx = j; break; }
+    if (prevIdx >= 0 && nextIdx >= 0) {
+      const prev = hits[prevIdx], next = hits[nextIdx];
+      const t = (i - prevIdx) / (nextIdx - prevIdx);
+      return { xw: prev.xw + (next.xw - prev.xw) * t,
+               yw: prev.yw + (next.yw - prev.yw) * t,
+               ghost: true, name: n.name, id: n.id };
+    }
+    return null;
+  });
+}
+
+let pathEventSource = null;
+let pathMarkers = [];
+let pathOverlayIds = [];             // bare ids currently claimed under "path" in overlayLabelOwners by the drawn path's node labels
+let pathGen = 0;                     // invalidates stale in-flight renders (labelGen pattern)
+
+// ---- Task 4 (night-polish): path hop list ----
+// One row per point renderPath actually drew (same array, same order), so a
+// hop click always flies to a position that's really on the map.
+function clearHopList() { pathHopsEl.innerHTML = ""; }
+function renderHopList(points) {
+  clearHopList();
+  points.forEach((p, i) => {
+    const row = document.createElement("div");
+    row.className = "hop";
+    const idx = document.createElement("span");
+    idx.className = "hop-i"; idx.textContent = String(i + 1);
+    const name = document.createElement("span");
+    name.className = "hop-name"; name.textContent = p.name;
+    row.append(idx, name);
+    if (p.ghost) {
+      const ghost = document.createElement("span");
+      ghost.className = "hop-ghost"; ghost.textContent = "ghost";
+      row.append(ghost);
+    }
+    row.addEventListener("click", () => {
+      map.flyTo({ center: toLngLat(p.xw, p.yw), zoom: 10.5 });
+    });
+    pathHopsEl.appendChild(row);
+  });
+}
+
+function clearPath() {
+  pathGen++;                         // any in-flight renderPath is now stale
+  if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
+  pathMarkers.forEach(m => m.remove());
+  pathMarkers = [];
+  if (pathOverlayIds.length) {
+    overlayLabelClear("path", pathOverlayIds);
+    pathOverlayIds = [];
+    drawLabels();        // regular labels for these authors may now reappear
+  }
+  clearHopList();
+  if (map.getLayer("path-line")) map.removeLayer("path-line");
+  if (map.getSource("path")) map.removeSource("path");
+  pathDimActive = false;
+  updateRasterOpacity();
+  setPathStatus("");
+  activeP = null;
+  writeHash();
+}
+// pendingP is only discarded on an explicit user Clear -- Go's internal
+// clearPath keeps it, so a failed run still leaves p= in the URL.
+connectClear.addEventListener("click", () => { pendingP = null; clearPath(); });
+
+async function renderPath(pathSteps, hops, idA, idB) {
+  const gen = pathGen;               // stale once clearPath / a newer Go bumps it
+  // /api/path with edges=coauthor should only ever return author ids, but
+  // filter defensively in case a work-type node (id starting "W") interleaves.
+  const nodes = pathSteps
+    .filter(s => !String(s.author_id).startsWith("W"))
+    .map(s => ({ id: s.author_id, name: s.author_name }));
+  if (nodes.length === 0) { setPathStatus("no author path"); return; }
+
+  const resolved = await resolvePathCoords(nodes);
+  if (gen !== pathGen) return;       // a newer Go/Clear owns the overlay now
+  const points = resolved.filter(Boolean);
+  if (points.length < 2) { setPathStatus(`${hops} hops (too few resolved to draw)`); return; }
+
+  // One visual mode at a time: a path about to draw takes over the highlight
+  // slot, so drop any active search highlight (and its rays) first -- covers
+  // the case where the searched author is also an endpoint/hop of this path,
+  // which would otherwise leave two name labels on top of each other and a=
+  // stale in the hash alongside the new p=. writeHash below (which sets p=)
+  // is this call's own hash write, so clearSearchAndRays must not write here.
+  clearSearchAndRays();
+
+  const coords = points.map(p => toLngLat(p.xw, p.yw).toArray());
+  map.addSource("path", {
+    type: "geojson",
+    data: { type: "Feature", geometry: { type: "LineString", coordinates: coords } },
+  });
+  map.addLayer({
+    id: "path-line", type: "line", source: "path",
+    paint: {
+      "line-color": "#7fae8e", "line-width": 2.5,
+      "line-blur": 1.5, "line-opacity": 0.9,
+    },
+  });
+
+  renderHopList(points);
+
+  pathMarkers = points.map(p => {
+    const el = document.createElement("div");
+    el.className = "path-node" + (p.ghost ? " ghost" : "");
+    const dot = document.createElement("div");
+    dot.className = "path-dot";
+    const label = document.createElement("div");
+    label.className = "path-label";
+    label.textContent = p.name;
+    el.append(dot, label);
+    return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
+  });
+
+  pathOverlayIds = points.map(p => stripId(p.id));
+  overlayLabelAdd("path", pathOverlayIds);
+  drawLabels();           // hide these authors' regular labels immediately
+
+  pathDimActive = true;
+  updateRasterOpacity();
+
+  const bounds = coords.reduce(
+    (b, c) => b.extend(c),
+    new maplibregl.LngLatBounds(coords[0], coords[0])
+  );
+  map.fitBounds(bounds, { padding: 60, maxZoom: 11 });
+
+  activeP = [idA, idB];
+  pendingP = null;             // the drawn path owns p= from here
+  writeHash();
+  setPathStatus(`${hops} hops`);
+}
+
+connectGo.addEventListener("click", () => {
+  if (!connectA || !connectB) { setPathStatus("select both authors"); return; }
+  clearRays();    // a path replaces any coauthor rays from a prior search
+  clearPath();    // starting a new Go clears any previous path first
+  pathGen++;      // this Go owns the overlay from here (clearPath also bumps)
+  const idA = stripId(connectA.id), idB = stripId(connectB.id);
+  setPathStatus("searching…");
+  const es = new EventSource(
+    `${API_BASE}/api/path?from=${encodeURIComponent(idA)}&to=${encodeURIComponent(idB)}&edges=coauthor`
+  );
+  pathEventSource = es;
+  es.addEventListener("progress", ev => {
+    try { setPathStatus(JSON.parse(ev.data).message); } catch { /* ignore malformed frame */ }
+  });
+  es.addEventListener("result", ev => {
+    let data;
+    try { data = JSON.parse(ev.data); } catch { return; }
+    if (pathEventSource === es) pathEventSource = null;
+    es.close();
+    if (!data.found) { setPathStatus(data.reason || "no path found"); return; }
+    renderPath(data.path, data.hops, idA, idB);
+  });
+  es.addEventListener("app_error", ev => {
+    let msg = "error";
+    try { msg = JSON.parse(ev.data).message || msg; } catch { /* ignore malformed frame */ }
+    setPathStatus(msg);
+    if (pathEventSource === es) pathEventSource = null;
+    es.close();
+  });
+  // Fires on backend-down / dropped-connection; EventSource retries silently
+  // otherwise, so without this the pill would say "searching…" forever. The
+  // identity check no-ops a stale error from an already-finished or
+  // already-superseded stream (result/app_error closed it, or a newer Go
+  // click replaced pathEventSource before this one's error arrived).
+  es.addEventListener("error", () => {
+    if (pathEventSource !== es) return;
+    es.close();
+    pathEventSource = null;
+    setPathStatus("path backend unreachable - is the degree-of-separation server running on :8000?");
+  });
+});
+
+// ---- Task 3 (search-v2): coauthor rays ----
+// On a search select (and the info card's "Coauthors" button, and an a=
+// share-URL restore -- all three route through this one function so there is
+// a single ray-drawing flow), fly-to + highlight is already done by the
+// caller; this probes the backend and, if it's up, streams the origin's
+// depth-1 coauthor neighborhood via /api/graph/expand and draws thin rays to
+// each resolved coauthor. Mutually exclusive with the path overlay: drawing
+// rays always clears any active path first, and Connect's Go always clears
+// rays (see connectGo above).
+const searchStatusEl = document.getElementById("search-status");
+function setSearchStatus(text) { searchStatusEl.textContent = text || ""; }
+
+let searchRayGen = 0;        // invalidates stale in-flight ray renders (pathGen pattern)
+let rayEventSource = null;
+let rayMarkers = [];
+let rayOverlayIds = [];      // bare ids currently claimed under "ray" in overlayLabelOwners by drawn ray endpoint labels
+
+function clearRays() {
+  searchRayGen++;             // any in-flight drawCoauthorRays is now stale
+  if (rayEventSource) { rayEventSource.close(); rayEventSource = null; }
+  rayMarkers.forEach(m => m.remove());
+  rayMarkers = [];
+  if (rayOverlayIds.length) {
+    overlayLabelClear("ray", rayOverlayIds);
+    rayOverlayIds = [];
+    drawLabels();       // regular labels for these authors may now reappear
+  }
+  if (map.getLayer("coauthor-rays")) map.removeLayer("coauthor-rays");
+  if (map.getSource("coauthor-rays")) map.removeSource("coauthor-rays");
+  setSearchStatus("");
+}
+
+// Streams /api/graph/expand?new_id=<bareId>&depth=1&top_k=25&edges=coauthor
+// (see backend/graph_expand.py in the degree-of-separation repo). With no
+// origin_ids/path_ids passed, the stream is just: one "node" event for the
+// origin itself (type "origin", ignored here), "progress" events, one
+// "expansion" event per depth level (here just depth 1) carrying the kept
+// coauthor nodes (type "expansion": {id, name, institution, works_count,
+// cited_by_count, type, depth, expand_owners}) and their edges, then "done"
+// ({}) once a cache-only stitch pass has also flushed. Coauthor coords are
+// resolved through the id shards (fetchIdBucket/idBucketNum/stripId, same as
+// resolvePathCoords) only after "done", so every candidate is known before
+// drawing. searchRayGen is checked after every await and on every streamed
+// event so a stale stream (superseded by a newer search/Escape/clearRays)
+// can't paint over newer state.
+async function drawCoauthorRays(bareId, xw, yw) {
+  clearPath();                 // rays and path never coexist
+  clearRays();                 // clear any rays from a prior author (bump)
+  const gen = ++searchRayGen;  // this call owns the overlay from here
+
+  setSearchStatus("loading coauthors…");
+  const healthy = await probeBackendHealth();
+  if (gen !== searchRayGen) return;
+  if (!healthy) { setSearchStatus("coauthor backend offline"); return; }
+
+  const coauthors = [];        // [{id, name}], populated from "expansion" events
+  const coauthorIds = new Set();   // dedupe across frames; don't rely on backend set semantics
+  const es = new EventSource(
+    `${API_BASE}/api/graph/expand?new_id=${encodeURIComponent(bareId)}&depth=1&top_k=25&edges=coauthor`
+  );
+  rayEventSource = es;
+
+  es.addEventListener("expansion", ev => {
+    if (gen !== searchRayGen) return;
+    let data;
+    try { data = JSON.parse(ev.data); } catch { return; }
+    for (const n of data.nodes || []) {
+      if (n.type !== "expansion") continue;        // origin/path node types, defensive
+      if (String(n.id).startsWith("W")) continue;   // work node, defensive (edges=coauthor implies authors)
+      if (n.id === bareId) continue;                // origin itself, defensive
+      if (coauthorIds.has(n.id)) continue;          // already collected in an earlier frame
+      coauthorIds.add(n.id);
+      coauthors.push({ id: n.id, name: n.name });
+    }
+  });
+
+  async function finish() {
+    if (rayEventSource === es) rayEventSource = null;
+    es.close();
+    if (gen !== searchRayGen) return;
+
+    const buckets = await Promise.all(coauthors.map(c => fetchIdBucket(idBucketNum(c.id))));
+    if (gen !== searchRayGen) return;
+
+    const from = toLngLat(xw, yw).toArray();
+    const features = [];
+    const endpoints = [];
+    let offMap = 0;
+    coauthors.forEach((c, i) => {
+      const m = buckets[i];
+      const hit = m ? m.get(stripId(c.id)) : null;
+      if (!hit) { offMap++; return; }
+      features.push({
+        type: "Feature",
+        geometry: { type: "LineString", coordinates: [from, toLngLat(hit[0], hit[1]).toArray()] },
+      });
+      endpoints.push({ xw: hit[0], yw: hit[1], name: c.name, id: stripId(c.id) });
+    });
+
+    if (features.length) {
+      map.addSource("coauthor-rays", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features },
+      });
+      map.addLayer({
+        id: "coauthor-rays", type: "line", source: "coauthor-rays",
+        // R11a: white instead of the green accent -- see .coauthor-dot above.
+        paint: { "line-color": "#e9ecf1", "line-width": 1.2, "line-opacity": 0.55 },
+      });
+    }
+
+    rayMarkers = endpoints.map(p => {
+      const el = document.createElement("div");
+      el.className = "coauthor-node";
+      const dot = document.createElement("div");
+      dot.className = "coauthor-dot";
+      const label = document.createElement("div");
+      label.className = "coauthor-label";
+      label.textContent = p.name;
+      el.append(dot, label);
+      return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
+    });
+
+    rayOverlayIds = endpoints.map(p => p.id);
+    overlayLabelAdd("ray", rayOverlayIds);
+    drawLabels();          // hide these authors' regular labels immediately
+
+    setSearchStatus(`${endpoints.length} coauthors shown (${offMap} off-map)`);
+  }
+  es.addEventListener("done", finish);
+
+  es.addEventListener("app_error", ev => {
+    if (rayEventSource === es) rayEventSource = null;
+    es.close();
+    if (gen !== searchRayGen) return;
+    let msg = "coauthor backend offline";
+    try { msg = JSON.parse(ev.data).message || msg; } catch { /* ignore malformed frame */ }
+    setSearchStatus(msg);
+  });
+  // Fires on backend-down / dropped-connection; EventSource retries silently
+  // otherwise, so without this the pill would say "loading coauthors…"
+  // forever. The identity check no-ops a stale error from an already-finished
+  // or already-superseded stream (done/app_error closed it, or a newer call
+  // replaced rayEventSource before this one's error arrived).
+  es.addEventListener("error", () => {
+    if (rayEventSource !== es) return;
+    es.close();
+    rayEventSource = null;
+    if (gen !== searchRayGen) return;
+    setSearchStatus("coauthor backend offline");
+  });
+}
+
+// ---- Task 2 (night-polish): hash-restore helpers ----
+// Author names aren't in the id-coord shards, so a=/p= restores fetch them
+// lazily from OpenAlex's public People API; the bare id is a fine fallback
+// since it's still usable for Connect's Go button.
+const displayNameCache = new Map();  // bare id -> Promise<string>
+function fetchDisplayName(bareId) {
+  if (!displayNameCache.has(bareId)) {
+    displayNameCache.set(bareId, fetch(`https://api.openalex.org/people/${bareId}?select=display_name`)
+      .then(r => r.ok ? r.json() : null)
+      .then(j => (j && j.display_name) || bareId)
+      .catch(() => bareId));
+  }
+  return displayNameCache.get(bareId);
+}
+
+async function probeBackendHealth() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2000);
+  try {
+    const r = await fetch(`${API_BASE}/health`, { signal: ctrl.signal });
+    return r.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Applies a= and/or p= from the initial hash, once, at startup. View (zoom/
+// lat/lng) is handled separately in the map "load" handler via jumpTo.
+async function restoreFromHash(parsed) {
+  if (!parsed) return;
+  // p= wins outright when both are present: skip the a= highlight/rays
+  // entirely rather than placing them and immediately clearing them once
+  // the path is drawn (path-clears-highlight rule, applied here without the
+  // render flash). This holds even when the backend turns out to be offline
+  // below -- p= stays pending either way, so a= stays skipped for
+  // consistency; the user can re-search to get the highlight back.
+  if (parsed.a && !parsed.p) {
+    const bareA = stripId(parsed.a);
+    const bucket = await fetchIdBucket(idBucketNum(bareA));
+    const hit = bucket ? bucket.get(bareA) : null;
+    if (hit) {
+      const name = await fetchDisplayName(bareA);
+      setSearchHighlight(bareA, name, hit[0], hit[1]);
+      drawCoauthorRays(bareA, hit[0], hit[1]);
+    }
+  }
+  if (parsed.p) {
+    const [bareA, bareB] = parsed.p;
+    connectPanel.classList.add("open");
+    connectToggle.classList.add("active");
+    const [nameA, nameB] = await Promise.all([fetchDisplayName(bareA), fetchDisplayName(bareB)]);
+    connectAInput.value = nameA;
+    connectBInput.value = nameB;
+    connectA = { id: bareA, name: nameA };
+    connectB = { id: bareB, name: nameB };
+    const reachable = await probeBackendHealth();
+    if (reachable) {
+      connectGo.click();
+    } else {
+      setPathStatus("path backend offline - press Go to retry");
+    }
+  }
+}
+
+// Greedy screen-rect collision test shared by drawLabels and drawRegions.
+// `placed` holds {x, y, w, h} rects already committed for this redraw.
+function collides(placed, x, y, w, h) {
+  return placed.some(r => Math.abs(r.x - x) * 2 < r.w + w
+                       && Math.abs(r.y - y) * 2 < r.h + h);
+}
+
+// ---- Task 1 (night-polish): display settings panel ----
+// Sliders only ever touch brightness/contrast/saturation; raster-opacity stays
+// owned by updateRasterOpacity() (see near safePaint above), which renderPath/
+// clearPath and the vector-points toggle all defer to, so the three stay orthogonal.
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 1.0 };
+const DISPLAY_KEY = "mapademic.display";
+
+// R12b: a stale localStorage value still carrying the removed "boundaries"
+// key just spreads in as an extra unused property on displaySettings below
+// (loadDisplaySettings' `{...DISPLAY_DEFAULTS, ...JSON.parse(raw)}`) -- no
+// code reads it anymore, so it's silently harmless rather than an error.
+// R13: the boolean "vectorPoints" checkbox setting was replaced by the
+// three-way "pointMode" radio (see DISPLAY_DEFAULTS above and the Points
+// row in #display-panel). A stale vectorPoints value is actively migrated
+// (true -> "both", matching the old overlay-everywhere default; false ->
+// "raster", matching the old fully-off state) rather than left to spread in
+// inert like "boundaries" above, since leaving it alone would silently drop
+// the user's prior on/off choice back to the new default every load. Only
+// applies when pointMode itself isn't already present in the saved value --
+// an explicit new-format save always wins. The stale vectorPoints property
+// is otherwise left in place afterward (same as "boundaries"); nothing reads
+// it again, so it's harmless.
+function loadDisplaySettings() {
+  try {
+    const raw = localStorage.getItem(DISPLAY_KEY);
+    if (!raw) return { ...DISPLAY_DEFAULTS };
+    const parsed = JSON.parse(raw);
+    if (parsed.pointMode === undefined && typeof parsed.vectorPoints === "boolean") {
+      parsed.pointMode = parsed.vectorPoints ? "both" : "raster";
+    }
+    return { ...DISPLAY_DEFAULTS, ...parsed };
+  } catch {
+    return { ...DISPLAY_DEFAULTS };
+  }
+}
+let displaySettings = loadDisplaySettings();
+
+function saveDisplaySettings() {
+  try { localStorage.setItem(DISPLAY_KEY, JSON.stringify(displaySettings)); } catch { /* ignore storage errors */ }
+}
+
+// Single choke point for all display-panel paint writes (carry-over fix from
+// Task 1 review): safePaint no-ops pre-load so a slider drag can't throw.
+// displaySettings is still updated and saved immediately; the paint just
+// applies once the style is ready (the "load" handler calls this again).
+function applyDisplayPaint() {
+  safePaint("raster-brightness-max", displaySettings.brightness);
+  safePaint("raster-contrast", displaySettings.contrast);
+  safePaint("raster-saturation", displaySettings.saturation);
+}
+
+const dpGear = document.getElementById("display-gear");
+const dpPanel = document.getElementById("display-panel");
+const dpBrightness = document.getElementById("dp-brightness");
+const dpBrightnessN = document.getElementById("dp-brightness-n");
+const dpContrast = document.getElementById("dp-contrast");
+const dpContrastN = document.getElementById("dp-contrast-n");
+const dpSaturation = document.getElementById("dp-saturation");
+const dpSaturationN = document.getElementById("dp-saturation-n");
+const dpDensityRadios = document.querySelectorAll('input[name="dp-density"]');
+const dpLabelModeRadios = document.querySelectorAll('input[name="dp-label-mode"]');
+const dpRegions = document.getElementById("dp-regions");
+const dpPointModeRadios = document.querySelectorAll('input[name="dp-point-mode"]');
+const dpSizeContrast = document.getElementById("dp-size-contrast");
+const dpSizeContrastN = document.getElementById("dp-size-contrast-n");
+const dpReset = document.getElementById("display-reset");
+
+function syncDisplayUI() {
+  dpBrightness.value = displaySettings.brightness;
+  dpBrightnessN.textContent = displaySettings.brightness.toFixed(2);
+  dpContrast.value = displaySettings.contrast;
+  dpContrastN.textContent = displaySettings.contrast.toFixed(2);
+  dpSaturation.value = displaySettings.saturation;
+  dpSaturationN.textContent = displaySettings.saturation.toFixed(2);
+  dpDensityRadios.forEach(r => { r.checked = Number(r.value) === displaySettings.labelDensity; });
+  dpLabelModeRadios.forEach(r => { r.checked = r.value === displaySettings.labelMode; });
+  dpRegions.checked = displaySettings.regionNames;
+  dpPointModeRadios.forEach(r => { r.checked = r.value === displaySettings.pointMode; });
+  dpSizeContrast.value = displaySettings.sizeContrast;
+  dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
+}
+syncDisplayUI();
+
+dpGear.addEventListener("click", () => {
+  const open = dpPanel.classList.toggle("open");
+  dpGear.setAttribute("aria-expanded", String(open));
+});
+
+dpBrightness.addEventListener("input", () => {
+  displaySettings.brightness = Number(dpBrightness.value);
+  dpBrightnessN.textContent = displaySettings.brightness.toFixed(2);
+  applyDisplayPaint();
+  saveDisplaySettings();
+});
+dpContrast.addEventListener("input", () => {
+  displaySettings.contrast = Number(dpContrast.value);
+  dpContrastN.textContent = displaySettings.contrast.toFixed(2);
+  applyDisplayPaint();
+  saveDisplaySettings();
+});
+dpSaturation.addEventListener("input", () => {
+  displaySettings.saturation = Number(dpSaturation.value);
+  dpSaturationN.textContent = displaySettings.saturation.toFixed(2);
+  applyDisplayPaint();
+  saveDisplaySettings();
+});
+dpDensityRadios.forEach(r => r.addEventListener("change", () => {
+  if (!r.checked) return;
+  displaySettings.labelDensity = Number(r.value);
+  saveDisplaySettings();
+  drawLabels();
+}));
+dpLabelModeRadios.forEach(r => r.addEventListener("change", () => {
+  if (!r.checked) return;
+  displaySettings.labelMode = r.value;
+  saveDisplaySettings();
+  drawLabels();
+}));
+dpRegions.addEventListener("change", () => {
+  displaySettings.regionNames = dpRegions.checked;
+  saveDisplaySettings();
+  drawRegions();
+});
+dpPointModeRadios.forEach(r => r.addEventListener("change", () => {
+  if (!r.checked) return;
+  displaySettings.pointMode = r.value;
+  saveDisplaySettings();
+  updateVectorPoints();
+  updateRasterOpacity();
+}));
+dpSizeContrast.addEventListener("input", () => {
+  displaySettings.sizeContrast = Number(dpSizeContrast.value);
+  dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
+  saveDisplaySettings();
+  applyVectorRadius();
+});
+dpReset.addEventListener("click", () => {
+  displaySettings = { ...DISPLAY_DEFAULTS };
+  try { localStorage.removeItem(DISPLAY_KEY); } catch { /* ignore storage errors */ }
+  syncDisplayUI();
+  applyDisplayPaint();
+  drawLabels();
+  drawRegions();
+  updateVectorPoints();
+  applyVectorRadius();
+  updateRasterOpacity();
+});
+
+let markers = [];
+let labelGen = 0;                    // invalidates stale in-flight redraws
+async function drawLabels() {
+  const gen = ++labelGen;
+  const z = map.getZoom();
+  // "hover only" mode (R9 labelMode) draws no regular author labels at any
+  // zoom -- the hover tooltip at HIT_ZOOM and region names are unaffected,
+  // this only ever clears/skips the .lbl markers this function itself owns.
+  if (displaySettings.labelMode === "hover" || z < 5.5) {
+    markers.forEach(m => m.remove()); markers = []; return;
+  }
+  const lz = Math.max(6, Math.min(9, Math.round(z)));
+  const lists = await Promise.all(visibleTiles(lz).map(([x, y]) => fetchTile(lz, x, y)));
+  if (gen !== labelGen) return;      // a newer call owns the markers now
+  markers.forEach(m => m.remove()); markers = [];
+  const entries = lists.filter(Boolean).flatMap(t => t.l);
+  entries.sort((a, b) => b[4] - a[4]);          // by citations desc
+  const placed = [];                            // screen-space rects
+  const baseCap = z >= 10 ? 150 : 60;
+  const cap = Math.round(baseCap * displaySettings.labelDensity);
+  for (const [name, id, xw, yw, cited] of entries) {
+    if (markers.length >= cap) break;
+    // Overlay dedupe (R9): an author already carrying an explicit overlay
+    // name tag (search highlight, path node, coauthor-ray endpoint) skips
+    // their regular label so the name never renders twice.
+    if (overlayLabeled(stripId(id))) continue;
+    const pt = map.project(toLngLat(xw, yw));
+    if (pt.x < -50 || pt.y < -20 || pt.x > innerWidth + 50 || pt.y > innerHeight + 20) continue;
+    const size = 11 + Math.min(6, Math.log10(1 + cited));       // 11-17 px
+    const w = name.length * size * 0.58, h = size + 6;
+    if (collides(placed, pt.x, pt.y, w, h)) continue;
+    placed.push({ x: pt.x, y: pt.y, w, h });
+    const el = document.createElement("div");
+    el.className = "lbl"; el.textContent = name;
+    el.style.fontSize = size + "px";
+    if (displaySettings.labelMode === "faint") el.classList.add("lbl-faint");
+    markers.push(new maplibregl.Marker({ element: el })
+      .setLngLat(toLngLat(xw, yw)).addTo(map));
+  }
+}
+
+let regions = [];
+fetch(DATA_BASE + "/data/regions.json").then(r => r.ok ? r.json() : []).catch(() => [])
+  .then(j => { regions = j; drawRegions(); });
+let regionMarkers = [];
+function drawRegions() {
+  regionMarkers.forEach(m => m.remove()); regionMarkers = [];
+  if (!displaySettings.regionNames) return;
+  const z = map.getZoom();
+  if (z > 8) return;
+  const sorted = [...regions].sort((a, b) => a.rank - b.rank);   // rank 1 first
+  const placed = [];                                             // screen-space rects
+  for (const r of sorted) {
+    // Task R10a: community isolate v1 -- while isolating, only that
+    // community's region name is ever shown.
+    if (isolateCommunity != null && r.community !== isolateCommunity) continue;
+    // Task R10a: global 2.3 floor keeps ANY region name (including rank 1,
+    // "Advancements in Battery Materials") off the initial ~z1.4 default
+    // view -- the old formula alone put rank 1 at zmin 1.5, visible from
+    // launch.
+    const zminByRank = Math.max(2.3, 1.5 + 1.2 * Math.log10(r.rank));
+    if (z < zminByRank) continue;
+    const pt = map.project(toLngLat(r.xw, r.yw));
+    if (pt.x < -50 || pt.y < -20 || pt.x > innerWidth + 50 || pt.y > innerHeight + 20) continue;
+    const size = 13 + 6 * Math.min(1, r.members / 1_000_000);
+    const w = r.name.length * size * 0.62, h = size + 6;
+    if (collides(placed, pt.x, pt.y, w, h)) continue;
+    placed.push({ x: pt.x, y: pt.y, w, h });
+    const el = document.createElement("div");
+    el.className = "region"; el.textContent = r.name;
+    el.style.fontSize = size + "px";
+    regionMarkers.push(new maplibregl.Marker({ element: el })
+      .setLngLat(toLngLat(r.xw, r.yw)).addTo(map));
+  }
+}
+
+// ---- Vector points (R8, extended to all zooms in R12b) ----
+// docs/superpowers/plans/2026-07-11-vector-points-experiment.md. Renders
+// author entries as a MapLibre GeoJSON circle layer, so points stay crisp
+// (resolution-independent) instead of relying on raster upscaling. Two zoom
+// regimes hand off at VECTOR_POINTS_MIN_ZOOM (see updateVectorPoints below):
+//   - z >= 10.25: the label-tile path reuses fetchTile/visibleTiles (the
+//     same z9 tiles labels/hover use), where a single tile already covers a
+//     large-enough screen area that the 4000/tile cap isn't a visible gap.
+//     Raster-opacity handoff at this threshold is owned by
+//     updateRasterOpacity() (see near safePaint), not this function.
+//   - z < 10.25 (R12b -- Eric: sizing was invisible here because raster
+//     pixels are fixed size, and isolate mode's shard dots "replicate that
+//     globally"): the global top_authors.json shard (50k, citation-sorted)
+//     renders instead, capped by shardCapForZoom same as isolate's
+//     per-community shard. In pointMode "both" the raster is NOT dimmed for
+//     this -- see updateRasterOpacity, whose "both"-mode vectorActive check
+//     stays gated on z >= VECTOR_POINTS_MIN_ZOOM, so this overlay only ever
+//     complements the raster there, never replaces it. R13: pointMode
+//     "vector" dims the raster to 0 at every zoom regardless (a separate,
+//     unconditional top-precedence branch in updateRasterOpacity), so at
+//     that point this same overlay IS the only dots layer visible below
+//     10.25 too.
+const VECTOR_POINTS_MIN_ZOOM = 10.25;
+// Hard cap on rendered features regardless of how many tiles are visible --
+// keeps the GeoJSON source (and MapLibre's rebuild of it) bounded on a very
+// zoomed-out-but-still->=10.25 view spanning many dense tiles. Entries are
+// sorted by citations desc first, so anything trimmed is always the
+// lowest-cited tail, not a random subset.
+const VECTOR_POINTS_CAP = 60000;
+// community (label-tile entry field 5, added by pipeline/build_index.py's
+// community column) -> raster palette hex, from legend.json's 37 big
+// communities (populated by the legend.json fetch below, async). Tail/unknown
+// communities (not one of the 37) and stale-cached label tiles from before
+// that field existed (entry[5] undefined) both fall back to this dust grey,
+// matching the raster's own tail-author color.
+const communityColors = new Map();
+const VECTOR_POINT_FALLBACK_COLOR = "#565660";
+
+// Shared layer-anchoring helper: returns the beforeId to pass to
+// map.addLayer so a new layer lands directly above `afterId` (which must
+// already exist in the style), pushing whatever previously sat right above
+// `afterId` up by one slot. Used to keep a fixed stack order -- dots <
+// vector-points < path-line/coauthor-rays (the latter two are always
+// appended with no beforeId, so they stay on top regardless).
+function beforeIdAbove(afterId) {
+  const layers = map.getStyle().layers;
+  const idx = layers.findIndex(l => l.id === afterId);
+  return idx >= 0 && idx + 1 < layers.length ? layers[idx + 1].id : undefined;
+}
+
+// community shard fetch (R10b: isolate-anywhere). Only one isolate is ever
+// active at a time, so the cache is small -- just enough to make re-isolating
+// a recently-viewed community free, same FIFO-cap pattern as the other
+// fetch caches in this file (tileCache/searchShardCache/infoCardCache).
+const communityShardCache = new Map();   // community id -> Promise<entries|null>; 404s cache as null
+async function fetchCommunityShard(community) {
+  if (!communityShardCache.has(community)) {
+    communityShardCache.set(community, fetch(DATA_BASE + `/data/index/communities/${community}.json`)
+      .then(r => r.ok ? r.json() : null)
+      .catch(() => null));
+    if (communityShardCache.size > 5) communityShardCache.delete(communityShardCache.keys().next().value);
+  }
+  return communityShardCache.get(community);
+}
+// Cheap heuristic cap on how many of the shard's (already cited-desc) top-20k
+// entries to render at a given zoom -- a few hundred at z1, thousands by z5,
+// the full shard well before z7 per the task spec.
+function shardCapForZoom(z) {
+  return Math.min(20000, Math.round(300 * Math.pow(4, z - 1)));
+}
+
+// Global top-authors shard (R12b): the mid-zoom (<10.25) counterpart of
+// isolate's per-community shard, fetched once and cached the same way
+// fetchCommunityShard is -- see updateVectorPoints' globalMidZoomActive
+// branch. Pre-sorted citations-desc by the pipeline, same as community
+// shards, so shardEntriesToFeatures' slice-from-the-front cap keeps the
+// highest-cited entries.
+let topAuthorsPromise = null;
+function fetchTopAuthors() {
+  if (!topAuthorsPromise) {
+    topAuthorsPromise = fetch(DATA_BASE + "/data/index/top_authors.json")
+      .then(r => r.ok ? r.json() : [])
+      .catch(() => []);
+  }
+  return topAuthorsPromise;
+}
+
+// ---- Task 9 (R9) / R10a / R11a: citation size contrast knob ----
+// The v1 circle-radius expression's inner sqrt(cited)-interpolate outputs a
+// "factor" around 1.0. `contrast` rescales that factor ASYMMETRICALLY around
+// 1.0 (R10a -- Eric: "stop making the smaller citation authors have a smaller
+// circle"):
+//   - stops at/above the floor (base >= 1): effectiveFactor =
+//     1 + (base - 1) * contrast for every contrast value, same as before --
+//     contrast 1.0 reproduces the original curve, 0 flattens to factor 1
+//     everywhere, and >1 amplifies without a ceiling (contrast 5 stretches
+//     the top stop to 1 + 3.0*5 = 16x).
+//   - stops below the floor (base < 1, i.e. the two small-author stops):
+//     effectiveFactor = base once contrast >= 1 -- they STOP shrinking past
+//     their original baseline as contrast increases, instead of continuing
+//     toward 0 like the old symmetric formula did. Below contrast 1 they still
+//     follow the same 1 + (base - 1) * contrast curve as everything else,
+//     so contrast 0 still flattens ALL stops (including these) to 1.
+// R11a recalibration (Eric: contrast changed single dots but not the overall
+// image -- root cause was the v1 stops starting at sqrt(cited)=70 (~5k
+// cited) while the median visible author sits around ~340 cited, so almost
+// every dot landed on the flat floor). Stops are now placed at the real
+// distribution instead: 0 -> 0.6, 18 (~330 cited) -> 0.85, 55 (~3k) -> 1.2,
+// 130 (~17k) -> 2.0, 250 (~60k) -> 3.0, 450 (~200k) -> 4.0. The pivot where
+// effectiveFactor == base (contrast 1.0, factor 1.0) now falls between the 18
+// and 55 stops at sqrt(cited) ~= 34 (~1.1k cited) -- the same "typical
+// author" neighborhood Eric estimated (~1.5k).
+// The final per-stop radius (after the zoom-outer multiply) is clamped to a
+// 0.7px floor via ["max", 0.7, ...] so a high contrast setting never shrinks
+// low-cited authors into invisibility. That max has to sit INSIDE each zoom
+// stop's output, not wrap the whole interpolate -- MapLibre only allows a
+// "zoom" expression as a top-level interpolate/step input (see the addLayer
+// comment above), so the zoom-interpolate must stay the outermost expression.
+// R12b: extended below 10.25 now that the global top_authors shard renders
+// at mid zooms too. Outer-multiply stops at z2 (1.2px) and z6 (1.8px) anchor
+// the low end so the contrast slider still has visible room to work with
+// well before the label-tile handoff, instead of clamping to the 10.25
+// anchor's 1.5px the whole way down; the existing z10.25/z11 stops (and
+// their R11a-tuned values) are unchanged.
+const VECTOR_RADIUS_BASE_FACTORS = [0.6, 0.85, 1.2, 2.0, 3.0, 4.0];   // R11a distribution-calibrated stop outputs, contrast 1.0
+const VECTOR_RADIUS_SQRT_STOPS = [0, 18, 55, 130, 250, 450];          // sqrt(cited) stops these factors sit at
+function vectorRadiusEffectiveFactor(base, contrast) {
+  if (base >= 1) return 1 + (base - 1) * contrast;
+  return contrast >= 1 ? base : 1 + (base - 1) * contrast;
+}
+function buildVectorRadiusExpression(contrast) {
+  const factorExpr = ["interpolate", ["linear"], ["sqrt", ["get", "cited"]]];
+  VECTOR_RADIUS_SQRT_STOPS.forEach((stop, i) => {
+    factorExpr.push(stop, vectorRadiusEffectiveFactor(VECTOR_RADIUS_BASE_FACTORS[i], contrast));
+  });
+  return [
+    "interpolate", ["linear"], ["zoom"],
+    2, ["max", 0.7, ["*", 1.2, factorExpr]],
+    6, ["max", 0.7, ["*", 1.8, factorExpr]],
+    10.25, ["max", 0.7, ["*", 1.5, factorExpr]],
+    11, ["max", 0.7, ["*", 3.5, factorExpr]],
+  ];
+}
+// Guarded by layer existence (not safePaint/styleReady) since vector-points
+// is a dynamically added/removed layer, not part of the initial style --
+// map.getLayer is itself the right pre-load guard here.
+function applyVectorRadius() {
+  if (map.getLayer("vector-points")) {
+    map.setPaintProperty("vector-points", "circle-radius", buildVectorRadiusExpression(displaySettings.sizeContrast));
+  }
+}
+
+let vectorGen = 0;           // invalidates stale in-flight tile/shard fetches (labelGen pattern)
+// community (label-tile/shard entry field 5) -> raster palette hex, resolved
+// here rather than inline everywhere it's needed. Tail/unknown communities
+// (not one of the 37) and stale-cached label tiles from before the
+// community-id rebuild landed (entry[5] undefined) both fall back to dust
+// grey, matching the raster's own tail-author color.
+function colorForCommunity(community) {
+  return communityColors.get(community) || VECTOR_POINT_FALLBACK_COLOR;
+}
+// R13: name, a bare (stripId'd) id, and community are carried in properties
+// too -- small memory cost -- so the sub-HIT_ZOOM hover/click path (see
+// hitTest below) can build an entry-like hit array straight from a
+// queryRenderedFeatures result without a second lookup, including the
+// community field openInfoCard's legend-row highlight needs. Every entry
+// source funneling through here carries community: label tiles and
+// top_authors.json both have it as field 5, and the isolate community-shard
+// branch fills it in as a constant before mapping. A genuinely-undefined
+// community (stale pre-community-rebuild cached tiles) simply drops out of
+// the serialized properties and reads back as undefined in hitTestVector --
+// the same "small community" fallback openInfoCard already handles. xw/yw
+// aren't stored redundantly; that path derives them back out of the
+// feature's own geometry instead (see hitTestVector).
+function entryToFeature([name, id, xw, yw, cited, community]) {
+  return {
+    type: "Feature",
+    geometry: { type: "Point", coordinates: toLngLat(xw, yw).toArray() },
+    properties: { cited, color: colorForCommunity(community), name, id: stripId(id), community },
+  };
+}
+// Shared by isolate mode's community-shard render and the R12b global
+// mid-zoom overlay -- "isolate mode without the filter and without the dim":
+// caps an already citations-desc-sorted entries list to shardCapForZoom(z)
+// and turns it into GeoJSON features.
+function shardEntriesToFeatures(entries, z) {
+  const cap = shardCapForZoom(z);
+  return entries.slice(0, cap).map(entryToFeature);
+}
+
+async function updateVectorPoints() {
+  const gen = ++vectorGen;
+  const z = map.getZoom();
+  // R13: pointMode "raster" suppresses every vector-point branch below EXCEPT
+  // shardActive (isolate's own shard dots, right below) -- see that branch's
+  // comment for why isolate keeps rendering even in "raster" mode.
+  const vectorActive = displaySettings.pointMode !== "raster" && z >= VECTOR_POINTS_MIN_ZOOM;
+  // R10b "isolate anywhere": below vector-points zoom, an active community
+  // isolate still renders its top-cited authors as points over the dimmed
+  // raster (see updateRasterOpacity's isolate branch, which is already
+  // zoom-independent) -- sourced from the community's shard file
+  // (build_community_shards' top-20k-by-citations roster) rather than z9
+  // label tiles. At/above VECTOR_POINTS_MIN_ZOOM the label-tile branch below
+  // already filters by community and has every author (not just the top
+  // 20k), so this branch only ever applies strictly below the threshold, and
+  // is independent of pointMode -- R13: including pointMode "raster". That is
+  // a deliberate choice, not an oversight: isolating a community is an
+  // explicit user action, and its shard dots are the only way to see who's
+  // in that community below vector zoom once the raster itself dims (raster
+  // isn't filterable per-community). "Raster" mode's contract is "no vector
+  // point layers by default", not "no vector points, ever" -- it doesn't
+  // reach into isolate's own explicit rendering. The deep-zoom label-tile
+  // isolate filter (vectorActive branch below) does NOT get this exemption --
+  // "raster" mode suppresses that one same as everything else, per spec.
+  const shardActive = isolateCommunity != null && z < VECTOR_POINTS_MIN_ZOOM;
+  setIsolateShardActive(shardActive);
+  // R12b: below vector-points zoom, when vector points are enabled and no
+  // isolate is active, render the global top_authors.json shard instead --
+  // gated on isolateCommunity == null so isolate always takes precedence
+  // when active (its dim + filter behavior is unchanged). Unlike shardActive,
+  // this DOES depend on pointMode (R13: not "raster"): it's the mode's own
+  // mid-zoom rendering, not an isolate side effect. updateRasterOpacity's
+  // vectorActive check stays gated on pointMode "both" AND z >=
+  // VECTOR_POINTS_MIN_ZOOM, so this path never dims the raster on its own --
+  // it only ever complements it (pointMode "vector" dims the raster
+  // separately, unconditionally, at the top of that resolver).
+  const globalMidZoomActive = displaySettings.pointMode !== "raster" && !vectorActive && isolateCommunity == null;
+  if (!vectorActive && !shardActive && !globalMidZoomActive) {
+    if (map.getLayer("vector-points")) map.removeLayer("vector-points");
+    if (map.getSource("vector-points")) map.removeSource("vector-points");
+    return;
+  }
+
+  let features;
+  if (shardActive) {
+    const shard = await fetchCommunityShard(isolateCommunity);
+    if (gen !== vectorGen) return;   // a newer call (isolate change/move/zoom) owns the source now
+    // Shard entries are [name, id, xw, yw, cited] (already cited-desc from
+    // the pipeline, no community field -- it's implicit in the shard file);
+    // community is filled in here to match the entry shape entryToFeature
+    // expects.
+    const entries = (shard || [])
+      .map(([name, id, xw, yw, cited]) => [name, id, xw, yw, cited, isolateCommunity]);
+    features = shardEntriesToFeatures(entries, z);
+  } else if (globalMidZoomActive) {
+    // top_authors.json entries already carry community (field 5), unlike
+    // community shards, so no remapping is needed before capping.
+    const entries = await fetchTopAuthors();
+    if (gen !== vectorGen) return;   // a newer call (toggle/move/zoom) owns the source now
+    features = shardEntriesToFeatures(entries, z);
+  } else {
+    const lists = await Promise.all(visibleTiles(9).map(([x, y]) => fetchTile(9, x, y)));
+    if (gen !== vectorGen) return;     // a newer call (toggle/move/zoom) owns the source now
+    let entries = lists.filter(Boolean).flatMap(t => t.l);
+    // Task R10a: community isolate v1 -- filters vector points to the isolated
+    // community. Only reached here once zoom >= VECTOR_POINTS_MIN_ZOOM, since
+    // shardActive above takes over below it.
+    if (isolateCommunity != null) {
+      entries = entries.filter(e => e[5] === isolateCommunity);
+    }
+    if (entries.length > VECTOR_POINTS_CAP) {
+      entries.sort((a, b) => b[4] - a[4]);           // cited desc
+      entries = entries.slice(0, VECTOR_POINTS_CAP); // keep the highest-cited, drop the tail
+    }
+    features = entries.map(entryToFeature);
+  }
+  const data = { type: "FeatureCollection", features };
+  const src = map.getSource("vector-points");
+  if (src) {
+    src.setData(data);
+  } else {
+    map.addSource("vector-points", { type: "geojson", data });
+  }
+  if (!map.getLayer("vector-points")) {
+    // Anchored directly above "dots", below whatever else already sits above
+    // that (path-line / coauthor-rays, when present) -- read the live style
+    // order via beforeIdAbove instead of hardcoding, since those overlay
+    // layers are added/removed dynamically by renderPath/drawCoauthorRays.
+    const beforeId = beforeIdAbove("dots");
+    map.addLayer({
+      id: "vector-points",
+      type: "circle",
+      source: "vector-points",
+      paint: {
+        // radius = (zoom-interpolated base px) * (sqrt(cited)-interpolated factor),
+        // so highly-cited authors render as visibly larger dots without the
+        // raster splat treatment. MapLibre only allows a "zoom" expression as
+        // the input of a top-level step/interpolate, so the zoom-interpolate
+        // has to be the outer expression, with the (zoom-independent)
+        // data-driven factor nested inside its stop outputs instead of the
+        // other way around -- a bare ["*", zoomInterpolate, dataInterpolate]
+        // throws "zoom expression may only be used... as a top-level
+        // interpolate" at addLayer time.
+        "circle-radius": buildVectorRadiusExpression(displaySettings.sizeContrast),
+        // color resolved per feature in JS (feature property "color", set
+        // above from communityColors) rather than a giant match expression --
+        // matches the raster palette's 37 big communities, dust grey fallback
+        // for the tail/unknown/undefined case.
+        "circle-color": ["get", "color"],
+        "circle-opacity": 0.9,
+        // R14b perf: zoom-interpolated instead of a flat 0.5 -- at low zoom
+        // (vector-only mode's 300k-point field) a 0.5px stroke is sub-pixel
+        // and invisible anyway, but GL still pays for a second stroke draw
+        // per circle. 0 below z6, ramping to the original 0.5 by z8 where
+        // circles are large enough for the stroke to actually read.
+        "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 6, 0, 8, 0.5],
+        "circle-stroke-color": "#0a0a0c",
+      },
+    }, beforeId);
+  }
+}
+
+// ---- Task R11a: legend camera padding ----
+// While the #legend details is open it covers a 230px-wide strip along the
+// right edge (see #legend's CSS width above); map.setPadding tells MapLibre's
+// camera math (centering, flyTo, fitBounds, and pan clamping at low zoom)
+// to treat that strip as off-canvas, so a fly-to near the right edge (or the
+// low-zoom world view) doesn't land a point the legend then covers. 260 (not
+// 230) leaves a small gap past the panel itself. No padding is needed on the
+// other edges -- only the legend overlaps map content.
+const legendEl = document.getElementById("legend");
+function applyLegendPadding() {
+  map.setPadding({ top: 0, bottom: 0, left: 0, right: legendEl.open ? 260 : 0 });
+}
+legendEl.addEventListener("toggle", applyLegendPadding);
+
+// ---- Task R10a: legend author highlight + community isolate v1 ----
+// legendCommunityRows holds a row for every legend.json entry (all 37 big
+// communities -- the full roster is rendered, the rows container scrolls),
+// so highlight/isolate reaches every colored community; the "grey dust" note
+// path below is only for genuinely-off-legend long-tail communities.
+const legendCommunityRows = new Map();   // community id -> legend row <button>
+const legendIsolatePill = document.getElementById("legend-isolate-pill");
+let legendHighlightGen = 0;              // invalidates a stale in-flight search-path resolve
+let legendActiveRow = null;              // row currently carrying .legend-active, or null
+let legendNoteRow = null;                // transient "small community" note row, or null
+
+function clearLegendHighlight() {
+  legendHighlightGen++;        // drop any in-flight highlightLegendForCoords resolve
+  if (legendActiveRow) { legendActiveRow.classList.remove("legend-active"); legendActiveRow = null; }
+  if (legendNoteRow) { legendNoteRow.remove(); legendNoteRow = null; }
+}
+
+// community: numeric community id, or null/undefined if unresolved. Shared by
+// both selection paths (info-card calls this directly with its hit entry's
+// community; the search path goes through highlightLegendForCoords below,
+// which resolves community first and then calls this).
+function highlightLegendCommunity(community) {
+  clearLegendHighlight();
+  const row = community != null ? legendCommunityRows.get(community) : undefined;
+  if (row) {
+    row.classList.add("legend-active");
+    row.scrollIntoView({ block: "nearest" });
+    legendActiveRow = row;
+  } else {
+    legendNoteRow = document.createElement("div");
+    legendNoteRow.className = "row legend-note";
+    legendNoteRow.textContent = "selected author: small community (grey dust)";
+    document.getElementById("legend-rows").prepend(legendNoteRow);
+    // #legend-rows scrolls (R10a follow-up), so bring the note into view the
+    // same way an active row is.
+    legendNoteRow.scrollIntoView({ block: "nearest" });
+  }
+}
+
+// z9 label-tile bucket math for a single (xw, yw) point -- same bucketing
+// visibleTiles uses for a viewport range, narrowed to the one tile a point
+// falls in. yw is stored as world y (1 - mercator y; see toLngLat above), so
+// the row index needs that same flip before scaling by n.
+function z9TileForPoint(xw, yw) {
+  const n = 1 << 9;
+  const tx = Math.min(n - 1, Math.max(0, Math.floor(xw * n)));
+  const ty = Math.min(n - 1, Math.max(0, Math.floor((1 - yw) * n)));
+  return [tx, ty];
+}
+
+// Search-path community resolution: search-shard entries don't carry
+// community (unlike hitTest's z9-tile hit entries used by openInfoCard), so
+// fetch the z9 label tile at this author's coords and match by id.
+async function highlightLegendForCoords(bareId, xw, yw) {
+  const gen = ++legendHighlightGen;
+  const [tx, ty] = z9TileForPoint(xw, yw);
+  const tile = await fetchTile(9, tx, ty);
+  if (gen !== legendHighlightGen) return;   // superseded by a newer selection/clear
+  const entry = tile && tile.l.find(e => stripId(e[1]) === bareId);
+  highlightLegendCommunity(entry ? entry[5] : null);
+}
+
+// ---- community isolate v1 ----
+// Session-only: NOT part of displaySettings, never persisted to localStorage.
+// Below vector zoom (< VECTOR_POINTS_MIN_ZOOM) the raster itself still isn't
+// filterable per-community, so the isolate there is the dimmed raster
+// (updateRasterOpacity) and the region-name filter (drawRegions) plus, as of
+// R10b, the isolated community's top-cited authors rendered as shard-sourced
+// vector points on top (see updateVectorPoints' shardActive branch).
+let isolateCommunity = null;   // community id currently isolated, or null
+let isolateRow = null;         // legend row currently carrying .legend-isolated, or null
+let isolateName = null;        // display name of the isolated community, for the pill text below
+// R10b: true while updateVectorPoints is rendering the isolate's
+// community-shard points (below VECTOR_POINTS_MIN_ZOOM) rather than the
+// dimmed-raster-only fallback -- drives the pill's "(top authors shown)"
+// suffix. Set synchronously by updateVectorPoints (before its first await),
+// so the suffix never lags a zoom crossing or a fresh isolate.
+let isolateShardActive = false;
+
+function updateIsolatePillText() {
+  const suffix = isolateShardActive ? " (top authors shown)" : "";
+  legendIsolatePill.textContent = `isolating: ${isolateName} - click again to exit${suffix}`;
+}
+function setIsolateShardActive(active) {
+  if (isolateShardActive === active) return;
+  isolateShardActive = active;
+  if (isolateCommunity != null) updateIsolatePillText();
+}
+
+function setIsolate(community, row, name) {
+  if (isolateRow) { isolateRow.classList.remove("legend-isolated"); isolateRow.setAttribute("aria-pressed", "false"); }
+  isolateCommunity = community;
+  isolateRow = row;
+  isolateName = name;
+  row.classList.add("legend-isolated");
+  row.setAttribute("aria-pressed", "true");
+  updateIsolatePillText();
+  legendIsolatePill.style.display = "block";
+  updateVectorPoints();
+  updateRasterOpacity();
+  drawRegions();
+}
+
+function clearIsolate() {
+  if (isolateRow) { isolateRow.classList.remove("legend-isolated"); isolateRow.setAttribute("aria-pressed", "false"); }
+  isolateCommunity = null;
+  isolateRow = null;
+  isolateName = null;
+  isolateShardActive = false;
+  legendIsolatePill.style.display = "none";
+  legendIsolatePill.textContent = "";
+  updateVectorPoints();
+  updateRasterOpacity();
+  drawRegions();
+}
+
+function toggleIsolateCommunity(community, row, name) {
+  if (isolateCommunity === community) clearIsolate();
+  else setIsolate(community, row, name);
+}
+
+fetch(DATA_BASE + "/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
+  .then(entries => {
+    // All 37 big communities go into the color map, so vector points match
+    // the raster palette regardless of which community a point belongs to.
+    for (const e of entries) {
+      if (e.community != null && e.color) communityColors.set(e.community, e.color);
+    }
+    const box = document.getElementById("legend-rows");
+    // Full roster (R10a follow-up): every legend.json entry gets a row -- the
+    // rows container scrolls, so highlight/isolate reaches all 37 colored
+    // communities instead of just the top 25.
+    for (const e of entries) {
+      // Task R10a: rows are now interactive (click to isolate), so they're
+      // real <button>s rather than <div>s -- keyboard-accessible for free
+      // (Tab focus, Enter/Space activation) instead of hand-rolling
+      // role="button" + a keydown handler.
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "row";
+      row.setAttribute("aria-pressed", "false");
+      const name = e.name || e.field || "Community " + e.community;
+      row.setAttribute("aria-label", `${name}, click to isolate`);
+      const sw = document.createElement("span");
+      sw.className = "sw"; sw.style.background = e.color;
+      const label = document.createElement("span");
+      label.textContent = name;
+      const n = document.createElement("span");
+      n.className = "n";
+      // R11a: >=950k rounds to "1.0M" under the old raw /1e6 formatter, which
+      // read as "0.0M" for anything under 50k members -- switch to k below 1M
+      // (rounded, no decimal) and only use M once the community is close
+      // enough to round to at least 1.0M.
+      n.textContent = e.members >= 950000 ? (e.members / 1e6).toFixed(1) + "M"
+        : e.members >= 1000 ? Math.round(e.members / 1000) + "k"
+        : String(e.members);
+      row.append(sw, label, n);
+      row.addEventListener("click", () => toggleIsolateCommunity(e.community, row, name));
+      box.appendChild(row);
+      legendCommunityRows.set(e.community, row);
+    }
+    // Vector points may have already rendered (grey fallback) before this
+    // fetch resolved -- e.g. pointMode defaults to "both" and the initial
+    // view is already >= VECTOR_POINTS_MIN_ZOOM -- so re-run once colors are known.
+    updateVectorPoints();
+  });
+
+// ---- Task 3 (night-polish): author info card on click ----
+// Instant content comes straight from the hit entry (name, citations); the
+// card then upgrades itself via a fetch to OpenAlex. infoCardGen guards that
+// fetch the same way labelGen/pathGen guard their async redraws: closing the
+// card (or opening a different one) bumps it, so a slow response for an
+// already-dismissed author can't write into a card that's since moved on.
+const infoCard = document.getElementById("info-card");
+const infoCardName = document.getElementById("info-card-name");
+const infoCardBody = document.getElementById("info-card-body");
+const infoCardClose = document.getElementById("info-card-close");
+const infoCardCoauthorsBtn = document.getElementById("info-card-coauthors");
+const infoCardOpenBtn = document.getElementById("info-card-open");
+const infoCardConnectBtn = document.getElementById("info-card-connect");
+const infoCardCopyBtn = document.getElementById("info-card-copy");
+
+const infoCardCache = new Map();     // bare id -> Promise<details|null>; cap 50, FIFO
+let infoCardGen = 0;
+let infoCardData = null;             // {bareId, fullUrl, name, xw, yw} for the open card's footer buttons
+let infoCardCopyTimer = null;
+
+function addInfoRow(key, value) {
+  const row = document.createElement("div");
+  row.className = "row";
+  const k = document.createElement("span");
+  k.className = "k"; k.textContent = key;
+  const v = document.createElement("span");
+  v.textContent = value;
+  row.append(k, v);
+  infoCardBody.appendChild(row);
+}
+
+function closeInfoCard() {
+  infoCardGen++;                     // any in-flight fetch for this card is now stale
+  infoCard.classList.remove("open");
+  infoCardBody.innerHTML = "";
+  infoCardData = null;
+  clearLegendHighlight();            // Task R10a: no card open -> no legend row highlighted
+}
+
+async function fetchAuthorDetails(bareId) {
+  if (!infoCardCache.has(bareId)) {
+    infoCardCache.set(bareId, fetch(`https://api.openalex.org/people/${bareId}?select=display_name,works_count,cited_by_count,summary_stats,last_known_institutions,topics`)
+      .then(r => r.ok ? r.json() : null)
+      .catch(() => null));
+    if (infoCardCache.size > 50) infoCardCache.delete(infoCardCache.keys().next().value);
+  }
+  return infoCardCache.get(bareId);
+}
+
+// hit entry shape: [name, id, xw, yw, cited, community] (hitTest reads z9
+// label tiles, same shape as updateVectorPoints' entries -- field 5 is
+// community, per pipeline/build_index.py).
+function openInfoCard(hit) {
+  const [name, rawId, xw, yw, cited, community] = hit;
+  const bareId = stripId(rawId);
+  // Same id-normalization as the old click handler: entries may already carry
+  // a full "https://openalex.org/..." id or a bare one.
+  const fullUrl = String(rawId).startsWith("http") ? rawId : "https://openalex.org/" + rawId;
+  infoCardData = { bareId, fullUrl, name, xw, yw };
+  const gen = ++infoCardGen;
+
+  infoCardName.textContent = name;
+  infoCardBody.innerHTML = "";
+  addInfoRow("Citations", cited.toLocaleString());
+  infoCard.classList.add("open");
+  // Task R10a: info-card selections already have community from the hit
+  // entry, unlike a search selection (see setSearchHighlight), so this skips
+  // the z9-tile-fetch resolve and highlights directly.
+  highlightLegendCommunity(community);
+
+  fetchAuthorDetails(bareId).then(data => {
+    if (gen !== infoCardGen) return;   // card closed, or replaced, since this fetch started
+    if (!data) { addInfoRow("Details", "couldn't load details"); return; }
+    const inst = data.last_known_institutions && data.last_known_institutions[0];
+    addInfoRow("Institution", inst ? inst.display_name : "unknown");
+    addInfoRow("Works", (data.works_count || 0).toLocaleString());
+    const hIndex = data.summary_stats ? data.summary_stats.h_index : null;
+    addInfoRow("h-index", hIndex != null ? hIndex : "-");
+    const topics = (data.topics || []).slice(0, 3).map(t => t.display_name).filter(Boolean);
+    if (topics.length) addInfoRow("Topics", topics.join(", "));
+  });
+}
+
+infoCardClose.addEventListener("click", closeInfoCard);
+
+// Escape handling for the card (and every other panel) lives in the single
+// document-level capture-phase priority chain at the bottom of this script
+// (Task 4: "keyboard shortcuts") -- info card is rung 1 of that chain.
+
+infoCardCoauthorsBtn.addEventListener("click", () => {
+  if (!infoCardData) return;
+  const { bareId, xw, yw } = infoCardData;
+  drawCoauthorRays(bareId, xw, yw);
+});
+
+infoCardOpenBtn.addEventListener("click", () => {
+  if (!infoCardData) return;
+  window.open(infoCardData.fullUrl, "_blank", "noopener");
+});
+
+infoCardConnectBtn.addEventListener("click", () => {
+  if (!infoCardData) return;
+  const { bareId, name, xw, yw } = infoCardData;
+  connectPanel.classList.add("open");
+  connectToggle.classList.add("active");
+  connectAInput.value = name;
+  connectA = { id: bareId, name, xw, yw };   // bare id, same shape createAuthorLookup's select() now hands to onSelect
+  pendingP = null;
+  connectBInput.focus();
+});
+
+infoCardCopyBtn.addEventListener("click", async () => {
+  if (!infoCardData) return;
+  const { bareId, name, xw, yw } = infoCardData;
+  setSearchHighlight(bareId, name, xw, yw);   // sets activeA and writes the hash, like a search select
+  const url = location.href;
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch {
+    prompt("Copy this link:", url);   // the prompt itself is the feedback
+    return;
+  }
+  clearTimeout(infoCardCopyTimer);
+  infoCardCopyBtn.textContent = "copied";
+  infoCardCopyTimer = setTimeout(() => { infoCardCopyBtn.textContent = "Copy link"; }, 1200);
+});
+
+const tip = document.getElementById("tip");
+// z >= HIT_ZOOM: label-tile hit test, unchanged from pre-R13 -- authoritative
+// at this zoom because the z9 tiles carry the FULL local population, not
+// just the top-cited subset the vector layer renders below HIT_ZOOM.
+async function hitTestTiles(pt) {
+  // Candidate tiles come from the four corners of the hit box, so dots just
+  // across a z9 tile boundary are still found (2-4 tiles worst case).
+  const n = 1 << 9, seen = new Set(), tiles = [];
+  for (const dx of [-HIT_RADIUS, HIT_RADIUS]) for (const dy of [-HIT_RADIUS, HIT_RADIUS]) {
+    const m = maplibregl.MercatorCoordinate.fromLngLat(
+      map.unproject([pt.x + dx, pt.y + dy]));
+    const tx = Math.min(n - 1, Math.max(0, Math.floor(m.x * n)));
+    const ty = Math.min(n - 1, Math.max(0, Math.floor(m.y * n)));  // label tiles are keyed by mercator y, same as visibleTiles
+    const k = `${tx}/${ty}`;
+    if (!seen.has(k)) { seen.add(k); tiles.push([tx, ty]); }
+  }
+  const lists = await Promise.all(tiles.map(([x, y]) => fetchTile(9, x, y)));
+  let best = null, bestD = HIT_RADIUS;
+  for (const t of lists) {
+    if (!t) continue;
+    for (const e of t.l) {
+      const p = map.project(toLngLat(e[2], e[3]));
+      const d = Math.hypot(p.x - pt.x, p.y - pt.y);
+      if (d < bestD) { bestD = d; best = e; }
+    }
+  }
+  return best;
+}
+// R13: z < HIT_ZOOM -- hover/click on whatever's actually rendered in the
+// "vector-points" layer (isolate's shard dots, the global mid-zoom overlay,
+// or nothing at all in pointMode "raster" with no isolate active), rather
+// than the old dead zone below HIT_ZOOM. Guarded on layer existence:
+// queryRenderedFeatures throws for a layer id absent from the current style,
+// and vector-points is added/removed dynamically (not part of the initial
+// style) depending on pointMode/isolate/zoom.
+// Small (12x12px) query box -- vector dots are small and can sit close
+// together at low zoom, so a tight box plus the nearest-of-candidates pick
+// below keeps the hit test precise instead of always grabbing whichever
+// feature happened to be drawn last.
+function hitTestVector(pt) {
+  if (!map.getLayer("vector-points")) return null;
+  const feats = map.queryRenderedFeatures(
+    [[pt.x - 6, pt.y - 6], [pt.x + 6, pt.y + 6]], { layers: ["vector-points"] });
+  if (feats.length === 0) return null;
+  let best = feats[0], bestD = Infinity;
+  for (const f of feats) {
+    const p = map.project(f.geometry.coordinates);
+    const d = Math.hypot(p.x - pt.x, p.y - pt.y);
+    if (d < bestD) { bestD = d; best = f; }
+  }
+  // Rebuilds the same [name, id, xw, yw, cited, community] shape hitTestTiles
+  // returns, so openInfoCard (including its legend-row community highlight)
+  // and the mousemove tooltip below don't need to know which path a hit came
+  // from. xw/yw come back out of the feature's own geometry (inverse of
+  // entryToFeature's toLngLat) rather than a duplicate stored property;
+  // name/id/cited/community come from the properties entryToFeature stored.
+  // A missing community property reads back as undefined here, which
+  // openInfoCard already maps to its "small community (grey dust)" legend
+  // note -- the same fallback the deep-zoom path uses for off-legend
+  // communities.
+  const [lng, lat] = best.geometry.coordinates;
+  const m = maplibregl.MercatorCoordinate.fromLngLat({ lng, lat });
+  const { name, id, cited, community } = best.properties;
+  return [name, id, m.x, 1 - m.y, cited, community];
+}
+// Single entry point for both the mousemove and click handlers below, so the
+// two hit-test paths never fight over cursor/tooltip/card state -- one
+// function owns the branch on zoom, callers stay unchanged.
+async function hitTest(pt) {
+  if (map.getZoom() >= HIT_ZOOM) return hitTestTiles(pt);
+  return hitTestVector(pt);
+}
+// R14b perf: hitTestVector's queryRenderedFeatures runs synchronously on the
+// main thread against the live "vector-points" layer -- cheap for one call,
+// but mousemove can fire far faster than the tile/shard path's async+cached
+// hitTestTiles ever does, and vector-only mode's 300k circles make each call
+// non-trivial. Two gates, mousemove-only (click below still calls hitTest
+// directly -- a click should always resolve against the current cursor
+// position, not a throttled/gated one):
+//   (a) skip outright while the camera is moving (map.isMoving()) -- no
+//       hover during pan/zoom, and a mid-gesture hit would be stale by the
+//       time it's rendered anyway.
+//   (b) otherwise throttle to at most one query per ~90ms, leading edge --
+//       reuse the last result for mousemove events inside the window rather
+//       than re-querying. Tooltip position still tracks the raw cursor every
+//       frame (set from ev.point below); only which-feature-is-hit lags up
+//       to 90ms, which reads as instant.
+let lastVectorHitTestAt = 0;
+let lastVectorHit = null;
+function hitTestVectorGated(pt) {
+  if (map.isMoving()) return null;
+  const now = Date.now();
+  if (now - lastVectorHitTestAt >= 90) {
+    lastVectorHitTestAt = now;
+    lastVectorHit = hitTestVector(pt);
+  }
+  return lastVectorHit;
+}
+async function mousemoveHitTest(pt) {
+  if (map.getZoom() >= HIT_ZOOM) return hitTestTiles(pt);
+  return hitTestVectorGated(pt);
+}
+map.on("mousemove", async ev => {
+  const hit = await mousemoveHitTest(ev.point);
+  map.getCanvas().style.cursor = hit ? "pointer" : "";
+  if (hit) {
+    tip.style.display = "block";
+    tip.style.left = (ev.point.x + 14) + "px";
+    tip.style.top = (ev.point.y + 14) + "px";
+    tip.textContent = `${hit[0]} - ${hit[4].toLocaleString()} citations`;
+  } else tip.style.display = "none";
+});
+map.on("click", async ev => {
+  const hit = await hitTest(ev.point);
+  if (!hit) return;
+  openInfoCard(hit);
+});
+map.on("load", () => {
+  styleReady = true;               // safePaint writes are safe from here on
+  // Smooth crossfade for every raster-opacity write updateRasterOpacity makes
+  // from here on (vector-points handoff, path dimming) -- set once, since
+  // it's a static paint config rather than a per-call value.
+  safePaint("raster-opacity-transition", { duration: 300 });
+  applyLegendPadding();            // R11a: legend starts open, so this applies the initial 260px right pad
+  if (initialHash && initialHash.view) {
+    const v = initialHash.view;
+    // parseHash already range-checks, but a throw here would kill the rest
+    // of the load handler (labels/regions/restore), so belt and braces.
+    try { map.jumpTo({ center: [v.lng, v.lat], zoom: v.zoom }); }
+    catch { /* keep the default view */ }
+  }
+  applyDisplayPaint();
+  drawLabels();
+  drawRegions();
+  updateVectorPoints();
+  updateRasterOpacity();
+  restoreFromHash(initialHash);   // async; resolves a=/p= independently of view restore
+});
+// ---- Task 5 (data-pipeline): live label/region updates while panning/zooming ----
+// "move" fires repeatedly for the whole duration of a gesture (pan, zoom,
+// pinch) unlike moveend/zoomend, which only fire once it settles -- without
+// this, author/region names from the pre-gesture view linger on screen until
+// the user's hand comes off the trackpad, most noticeably zooming out fast
+// from a deep zoom. Throttled (leading+trailing, ~180ms) so a fast gesture
+// doesn't spam drawLabels'/drawRegions' tile-fetch + collision-pack work on
+// every frame; leading-edge means the z < 5.5 label clear (see drawLabels)
+// still fires within one throttle window of crossing the threshold, not just
+// at gesture end. drawLabels is safe to call this often: labelGen makes a
+// superseded in-flight call a no-op, and the marker swap it does happen in
+// one synchronous block after its await, so there's no visible flicker.
+function throttle(fn, wait) {
+  let last = 0, timer = null, lastArgs = null;
+  return (...args) => {
+    lastArgs = args;
+    const now = Date.now();
+    const elapsed = now - last;
+    if (elapsed >= wait) {
+      last = now;
+      fn(...lastArgs);
+    } else if (!timer) {
+      timer = setTimeout(() => {
+        last = Date.now();
+        timer = null;
+        fn(...lastArgs);
+      }, wait - elapsed);
+    }
+  };
+}
+const throttledMoveRedraw = throttle(() => { drawLabels(); drawRegions(); updateVectorPoints(); updateRasterOpacity(); }, 180);
+map.on("move", throttledMoveRedraw);
+map.on("moveend", () => { drawLabels(); drawRegions(); writeHash(); });
+map.on("zoomend", () => { drawLabels(); drawRegions(); });
+
+// ---- Task 2 (night-polish): Share button ----
+const shareBtn = document.getElementById("share-btn");
+let shareBtnTimer = null;
+shareBtn.addEventListener("click", async () => {
+  writeHash();
+  const url = location.href;
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch {
+    prompt("Copy this link:", url);   // the prompt itself is the feedback
+    return;
+  }
+  clearTimeout(shareBtnTimer);
+  shareBtn.textContent = "copied";
+  shareBtnTimer = setTimeout(() => { shareBtn.textContent = "Share"; }, 1200);
+});
+
+// ---- Task 4 (night-polish): help overlay ----
+const helpBtn = document.getElementById("help-btn");
+const helpOverlay = document.getElementById("help-overlay");
+const helpClose = document.getElementById("help-close");
+
+function openHelp() { helpOverlay.classList.add("open"); }
+function closeHelp() { helpOverlay.classList.remove("open"); }
+function toggleHelp() { helpOverlay.classList.toggle("open"); }
+
+helpBtn.addEventListener("click", openHelp);
+helpClose.addEventListener("click", closeHelp);
+// Click-outside: only a click on the backdrop itself (not the card, which is
+// a child and thus a different ev.target) closes the overlay.
+helpOverlay.addEventListener("click", ev => { if (ev.target === helpOverlay) closeHelp(); });
+
+// ---- Task 4 (night-polish): keyboard shortcuts ----
+// Single document-level capture-phase listener -- the sole owner of Escape,
+// "/" and "?" for the whole page. Capture phase + stopPropagation on the
+// Escape branches means whichever rung handles a press is the only thing
+// that reacts to it, giving Escape a real priority order instead of every
+// open panel independently racing to consume the same keypress:
+//   1. info card       2. help overlay
+//   3. search dropdowns (top search box, then Connect A, then Connect B)
+//   4. focused Connect input holding a selection or leftover text
+//   5. active search highlight
+// This replaces the standalone info-card-only capture listener from Task 3
+// (see the comment left at its old call site) plus the per-input Escape
+// branches that used to live in searchInput's and createAuthorLookup's own
+// keydown handlers.
+document.addEventListener("keydown", ev => {
+  if (ev.key === "Escape") {
+    if (infoCard.classList.contains("open")) {
+      ev.preventDefault(); ev.stopPropagation();
+      closeInfoCard();
+    } else if (helpOverlay.classList.contains("open")) {
+      ev.preventDefault(); ev.stopPropagation();
+      closeHelp();
+    } else if (searchDropdown.classList.contains("open")) {
+      ev.preventDefault(); ev.stopPropagation();
+      searchDropdownEscape();
+    } else if (connectALookup.isOpen()) {
+      ev.preventDefault(); ev.stopPropagation();
+      connectALookup.escape();
+    } else if (connectBLookup.isOpen()) {
+      ev.preventDefault(); ev.stopPropagation();
+      connectBLookup.escape();
+    } else if (document.activeElement === connectAInput && (connectA || connectAInput.value)) {
+      // Dropdown-closed Escape in a Connect input still clears a selected
+      // author (or leftover text), matching the pre-Task-4 per-input
+      // behavior; escape() also fires onSelect(null) to null the selection.
+      ev.preventDefault(); ev.stopPropagation();
+      connectALookup.escape();
+    } else if (document.activeElement === connectBInput && (connectB || connectBInput.value)) {
+      ev.preventDefault(); ev.stopPropagation();
+      connectBLookup.escape();
+    } else if (activeA || rayMarkers.length || map.getSource("coauthor-rays")) {
+      // Rays drawn via the info card's Coauthors button never set activeA,
+      // so this rung also fires on bare rays; searchHighlightEscape clears
+      // both (clearSearchHighlight no-ops when there's no highlight marker).
+      ev.preventDefault(); ev.stopPropagation();
+      searchHighlightEscape();
+    } else if (isolateCommunity != null) {
+      // Task R10a: last rung -- Escape also exits a community isolate.
+      ev.preventDefault(); ev.stopPropagation();
+      clearIsolate();
+    }
+    return;
+  }
+  const tag = ev.target && ev.target.tagName;
+  const typing = tag === "INPUT" || tag === "TEXTAREA" || (ev.target && ev.target.isContentEditable);
+  if (ev.key === "/" && !typing) {
+    ev.preventDefault();
+    searchInput.focus();
+  } else if (ev.key === "?" && !typing) {
+    ev.preventDefault();
+    toggleHelp();
+  }
+}, true);
+</script>
+</body>
+</html>
