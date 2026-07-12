@@ -365,8 +365,12 @@
       <input id="dp-size-contrast" type="range" min="0" max="5" step="0.1" value="1.0">
     </div>
     <!-- R15b: experimental full-cloud WebGL layer -- session-only, never
-         persisted (see allPointsCloudOn below), so it always starts off. -->
-    <label class="dp-check">
+         persisted (see allPointsCloudOn below), so it always starts off.
+         A community isolate temporarily suppresses the cloud (it renders all
+         communities, contradicting the isolate contract); the checkbox stays
+         checked and the cloud comes back when the isolate ends -- see
+         syncPointCloudVisible. -->
+    <label class="dp-check" title="Renders all 8.6M authors (69MB download). Temporarily hidden while a community isolate is active.">
       <input id="dp-all-points" type="checkbox">
       All points (experimental)
     </label>
@@ -508,10 +512,14 @@ function safePaint(prop, v) {
 // ever set pathDimActive and call this -- they no longer touch raster-opacity
 // directly. Precedence (R13: pointMode replaces the old vectorPoints
 // checkbox; R15b: the experimental full point-cloud layer added a new
-// top-precedence case, see allPointsCloudOn below): allPointsCloudOn always
-// wins outright (same as pointMode "vector" -- the cloud renders every
-// author itself, so the raster splats underneath would just be redundant
-// double-drawing); otherwise pointMode "vector" always wins outright,
+// top-precedence case, see allPointsCloudOn below): the cloud, when
+// EFFECTIVELY on (checkbox on AND no active isolate -- an isolate suppresses
+// the cloud, see pointCloudEffectivelyOn), always wins outright (same as
+// pointMode "vector" -- the cloud renders every author itself, so the
+// raster splats underneath would just be redundant double-drawing); while
+// an isolate suppresses the cloud, the resolver falls through to the
+// pre-cloud precedence below, so the isolate's own 0.2 dim applies exactly
+// as with the cloud off; otherwise pointMode "vector" always wins outright,
 // forcing the raster fully out at every zoom (not just deep zoom) since that
 // mode's whole point is vector-only rendering; otherwise pointMode "both" at
 // deep zoom (zoom >= VECTOR_POINTS_MIN_ZOOM) fades the raster out the same
@@ -533,7 +541,7 @@ function updateRasterOpacity() {
   // Deliberate precedence: a drawn path's dim (0.45) wins over isolate's
   // deeper dim (0.2) when both are active, since the path is the fresher,
   // more specific intent and path drawing doesn't clear isolate state.
-  const opacity = allPointsCloudOn ? 0
+  const opacity = pointCloudEffectivelyOn() ? 0
     : displaySettings.pointMode === "vector" ? 0
     : vectorActive ? 0
     : pathDimActive ? 0.45
@@ -1922,7 +1930,23 @@ function applyVectorRadius() {
 // toggle after that just flips pointCloudLayer.visible (checked at the top
 // of render()) and calls map.triggerRepaint(), never touching the fetch/
 // upload path again. See setPointCloudActive below.
+//
+// Isolate interaction (R15b follow-up): an active community isolate
+// temporarily suppresses the cloud -- the cloud renders ALL communities, so
+// leaving it up would contradict the isolate's "only this community's dots"
+// contract (and the first cut's hiddenByCloud gate made it worse by ALSO
+// hiding the isolate's own filtered shard dots underneath it). Effective
+// visibility is therefore allPointsCloudOn && no active isolate
+// (pointCloudEffectivelyOn); isolate entry/exit re-syncs it via
+// syncPointCloudVisible without touching the checkbox, so the cloud comes
+// straight back when the isolate ends.
 let allPointsCloudOn = false;
+// isolateCommunity is declared with `let` further down this file (the R10a
+// isolate section); every caller of this function runs long after the whole
+// script has executed top-to-bottom, so the TDZ is never an issue.
+function pointCloudEffectivelyOn() {
+  return allPointsCloudOn && isolateCommunity == null;
+}
 
 // GLSL ES 1.00 (no #version pragma) -- valid under both a WebGL1 and a
 // WebGL2 context (MapLibre picks whichever the browser supports), per the
@@ -2116,9 +2140,18 @@ async function ensurePointCloudLoaded() {
   }
 }
 
+// Single owner of pointCloudLayer.visible: recomputes the effective
+// visibility (checkbox AND no active isolate) and repaints. Called on every
+// checkbox change (setPointCloudActive) and on every isolate entry/exit
+// (setIsolate/clearIsolate), so the cloud reacts to both without either
+// site duplicating the rule. O(1) -- a flag write + triggerRepaint.
+function syncPointCloudVisible() {
+  pointCloudLayer.visible = pointCloudEffectivelyOn();
+  map.triggerRepaint();
+}
+
 function setPointCloudActive(on) {
   allPointsCloudOn = on;
-  pointCloudLayer.visible = on;
   if (on) {
     if (!map.getLayer("point-cloud")) {
       // Anchored directly above "dots" -- if "vector-points" already sits
@@ -2128,9 +2161,12 @@ function setPointCloudActive(on) {
       // always appended with no beforeId, so they stay on top regardless.
       map.addLayer(pointCloudLayer, beforeIdAbove("dots"));
     }
+    // Checking the box during an active isolate still preloads the data
+    // (cheap head start); the cloud just stays suppressed until the isolate
+    // ends (pointCloudEffectivelyOn above).
     ensurePointCloudLoaded();   // no-op if already loaded/loading
   }
-  map.triggerRepaint();
+  syncPointCloudVisible();
   updateVectorPoints();   // hides the now-redundant capped GeoJSON overlay below 10.25
   updateRasterOpacity();  // dims the raster to 0 while the cloud is on
 }
@@ -2286,7 +2322,10 @@ async function updateVectorPoints() {
   // same "top authors" skeleton on top of each other. Deep zoom (>=10.25,
   // the authoritative full-population label-tile path + hover) is
   // unchanged: the cloud and the GeoJSON overlay simply coexist there.
-  const hiddenByCloud = allPointsCloudOn && z < VECTOR_POINTS_MIN_ZOOM;
+  // Gated on EFFECTIVE cloud visibility (pointCloudEffectivelyOn), not the
+  // raw checkbox: an active isolate suppresses the cloud, and the isolate's
+  // filtered shard dots must then render exactly as with the cloud off.
+  const hiddenByCloud = pointCloudEffectivelyOn() && z < VECTOR_POINTS_MIN_ZOOM;
 
   if (!vectorActive && !shardActive && !globalMidZoomActive) {
     setVectorPointsVisible(false);
@@ -2458,6 +2497,7 @@ function setIsolate(community, row, name) {
   row.setAttribute("aria-pressed", "true");
   updateIsolatePillText();
   legendIsolatePill.style.display = "block";
+  syncPointCloudVisible();   // R15b: isolate suppresses the experimental cloud (checkbox untouched)
   updateVectorPoints();
   updateRasterOpacity();
   drawRegions();
@@ -2471,6 +2511,7 @@ function clearIsolate() {
   isolateShardActive = false;
   legendIsolatePill.style.display = "none";
   legendIsolatePill.textContent = "";
+  syncPointCloudVisible();   // R15b: restore the cloud if its checkbox is still on
   updateVectorPoints();
   updateRasterOpacity();
   drawRegions();
