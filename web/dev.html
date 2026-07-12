@@ -2176,22 +2176,70 @@ function setPointCloudStatus(text) { pointCloudStatusEl.textContent = text || ""
 // is ready -- see the R17 comment there.
 dpAllPoints.checked = displaySettings.allPoints;
 
-// Fetches both .bin files in parallel, then uploads in POINT_CLOUD_CHUNKS
-// progressive slices via bufferSubData into one full-size-allocated buffer
-// pair -- loadedCount grows after each slice and triggerRepaint() draws the
-// partially-uploaded cloud immediately, so (since points are cited-desc) the
-// most important "skeleton" of the map appears first. Guarded so this ever
-// only runs once per session (loaded/loading flags) -- every toggle after
-// the first is pointCloudLayer.visible flip only, see setPointCloudActive.
+// Streams a fetch response via its reader instead of response.arrayBuffer(),
+// so the caller can observe download progress (arrayBuffer() only resolves
+// once the whole body is in, which on the throttled public endpoint makes a
+// 90-300s download look hung). onBytes(receivedBytesForThisFetch) fires after
+// every chunk. Sizes the accumulator from Content-Length when present;
+// without it (e.g. a compressed/chunked response with no length header)
+// falls back to collecting chunks in an array and concatenating at the end.
+async function fetchWithProgress(url, onBytes) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`fetch ${url} failed: ${r.status}`);
+  const reader = r.body.getReader();
+  const declaredLen = Number(r.headers.get("Content-Length")) || 0;
+  const target = declaredLen > 0 ? new Uint8Array(declaredLen) : null;
+  const chunks = target ? null : [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (target) {
+      target.set(value, received);
+    } else {
+      chunks.push(value);
+    }
+    received += value.length;
+    onBytes(received);
+  }
+  if (target) return target.buffer.slice(0, received);
+  const out = new Uint8Array(received);
+  let offset = 0;
+  for (const c of chunks) { out.set(c, offset); offset += c.length; }
+  return out.buffer;
+}
+
+// Fetches both .bin files with streamed progress, then uploads in
+// POINT_CLOUD_CHUNKS progressive slices via bufferSubData into one
+// full-size-allocated buffer pair -- loadedCount grows after each slice and
+// triggerRepaint() draws the partially-uploaded cloud immediately, so (since
+// points are cited-desc) the most important "skeleton" of the map appears
+// first. Guarded so this ever only runs once per session (loaded/loading
+// flags) -- every toggle after the first is pointCloudLayer.visible flip
+// only, see setPointCloudActive. On failure the guard is reset (loading ->
+// false in the finally, loaded never set) so a later toggle-off/toggle-on
+// retries the fetch from scratch.
 const POINT_CLOUD_CHUNKS = 8;
+const POINT_CLOUD_TOTAL_BYTES = 67043648;   // combined size of both .bin files, for the progress denominator
 async function ensurePointCloudLoaded() {
   if (pointCloudLayer.loaded || pointCloudLayer.loading) return;
   pointCloudLayer.loading = true;
-  setPointCloudStatus("loading 8.6M points (69MB)…");
+  setPointCloudStatus("loading 8.4M points… 0 of 64MB");
   try {
+    const receivedByFile = [0, 0];
+    let lastStatusUpdate = 0;
+    const onBytes = (i) => (n) => {
+      receivedByFile[i] = n;
+      const now = performance.now();
+      if (now - lastStatusUpdate < 250) return;   // throttle to ~4x/second
+      lastStatusUpdate = now;
+      const total = receivedByFile[0] + receivedByFile[1];
+      const mb = (bytes) => (bytes / 1048576).toFixed(1);
+      setPointCloudStatus(`loading 8.4M points… ${mb(total)} of ${mb(POINT_CLOUD_TOTAL_BYTES)}MB`);
+    };
     const [posBuf, attrBuf] = await Promise.all([
-      fetch(DATA_BASE + "/data/vector_experiment/positions.bin").then(r => r.arrayBuffer()),
-      fetch(DATA_BASE + "/data/vector_experiment/attrs.bin").then(r => r.arrayBuffer()),
+      fetchWithProgress(DATA_BASE + "/data/vector_experiment/positions.bin", onBytes(0)),
+      fetchWithProgress(DATA_BASE + "/data/vector_experiment/attrs.bin", onBytes(1)),
     ]);
     const count = Math.min(posBuf.byteLength, attrBuf.byteLength) >>> 2;   // 4 bytes/point in both files
     pointCloudLayer.totalCount = count;
@@ -2226,8 +2274,18 @@ async function ensurePointCloudLoaded() {
     pointCloudLayer.loaded = true;
     setPointCloudStatus("");
   } catch (err) {
-    setPointCloudStatus("failed to load point cloud");
+    setPointCloudStatus("point cloud failed to load - toggle to retry");
     console.error("point-cloud load failed:", err);
+    // Restore the checkbox to unchecked and persist that so a reload doesn't
+    // come back up in a "checked but not actually loaded" state. Programmatic
+    // checked= doesn't fire "change", so setPointCloudActive is called
+    // directly to also flip the layer off; ensurePointCloudLoaded's own
+    // loaded/loading guard (loading -> false below, loaded never set) is what
+    // lets the next check-the-box retry actually refetch.
+    dpAllPoints.checked = false;
+    displaySettings.allPoints = false;
+    saveDisplaySettings();
+    setPointCloudActive(false);
   } finally {
     pointCloudLayer.loading = false;
   }
