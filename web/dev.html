@@ -366,15 +366,16 @@
       <div class="dp-row-head"><label for="dp-size-contrast">Citation size contrast</label><span id="dp-size-contrast-n" class="n"></span></div>
       <input id="dp-size-contrast" type="range" min="0" max="5" step="0.1" value="1.0">
     </div>
-    <!-- R15b: experimental full-cloud WebGL layer -- session-only, never
-         persisted (see allPointsCloudOn below), so it always starts off.
-         A community isolate temporarily suppresses the cloud (it renders all
+    <!-- R17: full-cloud WebGL layer, graduated from the R15b experiment --
+         persisted as displaySettings.allPoints (default off, see
+         DISPLAY_DEFAULTS), so a visitor who turns it on keeps it on. A
+         community isolate temporarily suppresses the cloud (it renders all
          communities, contradicting the isolate contract); the checkbox stays
          checked and the cloud comes back when the isolate ends -- see
          syncPointCloudVisible. -->
     <label class="dp-check" title="Renders all 8.6M authors (69MB download), below zoom 10.25; the precise interactive layer takes over deeper. Temporarily hidden while a community isolate is active.">
       <input id="dp-all-points" type="checkbox">
-      All points (experimental)
+      All points
     </label>
     <div id="dp-all-points-status"></div>
     <button id="display-reset" type="button">Reset</button>
@@ -474,6 +475,11 @@ if (initialHash) {
   if (initialHash.a) pendingA = stripId(initialHash.a);
   if (initialHash.p) pendingP = initialHash.p.map(stripId);
 }
+
+// R17: remote R2-hosted tiles have higher per-request latency than the old
+// same-origin dev server, so more in-flight requests keeps the raster/vector
+// tile pipeline fed (default is 16).
+maplibregl.setMaxParallelImageRequests(32);
 
 const map = new maplibregl.Map({
   container: "map",
@@ -1523,7 +1529,11 @@ function collides(placed, x, y, w, h) {
 // Sliders only ever touch brightness/contrast/saturation; raster-opacity stays
 // owned by updateRasterOpacity() (see near safePaint above), which renderPath/
 // clearPath and the vector-points toggle all defer to, so the three stay orthogonal.
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 1.0 };
+// R17: allPoints defaults to false -- the full point-cloud fetch is 69MB, so
+// a public visitor has to opt in rather than have it silently kick off on
+// their first page load just because a previous session (or the default
+// itself) turned it on.
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 1.0, allPoints: false };
 const DISPLAY_KEY = "mapademic.display";
 
 // R12b: a stale localStorage value still carrying the removed "boundaries"
@@ -1671,6 +1681,13 @@ dpReset.addEventListener("click", () => {
   updateVectorPoints();
   applyVectorRadius();
   updateRasterOpacity();
+  // R17: allPoints resets to false too -- sync the checkbox and turn the
+  // cloud off if it was on. This just hides the layer (pointCloudLayer.visible
+  // -> false via setPointCloudActive); any already-fetched buffers stay
+  // cached in memory for the rest of the session, same as an ordinary
+  // uncheck.
+  dpAllPoints.checked = displaySettings.allPoints;
+  setPointCloudActive(displaySettings.allPoints);
   // R16: reset can change sizeContrast too -- same live-repaint need as the
   // slider's own input handler above.
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
@@ -1916,7 +1933,7 @@ function applyVectorRadius() {
   }
 }
 
-// ---- R15b: experimental full-cloud WebGL point layer ----
+// ---- R15b/R17: full-cloud WebGL point layer ----
 // docs/superpowers/plans/2026-07-11-vector-points-experiment.md's v1
 // candidate list. Renders all 8,587,906 authors as a single WebGL
 // gl.POINTS draw via a MapLibre CustomLayerInterface layer ("point-cloud"),
@@ -1927,11 +1944,14 @@ function applyVectorRadius() {
 // r/g/b/s arrays, points pre-sorted cited-desc so a partial upload already
 // draws the "important" skeleton first.
 //
-// Session-only toggle: allPointsCloudOn is deliberately NOT part of
-// displaySettings/DISPLAY_DEFAULTS and never persisted (same reasoning as
-// isolateCommunity above) -- an experimental 69MB fetch should never
-// silently re-trigger on a fresh page load just because a prior session left
-// it checked.
+// allPointsCloudOn itself stays a plain in-memory flag, same as before R17 --
+// it is not written to localStorage directly. What changed in R17 is that it
+// is now seeded from the persisted displaySettings.allPoints (default false,
+// see DISPLAY_DEFAULTS) in the map "load" handler below, and the checkbox's
+// change handler writes back to displaySettings.allPoints/saveDisplaySettings
+// so the choice survives a reload. isolateCommunity (below) remains
+// deliberately unpersisted -- that one is a transient view, not a user
+// preference like allPoints.
 //
 // Toggle cost is O(1) after the first enable: the custom layer is added to
 // the map lazily on first enable (compiling its program + allocating its two
@@ -2148,6 +2168,13 @@ const pointCloudLayer = {
 const dpAllPoints = document.getElementById("dp-all-points");
 const pointCloudStatusEl = document.getElementById("dp-all-points-status");
 function setPointCloudStatus(text) { pointCloudStatusEl.textContent = text || ""; }
+// R17: dpAllPoints doesn't exist yet at syncDisplayUI's own definition/first
+// call further up the file (it's declared here, after pointCloudLayer), so
+// its initial checkbox state is set directly here instead of from inside
+// syncDisplayUI. The actual cloud enable (fetch + layer add) happens later,
+// in the map "load" handler, once setPointCloudActive exists and the style
+// is ready -- see the R17 comment there.
+dpAllPoints.checked = displaySettings.allPoints;
 
 // Fetches both .bin files in parallel, then uploads in POINT_CLOUD_CHUNKS
 // progressive slices via bufferSubData into one full-size-allocated buffer
@@ -2236,7 +2263,13 @@ function setPointCloudActive(on) {
   updateVectorPoints();   // hides the now-redundant capped GeoJSON overlay below 10.25
   updateRasterOpacity();  // dims the raster to 0 while the cloud is on
 }
-dpAllPoints.addEventListener("change", () => setPointCloudActive(dpAllPoints.checked));
+dpAllPoints.addEventListener("change", () => {
+  // R17: persist the choice (default false, see DISPLAY_DEFAULTS) before
+  // acting on it, same order as the other dp* listeners.
+  displaySettings.allPoints = dpAllPoints.checked;
+  saveDisplaySettings();
+  setPointCloudActive(dpAllPoints.checked);
+});
 
 // R15c: the actual GL recovery lives in pointCloudLayer.onAdd (it replays
 // automatically -- see the comment above onAdd for why). These two listeners
@@ -2914,6 +2947,13 @@ map.on("load", () => {
     catch { /* keep the default view */ }
   }
   setupVectorPointsLayer();        // R15b Part 2: persistent empty source+layer, created once here
+  // R17: if the persisted setting is on, run it through the exact same
+  // enable path a checkbox click uses (must come after setupVectorPointsLayer
+  // -- see setPointCloudActive's "vector-points" beforeId comment). This is
+  // what starts the 69MB fetch "lazily" -- it only ever runs once, on the
+  // first effective enable, whether that's this load-time call or a later
+  // manual check; ensurePointCloudLoaded's loaded/loading guard is unchanged.
+  if (displaySettings.allPoints) setPointCloudActive(true);
   applyDisplayPaint();
   drawLabels();
   drawRegions();
