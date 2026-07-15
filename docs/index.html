@@ -124,7 +124,10 @@
                  pointer-events: none; }
     .path-dot { width: 10px; height: 10px; border-radius: 50%;
                 background: #7fae8e; border: 2px solid #7fae8e; box-sizing: border-box; }
-    .path-node.ghost .path-dot { background: transparent; }
+    /* R19: fill is overridden per-marker (see renderPath) to the hop's
+       community color; ghost ring stays grey hollow regardless of any
+       neighboring hop's color, matching its "not a real position" meaning. */
+    .path-node.ghost .path-dot { background: transparent; border-color: #888; }
     .path-label { color: #fff; font: 12px system-ui; text-shadow: 0 0 4px #000, 0 0 8px #000;
                   white-space: nowrap; margin-top: 2px; }
     /* ---- Task 3 (search-v2): coauthor ray endpoint markers ---- */
@@ -226,6 +229,8 @@
                         color: #ddd; font: 12px system-ui; border: 1px solid transparent; }
     #path-hops .hop:hover { background: #ffffff1a; }
     #path-hops .hop .hop-i { color: #888; flex: none; width: 18px; text-align: right; }
+    /* R19: hop-list community swatch, same shape as the legend's .sw. */
+    #path-hops .hop .hop-sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
     #path-hops .hop .hop-name { flex: 1; }
     #path-hops .hop .hop-ghost { color: #888; font-size: 10px; flex: none; }
   </style>
@@ -292,9 +297,11 @@
         <h3>Controls</h3>
         <ul>
           <li>Search finds one researcher and draws rays to their top
-            coauthorships.</li>
+            coauthorships, colored by community membership - a ray's
+            gradient means it crosses between fields.</li>
           <li>Connect finds the shortest coauthor path between two
-            researchers via the degree-of-separation engine.</li>
+            researchers via the degree-of-separation engine, colored the
+            same way hop to hop.</li>
           <li>Hover a dot at deep zoom to see the author's name and
             citations; click it for full details.</li>
           <li>Share copies a link to the exact view.</li>
@@ -1165,16 +1172,20 @@ let pathGen = 0;                     // invalidates stale in-flight renders (lab
 // One row per point renderPath actually drew (same array, same order), so a
 // hop click always flies to a position that's really on the map.
 function clearHopList() { pathHopsEl.innerHTML = ""; }
-function renderHopList(points) {
+// hopColors: same length/order as points (R19) -- each hop's resolved
+// community color, feeding the small swatch dot before its name.
+function renderHopList(points, hopColors) {
   clearHopList();
   points.forEach((p, i) => {
     const row = document.createElement("div");
     row.className = "hop";
     const idx = document.createElement("span");
     idx.className = "hop-i"; idx.textContent = String(i + 1);
+    const sw = document.createElement("span");
+    sw.className = "hop-sw"; sw.style.background = hopColors[i];
     const name = document.createElement("span");
     name.className = "hop-name"; name.textContent = p.name;
-    row.append(idx, name);
+    row.append(idx, sw, name);
     if (p.ghost) {
       const ghost = document.createElement("span");
       ghost.className = "hop-ghost"; ghost.textContent = "ghost";
@@ -1199,6 +1210,7 @@ function clearPath() {
   }
   clearHopList();
   if (map.getLayer("path-line")) map.removeLayer("path-line");
+  if (map.getLayer("path-line-casing")) map.removeLayer("path-line-casing");
   if (map.getSource("path")) map.removeSource("path");
   pathDimActive = false;
   updateRasterOpacity();
@@ -1224,6 +1236,17 @@ async function renderPath(pathSteps, hops, idA, idB) {
   const points = resolved.filter(Boolean);
   if (points.length < 2) { setPathStatus(`${hops} hops (too few resolved to draw)`); return; }
 
+  // R19: resolve every hop's community color up front -- ghosts (interpolated
+  // positions with no real z9-tile entry) resolve to null and fall back to
+  // grey directly, same fallback dust/tail authors get elsewhere; feeds the
+  // segment gradients, hop node markers, and hop-list swatches below so all
+  // three agree. Guarded by pathGen like resolvePathCoords above.
+  const hopColors = await Promise.all(points.map(p =>
+    p.ghost ? Promise.resolve(VECTOR_POINT_FALLBACK_COLOR)
+            : resolveCommunityColor(stripId(p.id), p.xw, p.yw).then(c => c || VECTOR_POINT_FALLBACK_COLOR)
+  ));
+  if (gen !== pathGen) return;       // a newer Go/Clear owns the overlay now
+
   // One visual mode at a time: a path about to draw takes over the highlight
   // slot, so drop any active search highlight (and its rays) first -- covers
   // the case where the searched author is also an endpoint/hop of this path,
@@ -1233,25 +1256,38 @@ async function renderPath(pathSteps, hops, idA, idB) {
   clearSearchAndRays();
 
   const coords = points.map(p => toLngLat(p.xw, p.yw).toArray());
+  const features = [];
+  for (let i = 0; i < coords.length - 1; i++) {
+    features.push(...gradientSegmentFeatures(coords[i], coords[i + 1], hopColors[i], hopColors[i + 1]));
+  }
   map.addSource("path", {
     type: "geojson",
-    data: { type: "Feature", geometry: { type: "LineString", coordinates: coords } },
+    data: { type: "FeatureCollection", features },
+  });
+  // Casing first so the colored line lands above it (both addLayer calls
+  // append with no beforeId, so add order is the stacking order).
+  map.addLayer({
+    id: "path-line-casing", type: "line", source: "path",
+    paint: { "line-color": "#0a0a0c", "line-width": 5, "line-opacity": 0.5 },
   });
   map.addLayer({
     id: "path-line", type: "line", source: "path",
+    // R19: community-gradient path replaces the flat green line -- color is
+    // per-segment (see gradientSegmentFeatures), not per-layer.
     paint: {
-      "line-color": "#7fae8e", "line-width": 2.5,
+      "line-color": ["get", "color"], "line-width": 3,
       "line-blur": 1.5, "line-opacity": 0.9,
     },
   });
 
-  renderHopList(points);
+  renderHopList(points, hopColors);
 
-  pathMarkers = points.map(p => {
+  pathMarkers = points.map((p, i) => {
     const el = document.createElement("div");
     el.className = "path-node" + (p.ghost ? " ghost" : "");
     const dot = document.createElement("div");
     dot.className = "path-dot";
+    if (!p.ghost) dot.style.background = hopColors[i];   // R19: hop's community color; ghost keeps its hollow ring
     const label = document.createElement("div");
     label.className = "path-label";
     label.textContent = p.name;
@@ -1348,6 +1384,7 @@ function clearRays() {
     drawLabels();       // regular labels for these authors may now reappear
   }
   if (map.getLayer("coauthor-rays")) map.removeLayer("coauthor-rays");
+  if (map.getLayer("coauthor-rays-casing")) map.removeLayer("coauthor-rays-casing");
   if (map.getSource("coauthor-rays")) map.removeSource("coauthor-rays");
   setSearchStatus("");
 }
@@ -1405,18 +1442,36 @@ async function drawCoauthorRays(bareId, xw, yw) {
     if (gen !== searchRayGen) return;
 
     const from = toLngLat(xw, yw).toArray();
-    const features = [];
-    const endpoints = [];
+    const hits = [];   // {c, xw, yw} for every coauthor actually resolved on-map
     let offMap = 0;
     coauthors.forEach((c, i) => {
       const m = buckets[i];
       const hit = m ? m.get(stripId(c.id)) : null;
       if (!hit) { offMap++; return; }
-      features.push({
-        type: "Feature",
-        geometry: { type: "LineString", coordinates: [from, toLngLat(hit[0], hit[1]).toArray()] },
-      });
-      endpoints.push({ xw: hit[0], yw: hit[1], name: c.name, id: stripId(c.id) });
+      hits.push({ c, xw: hit[0], yw: hit[1] });
+    });
+
+    // R19: origin color reuses the legend highlight's already-resolved value
+    // when it's for this same author (true for all three drawCoauthorRays
+    // callers -- search select, info-card Coauthors, and hash restore --
+    // since each sets the legend highlight for this exact id right before
+    // calling in); otherwise (still in flight, or a race) resolve fresh. Up
+    // to `hits.length` (<= 25) further cached z9-tile fetches resolve the
+    // endpoints, guarded by searchRayGen like every other await here.
+    const originColorP = bareId === legendHighlightedId && legendHighlightedColor
+      ? Promise.resolve(legendHighlightedColor)
+      : resolveCommunityColor(bareId, xw, yw).then(c => c || VECTOR_POINT_FALLBACK_COLOR);
+    const [originColor, endpointColors] = await Promise.all([
+      originColorP,
+      Promise.all(hits.map(h => resolveCommunityColor(stripId(h.c.id), h.xw, h.yw).then(c => c || VECTOR_POINT_FALLBACK_COLOR))),
+    ]);
+    if (gen !== searchRayGen) return;
+
+    const features = [];
+    const endpoints = hits.map((h, i) => {
+      const color = endpointColors[i];
+      features.push(...gradientSegmentFeatures(from, toLngLat(h.xw, h.yw).toArray(), originColor, color));
+      return { xw: h.xw, yw: h.yw, name: h.c.name, id: stripId(h.c.id), color };
     });
 
     if (features.length) {
@@ -1424,10 +1479,19 @@ async function drawCoauthorRays(bareId, xw, yw) {
         type: "geojson",
         data: { type: "FeatureCollection", features },
       });
+      // Casing first so the colored line lands above it (both addLayer calls
+      // append with no beforeId, so add order is the stacking order) -- see
+      // beforeIdAbove's comment above for why path-line/coauthor-rays always
+      // stay on top of vector-points/point-cloud regardless.
+      map.addLayer({
+        id: "coauthor-rays-casing", type: "line", source: "coauthor-rays",
+        paint: { "line-color": "#0a0a0c", "line-width": 4, "line-opacity": 0.5 },
+      });
       map.addLayer({
         id: "coauthor-rays", type: "line", source: "coauthor-rays",
-        // R11a: white instead of the green accent -- see .coauthor-dot above.
-        paint: { "line-color": "#e9ecf1", "line-width": 1.2, "line-opacity": 0.55 },
+        // R19: community-gradient rays replace the flat white/green line --
+        // color is per-segment (see gradientSegmentFeatures), not per-layer.
+        paint: { "line-color": ["get", "color"], "line-width": 2, "line-opacity": 0.55 },
       });
     }
 
@@ -1436,6 +1500,7 @@ async function drawCoauthorRays(bareId, xw, yw) {
       el.className = "coauthor-node";
       const dot = document.createElement("div");
       dot.className = "coauthor-dot";
+      dot.style.background = p.color;   // R19: endpoint's community color; border/stroke unchanged
       const label = document.createElement("div");
       label.className = "coauthor-label";
       label.textContent = p.name;
@@ -2474,6 +2539,49 @@ let vectorGen = 0;           // invalidates stale in-flight tile/shard fetches (
 function colorForCommunity(community) {
   return communityColors.get(community) || VECTOR_POINT_FALLBACK_COLOR;
 }
+
+// ---- R19: community-gradient rays and paths ----
+// MapLibre's line-gradient paint property is per-LAYER (one gradient shared
+// by every feature in the source), not per-feature, so a real per-ray/per-hop
+// gradient needs the line built as many short, individually-colored segment
+// features instead -- lineMetrics/line-gradient are deliberately not used
+// anywhere below. hexToRgb/rgbToHex/lerpColor are plain sRGB channel lerp
+// (no gamma correction) -- plenty for a thin map line, not worth the
+// complexity of a perceptual color space here.
+function hexToRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function rgbToHex(rgb) {
+  return "#" + rgb.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
+}
+function lerpColor(colorA, colorB, t) {
+  const a = hexToRgb(colorA), b = hexToRgb(colorB);
+  return rgbToHex(a.map((v, i) => v + (b[i] - v) * t));
+}
+const GRADIENT_SEGMENTS = 10;
+// Splits the straight line from `from` to `to` (both [lng, lat]) into
+// GRADIENT_SEGMENTS short LineString features, each carrying a `color`
+// property lerped between colorA and colorB at that segment's midpoint
+// fraction -- used for both coauthor rays and path hop-to-hop segments below.
+function gradientSegmentFeatures(from, to, colorA, colorB) {
+  const features = [];
+  for (let i = 0; i < GRADIENT_SEGMENTS; i++) {
+    const t0 = i / GRADIENT_SEGMENTS, t1 = (i + 1) / GRADIENT_SEGMENTS;
+    features.push({
+      type: "Feature",
+      geometry: {
+        type: "LineString",
+        coordinates: [
+          [from[0] + (to[0] - from[0]) * t0, from[1] + (to[1] - from[1]) * t0],
+          [from[0] + (to[0] - from[0]) * t1, from[1] + (to[1] - from[1]) * t1],
+        ],
+      },
+      properties: { color: lerpColor(colorA, colorB, (t0 + t1) / 2) },
+    });
+  }
+  return features;
+}
 // R13: name, a bare (stripId'd) id, and community are carried in properties
 // too -- small memory cost -- so the sub-HIT_ZOOM hover/click path (see
 // hitTest below) can build an entry-like hit array straight from a
@@ -2702,6 +2810,14 @@ const legendIsolatePill = document.getElementById("legend-isolate-pill");
 let legendHighlightGen = 0;              // invalidates a stale in-flight search-path resolve
 let legendActiveRow = null;              // row currently carrying .legend-active, or null
 let legendNoteRow = null;                // transient "small community" note row, or null
+// R19: the bare id and resolved (grey-corrected) community color of the
+// current legend highlight -- lets drawCoauthorRays reuse an already-resolved
+// origin color instead of re-fetching the same z9 tile a second time. Only
+// ever read alongside an id match (see drawCoauthorRays below), so a stale
+// value from a since-cleared highlight is harmless: it just won't match and
+// the caller resolves fresh instead.
+let legendHighlightedId = null;
+let legendHighlightedColor = null;
 
 function clearLegendHighlight() {
   legendHighlightGen++;        // drop any in-flight highlightLegendForCoords resolve
@@ -2709,12 +2825,16 @@ function clearLegendHighlight() {
   if (legendNoteRow) { legendNoteRow.remove(); legendNoteRow = null; }
 }
 
-// community: numeric community id, or null/undefined if unresolved. Shared by
+// community: numeric community id, or null/undefined if unresolved. bareId:
+// the id this community was resolved for (both call sites already have it in
+// scope), stashed for drawCoauthorRays' origin-color reuse above. Shared by
 // both selection paths (info-card calls this directly with its hit entry's
 // community; the search path goes through highlightLegendForCoords below,
 // which resolves community first and then calls this).
-function highlightLegendCommunity(community) {
+function highlightLegendCommunity(community, bareId) {
   clearLegendHighlight();
+  legendHighlightedId = bareId != null ? bareId : null;
+  legendHighlightedColor = colorForCommunity(community);
   const row = community != null ? legendCommunityRows.get(community) : undefined;
   if (row) {
     row.classList.add("legend-active");
@@ -2742,16 +2862,36 @@ function z9TileForPoint(xw, yw) {
   return [tx, ty];
 }
 
+// Fetches the z9 label tile covering (xw, yw) and returns this id's entry
+// from it, or undefined if the tile fetch failed or the id isn't in that
+// tile (e.g. a path ghost's interpolated position, which isn't backed by a
+// real entry). Shared by highlightLegendForCoords below and R19's
+// resolveCommunityColor.
+async function fetchZ9Entry(bareId, xw, yw) {
+  const [tx, ty] = z9TileForPoint(xw, yw);
+  const tile = await fetchTile(9, tx, ty);
+  return tile && tile.l.find(e => stripId(e[1]) === bareId);
+}
+
 // Search-path community resolution: search-shard entries don't carry
 // community (unlike hitTest's z9-tile hit entries used by openInfoCard), so
 // fetch the z9 label tile at this author's coords and match by id.
 async function highlightLegendForCoords(bareId, xw, yw) {
   const gen = ++legendHighlightGen;
-  const [tx, ty] = z9TileForPoint(xw, yw);
-  const tile = await fetchTile(9, tx, ty);
+  const entry = await fetchZ9Entry(bareId, xw, yw);
   if (gen !== legendHighlightGen) return;   // superseded by a newer selection/clear
-  const entry = tile && tile.l.find(e => stripId(e[1]) === bareId);
-  highlightLegendCommunity(entry ? entry[5] : null);
+  highlightLegendCommunity(entry ? entry[5] : null, bareId);
+}
+
+// R19: resolves a single id's community color from its known (xw, yw) --
+// feeds the coauthor-ray and path gradient endpoints below. Returns null
+// (not the grey fallback) only when the id isn't found in its z9 tile at
+// all; callers apply VECTOR_POINT_FALLBACK_COLOR themselves in that case,
+// same fallback dust/tail community members already get via
+// colorForCommunity once an entry *is* found.
+async function resolveCommunityColor(bareId, xw, yw) {
+  const entry = await fetchZ9Entry(bareId, xw, yw);
+  return entry ? colorForCommunity(entry[5]) : null;
 }
 
 // ---- community isolate v1 ----
@@ -2929,7 +3069,7 @@ function openInfoCard(hit) {
   // Task R10a: info-card selections already have community from the hit
   // entry, unlike a search selection (see setSearchHighlight), so this skips
   // the z9-tile-fetch resolve and highlights directly.
-  highlightLegendCommunity(community);
+  highlightLegendCommunity(community, bareId);
 
   fetchAuthorDetails(bareId).then(data => {
     if (gen !== infoCardGen) return;   // card closed, or replaced, since this fetch started
