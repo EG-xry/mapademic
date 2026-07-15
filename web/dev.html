@@ -169,6 +169,10 @@
     #dp-all-points-status:empty { display: none; }
     #dp-all-points-status { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
                               border-radius: 6px; padding: 4px 8px; }
+    /* ---- R18a: spacing decompression hint pill, same visual language ---- */
+    #dp-spacing-hint:empty { display: none; }
+    #dp-spacing-hint { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
+                         border-radius: 6px; padding: 4px 8px; }
     /* ---- Task 3 (night-polish): author info card ---- */
     #info-card { position: fixed; left: 10px; bottom: 10px; background: #0b0b0bd9;
                   color: #ddd; font: 12px system-ui; border-radius: 6px;
@@ -373,11 +377,21 @@
          communities, contradicting the isolate contract); the checkbox stays
          checked and the cloud comes back when the isolate ends -- see
          syncPointCloudVisible. -->
-    <label class="dp-check" title="Renders all 8.6M authors (69MB download), below zoom 10.25; the precise interactive layer takes over deeper. Temporarily hidden while a community isolate is active.">
+    <label class="dp-check" title="Renders every author as a GPU dot; one 67MB download, cached afterwards; hands off to the precise layer past zoom 10.25. Temporarily hidden while a community isolate is active.">
       <input id="dp-all-points" type="checkbox">
-      All points
+      Full point cloud (8.4M, 67MB)
     </label>
     <div id="dp-all-points-status"></div>
+    <!-- R18a: radial "spacing" decompression for the point cloud -- see
+         u_gamma in POINT_CLOUD_VERT_SRC below. Only affects the cloud's own
+         vertex positions; the raster/vector-points/label layers never see
+         this remap (see the spacingPreviewActive comment near
+         DISPLAY_DEFAULTS for how that limitation is handled). -->
+    <div class="dp-row">
+      <div class="dp-row-head"><label for="dp-spacing">Spacing</label><span id="dp-spacing-n" class="n"></span></div>
+      <input id="dp-spacing" type="range" min="0.55" max="1.0" step="0.05" value="1.0">
+    </div>
+    <div id="dp-spacing-hint"></div>
     <button id="display-reset" type="button">Reset</button>
   </div>
 </div>
@@ -1533,7 +1547,10 @@ function collides(placed, x, y, w, h) {
 // a public visitor has to opt in rather than have it silently kick off on
 // their first page load just because a previous session (or the default
 // itself) turned it on.
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 1.0, allPoints: false };
+// R18a: spacing defaults to 1.0 (identity remap, u_gamma == 1 -- see
+// POINT_CLOUD_VERT_SRC) so a visitor who never touches the slider sees the
+// cloud's true, undistorted layout.
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 1.0, allPoints: false, spacing: 1.0 };
 const DISPLAY_KEY = "mapademic.display";
 
 // R12b: a stale localStorage value still carrying the removed "boundaries"
@@ -1594,6 +1611,8 @@ const dpRegions = document.getElementById("dp-regions");
 const dpPointModeRadios = document.querySelectorAll('input[name="dp-point-mode"]');
 const dpSizeContrast = document.getElementById("dp-size-contrast");
 const dpSizeContrastN = document.getElementById("dp-size-contrast-n");
+const dpSpacing = document.getElementById("dp-spacing");
+const dpSpacingN = document.getElementById("dp-spacing-n");
 const dpReset = document.getElementById("display-reset");
 
 function syncDisplayUI() {
@@ -1609,6 +1628,8 @@ function syncDisplayUI() {
   dpPointModeRadios.forEach(r => { r.checked = r.value === displaySettings.pointMode; });
   dpSizeContrast.value = displaySettings.sizeContrast;
   dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
+  dpSpacing.value = displaySettings.spacing;
+  dpSpacingN.textContent = displaySettings.spacing.toFixed(2);
 }
 syncDisplayUI();
 
@@ -1671,6 +1692,21 @@ dpSizeContrast.addEventListener("input", () => {
   // fire. Force one here whenever the cloud is actually visible.
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
 });
+dpSpacing.addEventListener("input", () => {
+  displaySettings.spacing = Number(dpSpacing.value);
+  dpSpacingN.textContent = displaySettings.spacing.toFixed(2);
+  saveDisplaySettings();
+  // R18a: the raster/vector-points resolvers already force themselves off
+  // whenever the cloud is effectively on (see updateRasterOpacity/
+  // updateVectorPoints' hiddenByCloud -- both are unconditional on the
+  // cloud checkbox, not on spacing), so only the hint pill and the regular
+  // author-name labels (drawLabels, which the cloud-on state doesn't
+  // otherwise touch) need an explicit update here -- see
+  // spacingPreviewActive's own comment for the full limitation writeup.
+  updateSpacingHint();
+  drawLabels();
+  if (pointCloudEffectivelyOn()) map.triggerRepaint();
+});
 dpReset.addEventListener("click", () => {
   displaySettings = { ...DISPLAY_DEFAULTS };
   try { localStorage.removeItem(DISPLAY_KEY); } catch { /* ignore storage errors */ }
@@ -1702,6 +1738,14 @@ async function drawLabels() {
   // zoom -- the hover tooltip at HIT_ZOOM and region names are unaffected,
   // this only ever clears/skips the .lbl markers this function itself owns.
   if (displaySettings.labelMode === "hover" || z < 5.5) {
+    markers.forEach(m => m.remove()); markers = []; return;
+  }
+  // R18a: while a non-1.0 spacing remap is actually distorting the visible
+  // cloud, these labels (sourced from the unremapped label tiles) would sit
+  // at the wrong screen position relative to the dots under them -- see
+  // spacingPreviewActive's comment for the full writeup of what does/doesn't
+  // follow the remap.
+  if (spacingPreviewActive()) {
     markers.forEach(m => m.remove()); markers = []; return;
   }
   const lz = Math.max(6, Math.min(9, Math.round(z)));
@@ -1979,6 +2023,42 @@ function pointCloudEffectivelyOn() {
   return allPointsCloudOn && isolateCommunity == null;
 }
 
+// R18a: LIMITATION -- the spacing remap above lives entirely in the point
+// cloud's own vertex shader; the raster tiles, the "vector-points" GeoJSON
+// overlay, the regular author-name labels (drawLabels), and hover/click
+// hit-testing all still use unremapped (true) positions. So whenever
+// spacing != 1.0 actually distorts what's on screen, those other layers
+// would show authors in the wrong place relative to the cloud's dots.
+// spacingPreviewActive is true exactly when that mismatch would be visible:
+// the cloud is effectively on (checkbox + no isolate suppressing it, see
+// pointCloudEffectivelyOn) AND it's actually the layer being drawn (below
+// VECTOR_POINTS_MIN_ZOOM -- see pointCloudLayer.render's own zoom gate;
+// at/above that zoom the precise per-author layer takes over and its
+// positions are unremapped truth, which is fine for this preview feature)
+// AND spacing itself isn't the identity value.
+// Of the three mitigations the task calls for:
+//   (a) force raster opacity to 0 while active, and
+//   (b) hide the vector-points overlay below 10.25 while active
+// are BOTH already true unconditionally whenever the cloud is effectively
+// on, regardless of spacing -- see updateRasterOpacity's
+// `pointCloudEffectivelyOn() ? 0 : ...` and updateVectorPoints'
+// `hiddenByCloud` (pointCloudEffectivelyOn() && z < VECTOR_POINTS_MIN_ZOOM).
+// That's pre-existing R15b/R17 behavior: turning the cloud on already gives
+// a vector-only look at every spacing value, spacing 1.0 included. So this
+// helper's only actual callers are (c) the hint pill (updateSpacingHint)
+// and drawLabels' early-out, both added for R18a -- see spacingPreviewActive
+// call sites in each and the dpSpacing input handler.
+function spacingPreviewActive() {
+  return displaySettings.spacing !== DISPLAY_DEFAULTS.spacing
+    && pointCloudEffectivelyOn()
+    && map.getZoom() < VECTOR_POINTS_MIN_ZOOM;
+}
+
+const dpSpacingHint = document.getElementById("dp-spacing-hint");
+function updateSpacingHint() {
+  dpSpacingHint.textContent = spacingPreviewActive() ? "spacing preview: interactions approximate" : "";
+}
+
 // GLSL ES 1.00 (no #version pragma) -- valid under both a WebGL1 and a
 // WebGL2 context (MapLibre picks whichever the browser supports), per the
 // task's WebGL1-compatible requirement.
@@ -1989,12 +2069,31 @@ uniform mat4 u_matrix;
 uniform float u_base;
 uniform float u_contrast;
 uniform float u_min;
+uniform float u_gamma;
 varying vec3 v_color;
 void main() {
   // a_pos arrives as raw (non-normalized) unsigned-short values (0..65535)
   // cast to float by vertexAttribPointer -- the /65535.0 here is the
   // "manual" normalize step back to world space [0,1].
   vec2 world = a_pos / 65535.0;
+  // R18a: radial "spacing" decompression, done here in WORLD space (before
+  // the mercator y-flip below) so it operates on the same disc the data was
+  // normalized into. d/0.48 rescales the cloud's populated radius to
+  // [0,1]; raising that to u_gamma < 1 (the panel's slider only ever goes
+  // down to 0.55, never above its 1.0 default) makes rr > r for every
+  // interior point, so the rr/r ratio scales d outward -- points move away
+  // from the center, decompressing the densest middle of the cloud. u_gamma
+  // is set from displaySettings.spacing every frame (see render() below);
+  // 1.0 is the identity (rr == r, no remap). Guarded at r~0 (undefined
+  // ratio, center point doesn't move anyway) and r>1 (points are normalized
+  // to sit within r<=1, so this is just a defensive no-remap fallback, not
+  // an expected code path -- pow(clamp(r,0,1), gamma) would otherwise pull
+  // an r>1 stray point inward instead of leaving it alone).
+  vec2 d = world - vec2(0.5);
+  float r = length(d) / 0.48;
+  float rr = pow(clamp(r, 0.0, 1.0), u_gamma);
+  float spacingScale = r > 1.0 ? 1.0 : (r > 1e-6 ? (rr * 0.48) / (r * 0.48) : 1.0);
+  world = vec2(0.5) + d * spacingScale;
   // World y is stored up-positive (see the pipeline's coords_web.parquet /
   // this file's own toLngLat: mercator y = 1 - yw), so the flip has to
   // happen here too for the cloud to land on the same pixels as the raster.
@@ -2061,7 +2160,7 @@ const pointCloudLayer = {
   totalCount: 0,
   gl: null, program: null, posBuffer: null, attrBuffer: null,
   aPos: -1, aAttr: -1,
-  uMatrix: null, uBase: null, uContrast: null, uMin: null,
+  uMatrix: null, uBase: null, uContrast: null, uMin: null, uGamma: null,
   // R15c: raw ArrayBuffers from the last successful fetch, retained for the
   // lifetime of the page (~69MB) purely so a GL context restore can
   // re-upload without re-fetching -- see onAdd below and
@@ -2095,6 +2194,7 @@ const pointCloudLayer = {
     this.uBase = gl.getUniformLocation(program, "u_base");
     this.uContrast = gl.getUniformLocation(program, "u_contrast");
     this.uMin = gl.getUniformLocation(program, "u_min");
+    this.uGamma = gl.getUniformLocation(program, "u_gamma");
     this.posBuffer = gl.createBuffer();
     this.attrBuffer = gl.createBuffer();
     this.loadedCount = 0;
@@ -2149,6 +2249,9 @@ const pointCloudLayer = {
     gl.uniform1f(this.uBase, pointCloudBaseSizePx(zoom) * dpr);
     gl.uniform1f(this.uContrast, displaySettings.sizeContrast);
     gl.uniform1f(this.uMin, POINT_CLOUD_MIN_PX * dpr);
+    // R18a: set fresh every frame from the live slider value, same pattern
+    // as u_contrast above -- see POINT_CLOUD_VERT_SRC for the remap itself.
+    gl.uniform1f(this.uGamma, displaySettings.spacing);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
     gl.enableVertexAttribArray(this.aPos);
@@ -2299,6 +2402,13 @@ async function ensurePointCloudLoaded() {
 function syncPointCloudVisible() {
   pointCloudLayer.visible = pointCloudEffectivelyOn();
   map.triggerRepaint();
+  // R18a: every caller of this function is exactly a moment where
+  // pointCloudEffectivelyOn()'s value can have changed (checkbox toggle,
+  // isolate enter/exit), which is one of spacingPreviewActive's three
+  // inputs -- refresh the hint pill (and the labels it's tied to) here
+  // instead of duplicating this call at each call site.
+  updateSpacingHint();
+  drawLabels();
 }
 
 function setPointCloudActive(on) {
@@ -3049,10 +3159,14 @@ function throttle(fn, wait) {
     }
   };
 }
-const throttledMoveRedraw = throttle(() => { drawLabels(); drawRegions(); updateVectorPoints(); updateRasterOpacity(); }, 180);
+// R18a: updateSpacingHint added alongside the others here -- zoom crossing
+// VECTOR_POINTS_MIN_ZOOM is the third input to spacingPreviewActive (besides
+// the checkbox/isolate transitions syncPointCloudVisible already covers),
+// and pan/zoom doesn't go through that function.
+const throttledMoveRedraw = throttle(() => { drawLabels(); drawRegions(); updateVectorPoints(); updateRasterOpacity(); updateSpacingHint(); }, 180);
 map.on("move", throttledMoveRedraw);
 map.on("moveend", () => { drawLabels(); drawRegions(); writeHash(); });
-map.on("zoomend", () => { drawLabels(); drawRegions(); });
+map.on("zoomend", () => { drawLabels(); drawRegions(); updateSpacingHint(); });
 
 // ---- Task 2 (night-polish): Share button ----
 const shareBtn = document.getElementById("share-btn");
