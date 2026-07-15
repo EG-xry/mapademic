@@ -172,10 +172,6 @@
     #dp-all-points-status:empty { display: none; }
     #dp-all-points-status { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
                               border-radius: 6px; padding: 4px 8px; }
-    /* ---- R18a: spacing decompression hint pill, same visual language ---- */
-    #dp-spacing-hint:empty { display: none; }
-    #dp-spacing-hint { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
-                         border-radius: 6px; padding: 4px 8px; }
     /* ---- Task 3 (night-polish): author info card ---- */
     #info-card { position: fixed; left: 10px; bottom: 10px; background: #0b0b0bd9;
                   color: #ddd; font: 12px system-ui; border-radius: 6px;
@@ -375,7 +371,7 @@
     </div>
     <div class="dp-row">
       <div class="dp-row-head"><label for="dp-size-contrast">Citation size contrast</label><span id="dp-size-contrast-n" class="n"></span></div>
-      <input id="dp-size-contrast" type="range" min="0" max="5" step="0.1" value="1.0">
+      <input id="dp-size-contrast" type="range" min="0" max="5" step="0.1" value="0.5">
     </div>
     <!-- R17: full-cloud WebGL layer, graduated from the R15b experiment --
          persisted as displaySettings.allPoints (default off, see
@@ -390,15 +386,15 @@
     </label>
     <div id="dp-all-points-status"></div>
     <!-- R18a: radial "spacing" decompression for the point cloud -- see
-         u_gamma in POINT_CLOUD_VERT_SRC below. Only affects the cloud's own
-         vertex positions; the raster/vector-points/label layers never see
-         this remap (see the spacingPreviewActive comment near
-         DISPLAY_DEFAULTS for how that limitation is handled). -->
+         u_gamma in POINT_CLOUD_VERT_SRC below. R20: the same remap
+         (remapWorld, folded into toLngLat) now applies to every consumer --
+         raster/vector-points/labels/hitTest/overlays -- not just the cloud's
+         own vertex positions, so there's no more preview-only mismatch to
+         flag here (see the R20 comment near pointCloudEffectivelyOn). -->
     <div class="dp-row">
       <div class="dp-row-head"><label for="dp-spacing">Spacing</label><span id="dp-spacing-n" class="n"></span></div>
       <input id="dp-spacing" type="range" min="0.55" max="1.0" step="0.05" value="1.0">
     </div>
-    <div id="dp-spacing-hint"></div>
     <button id="display-reset" type="button">Reset</button>
   </div>
 </div>
@@ -481,6 +477,15 @@ function parseHash() {
   return out;
 }
 
+// R20 known quirk (acceptable, not fixed here): the view portion of the
+// hash is the camera's own current lng/lat -- a plain visual position, not
+// an author's world xw/yw run back through remapWorld's inverse. A link
+// captured while the sharer's spacing != 1 (e.g. after flying to a remapped
+// author) restores to that exact same lng/lat for every viewer regardless
+// of their own spacing setting, so a viewer at the 1.0 default sees a camera
+// center that's slightly off from where that author truly sits. Fixing it
+// would mean inverting remapWorld at share time and re-remapping at restore
+// time for the viewer's own (possibly different) gamma -- out of scope here.
 function writeHash() {
   const c = map.getCenter();
   let h = `#${map.getZoom().toFixed(2)}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`;
@@ -599,7 +604,45 @@ function visibleTiles(lz) {
   for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) tiles.push([x, y]);
   return tiles;
 }
-const toLngLat = (xw, yw) => new maplibregl.MercatorCoordinate(xw, 1 - yw, 0).toLngLat();
+// R20: mirrors POINT_CLOUD_VERT_SRC's radial "spacing" decompression exactly
+// (same 0.5 center, 0.48 populated-radius normalizer, r<=1 clamp, r~0 guard --
+// see that shader for the derivation) so every consumer of toLngLat below --
+// not just the cloud's own vertex shader -- lands on the position the cloud
+// actually shows. Folded into toLngLat itself rather than an opt-in callers
+// have to remember, so deep-zoom vector features, labels, region names,
+// markers, hitTest projections and ray/path geometry all move together; the
+// R18a bug this replaces was exactly that toLngLat callers besides the
+// shader used unremapped truth.
+//
+// Gate: cloud effectively on AND spacing != its default -- matches the
+// shader's own remap condition, but deliberately NOT also gated on zoom <
+// VECTOR_POINTS_MIN_ZOOM the way the shader itself effectively is (that gate
+// lives in pointCloudLayer.render, which simply stops drawing past that
+// zoom). Every other layer must keep applying the same remap past it too,
+// or positions would jump the instant the camera crosses the boundary --
+// the exact bug being fixed here.
+//
+// displaySettings/DISPLAY_DEFAULTS/pointCloudEffectivelyOn are all declared
+// further down this file, but every call to remapWorld happens long after
+// the whole script has executed top-to-bottom (same reasoning as
+// pointCloudEffectivelyOn's own note near its definition), so the TDZ is
+// never actually hit.
+function remapWorld(xw, yw) {
+  if (!(pointCloudEffectivelyOn() && displaySettings.spacing !== DISPLAY_DEFAULTS.spacing)) {
+    return [xw, yw];
+  }
+  const gamma = displaySettings.spacing;
+  const dx = xw - 0.5, dy = yw - 0.5;
+  const r = Math.hypot(dx, dy) / 0.48;
+  if (r > 1 || r <= 1e-6) return [xw, yw];   // same defensive no-remap fallback as the shader
+  const rr = Math.pow(r, gamma);             // r is already in (1e-6, 1] here, so clamp(r,0,1) is a no-op
+  const scale = rr / r;
+  return [0.5 + dx * scale, 0.5 + dy * scale];
+}
+const toLngLat = (xw, yw) => {
+  const [rxw, ryw] = remapWorld(xw, yw);
+  return new maplibregl.MercatorCoordinate(rxw, 1 - ryw, 0).toLngLat();
+};
 
 // ---- author search ----
 // normalize(): JS mirror of pipeline/build_index.py normalize(). Each step
@@ -778,6 +821,10 @@ let searchGen = 0;      // invalidates stale in-flight lookups
 let searchTimer = null;
 let highlightMarker = null;
 let highlightOverlayId = null;   // bare id currently claimed under "highlight" in overlayLabelOwners, or null
+// R20: true (unremapped) coords of the active highlight, kept alongside the
+// marker so repositionActiveOverlays (near drawCoauthorRays below) can move
+// it without a re-lookup when the spacing slider changes gamma.
+let highlightXY = null;
 
 // ---- Task 9 (R9): overlay-label dedupe ----
 // Bare ids that already have an explicit overlay name tag on the map (a
@@ -828,6 +875,7 @@ function updateSearchClearVisibility() {
 
 function clearSearchHighlight() {
   if (highlightMarker) { highlightMarker.remove(); highlightMarker = null; }
+  highlightXY = null;
   if (highlightOverlayId) {
     overlayLabelClear("highlight", [highlightOverlayId]);
     highlightOverlayId = null;
@@ -852,6 +900,7 @@ function setSearchHighlight(id, name, xw, yw) {
   el.append(dot, label);
   highlightMarker = new maplibregl.Marker({ element: el })
     .setLngLat(toLngLat(xw, yw)).addTo(map);
+  highlightXY = { xw, yw };
   activeA = stripId(id);
   pendingA = null;             // the real highlight owns a= from here
   highlightOverlayId = activeA;
@@ -1160,6 +1209,11 @@ let pathEventSource = null;
 let pathMarkers = [];
 let pathOverlayIds = [];             // bare ids currently claimed under "path" in overlayLabelOwners by the drawn path's node labels
 let pathGen = 0;                     // invalidates stale in-flight renders (labelGen pattern)
+// R20: the active path's resolved points/hopColors (same arrays renderPath
+// itself built), kept so repositionActiveOverlays (near drawCoauthorRays
+// below) can rebuild the path-line source and move pathMarkers without
+// re-resolving anything when the spacing slider changes gamma.
+let activePath = null;
 
 // ---- Task 4 (night-polish): path hop list ----
 // One row per point renderPath actually drew (same array, same order), so a
@@ -1196,6 +1250,7 @@ function clearPath() {
   if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
   pathMarkers.forEach(m => m.remove());
   pathMarkers = [];
+  activePath = null;
   if (pathOverlayIds.length) {
     overlayLabelClear("path", pathOverlayIds);
     pathOverlayIds = [];
@@ -1287,6 +1342,7 @@ async function renderPath(pathSteps, hops, idA, idB) {
     el.append(dot, label);
     return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
   });
+  activePath = { points, hopColors };
 
   pathOverlayIds = points.map(p => stripId(p.id));
   overlayLabelAdd("path", pathOverlayIds);
@@ -1365,12 +1421,18 @@ let searchRayGen = 0;        // invalidates stale in-flight ray renders (pathGen
 let rayEventSource = null;
 let rayMarkers = [];
 let rayOverlayIds = [];      // bare ids currently claimed under "ray" in overlayLabelOwners by drawn ray endpoint labels
+// R20: the active rays' origin coords/color and resolved endpoints, kept so
+// repositionActiveOverlays (below) can rebuild the coauthor-rays source and
+// move rayMarkers without re-streaming anything when the spacing slider
+// changes gamma.
+let activeRays = null;
 
 function clearRays() {
   searchRayGen++;             // any in-flight drawCoauthorRays is now stale
   if (rayEventSource) { rayEventSource.close(); rayEventSource = null; }
   rayMarkers.forEach(m => m.remove());
   rayMarkers = [];
+  activeRays = null;
   if (rayOverlayIds.length) {
     overlayLabelClear("ray", rayOverlayIds);
     rayOverlayIds = [];
@@ -1500,6 +1562,7 @@ async function drawCoauthorRays(bareId, xw, yw) {
       el.append(dot, label);
       return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
     });
+    activeRays = endpoints.length ? { originXw: xw, originYw: yw, originColor, endpoints } : null;
 
     rayOverlayIds = endpoints.map(p => p.id);
     overlayLabelAdd("ray", rayOverlayIds);
@@ -1529,6 +1592,43 @@ async function drawCoauthorRays(bareId, xw, yw) {
     if (gen !== searchRayGen) return;
     setSearchStatus("coauthor backend offline");
   });
+}
+
+// R20: re-projects every currently-drawn ephemeral overlay (search
+// highlight, path, coauthor rays) through the live toLngLat/remapWorld --
+// called from the spacing slider's input handler so "all rendered
+// GeoJSON/marker positions... refresh" also covers these, not just
+// labels/regions/vector-points (which already recompute fresh from their own
+// redraw calls). Reuses the exact true xw/yw + already-resolved colors each
+// draw function stashed in highlightXY/activePath/activeRays -- no
+// re-fetch/re-stream, just re-running the same projection + feature-building
+// calls those functions used the first time.
+function repositionActiveOverlays() {
+  if (highlightMarker && highlightXY) {
+    highlightMarker.setLngLat(toLngLat(highlightXY.xw, highlightXY.yw));
+  }
+  if (activePath) {
+    const { points, hopColors } = activePath;
+    const coords = points.map(p => toLngLat(p.xw, p.yw).toArray());
+    const features = [];
+    for (let i = 0; i < coords.length - 1; i++) {
+      features.push(...gradientSegmentFeatures(coords[i], coords[i + 1], hopColors[i], hopColors[i + 1]));
+    }
+    const src = map.getSource("path");
+    if (src) src.setData({ type: "FeatureCollection", features });
+    pathMarkers.forEach((m, i) => m.setLngLat(toLngLat(points[i].xw, points[i].yw)));
+  }
+  if (activeRays) {
+    const { originXw, originYw, originColor, endpoints } = activeRays;
+    const from = toLngLat(originXw, originYw).toArray();
+    const features = [];
+    endpoints.forEach(p => {
+      features.push(...gradientSegmentFeatures(from, toLngLat(p.xw, p.yw).toArray(), originColor, p.color));
+    });
+    const src = map.getSource("coauthor-rays");
+    if (src) src.setData({ type: "FeatureCollection", features });
+    rayMarkers.forEach((m, i) => m.setLngLat(toLngLat(endpoints[i].xw, endpoints[i].yw)));
+  }
 }
 
 // ---- Task 2 (night-polish): hash-restore helpers ----
@@ -1615,7 +1715,7 @@ function collides(placed, x, y, w, h) {
 // R18a: spacing defaults to 1.0 (identity remap, u_gamma == 1 -- see
 // POINT_CLOUD_VERT_SRC) so a visitor who never touches the slider sees the
 // cloud's true, undistorted layout.
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 1.0, allPoints: false, spacing: 1.0 };
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 0.5, allPoints: false, spacing: 1.0 };
 const DISPLAY_KEY = "mapademic.display";
 
 // R12b: a stale localStorage value still carrying the removed "boundaries"
@@ -1761,15 +1861,17 @@ dpSpacing.addEventListener("input", () => {
   displaySettings.spacing = Number(dpSpacing.value);
   dpSpacingN.textContent = displaySettings.spacing.toFixed(2);
   saveDisplaySettings();
-  // R18a: the raster/vector-points resolvers already force themselves off
-  // whenever the cloud is effectively on (see updateRasterOpacity/
-  // updateVectorPoints' hiddenByCloud -- both are unconditional on the
-  // cloud checkbox, not on spacing), so only the hint pill and the regular
-  // author-name labels (drawLabels, which the cloud-on state doesn't
-  // otherwise touch) need an explicit update here -- see
-  // spacingPreviewActive's own comment for the full limitation writeup.
-  updateSpacingHint();
+  // R20: toLngLat now folds the spacing remap in for every consumer (see
+  // remapWorld), so a gamma change has to refresh everything that calls it --
+  // labels, region names, deep-zoom/mid-zoom vector-point GeoJSON
+  // (updateVectorPoints, which the raster/vector-points "hidden while cloud
+  // on" gates below VECTOR_POINTS_MIN_ZOOM don't apply to at/above it), and
+  // any ephemeral overlay already on screen (search highlight, path,
+  // coauthor rays -- repositionActiveOverlays).
   drawLabels();
+  drawRegions();
+  updateVectorPoints();
+  repositionActiveOverlays();
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
 });
 dpReset.addEventListener("click", () => {
@@ -1805,14 +1907,12 @@ async function drawLabels() {
   if (displaySettings.labelMode === "hover" || z < 5.5) {
     markers.forEach(m => m.remove()); markers = []; return;
   }
-  // R18a: while a non-1.0 spacing remap is actually distorting the visible
-  // cloud, these labels (sourced from the unremapped label tiles) would sit
-  // at the wrong screen position relative to the dots under them -- see
-  // spacingPreviewActive's comment for the full writeup of what does/doesn't
-  // follow the remap.
-  if (spacingPreviewActive()) {
-    markers.forEach(m => m.remove()); markers = []; return;
-  }
+  // R18a used to bail out here while a non-1.0 spacing remap was distorting
+  // the visible cloud (these labels, sourced from the label tiles, used to
+  // sit at the wrong screen position relative to the dots under them). R20
+  // folded the same remap into toLngLat below, so this label loop now lands
+  // on the same positions the cloud shows -- see the R20 comment near
+  // pointCloudEffectivelyOn for the full writeup.
   const lz = Math.max(6, Math.min(9, Math.round(z)));
   const lists = await Promise.all(visibleTiles(lz).map(([x, y]) => fetchTile(lz, x, y)));
   if (gen !== labelGen) return;      // a newer call owns the markers now
@@ -2088,41 +2188,19 @@ function pointCloudEffectivelyOn() {
   return allPointsCloudOn && isolateCommunity == null;
 }
 
-// R18a: LIMITATION -- the spacing remap above lives entirely in the point
-// cloud's own vertex shader; the raster tiles, the "vector-points" GeoJSON
-// overlay, the regular author-name labels (drawLabels), and hover/click
-// hit-testing all still use unremapped (true) positions. So whenever
-// spacing != 1.0 actually distorts what's on screen, those other layers
-// would show authors in the wrong place relative to the cloud's dots.
-// spacingPreviewActive is true exactly when that mismatch would be visible:
-// the cloud is effectively on (checkbox + no isolate suppressing it, see
-// pointCloudEffectivelyOn) AND it's actually the layer being drawn (below
-// VECTOR_POINTS_MIN_ZOOM -- see pointCloudLayer.render's own zoom gate;
-// at/above that zoom the precise per-author layer takes over and its
-// positions are unremapped truth, which is fine for this preview feature)
-// AND spacing itself isn't the identity value.
-// Of the three mitigations the task calls for:
-//   (a) force raster opacity to 0 while active, and
-//   (b) hide the vector-points overlay below 10.25 while active
-// are BOTH already true unconditionally whenever the cloud is effectively
-// on, regardless of spacing -- see updateRasterOpacity's
-// `pointCloudEffectivelyOn() ? 0 : ...` and updateVectorPoints'
-// `hiddenByCloud` (pointCloudEffectivelyOn() && z < VECTOR_POINTS_MIN_ZOOM).
-// That's pre-existing R15b/R17 behavior: turning the cloud on already gives
-// a vector-only look at every spacing value, spacing 1.0 included. So this
-// helper's only actual callers are (c) the hint pill (updateSpacingHint)
-// and drawLabels' early-out, both added for R18a -- see spacingPreviewActive
-// call sites in each and the dpSpacing input handler.
-function spacingPreviewActive() {
-  return displaySettings.spacing !== DISPLAY_DEFAULTS.spacing
-    && pointCloudEffectivelyOn()
-    && map.getZoom() < VECTOR_POINTS_MIN_ZOOM;
-}
-
-const dpSpacingHint = document.getElementById("dp-spacing-hint");
-function updateSpacingHint() {
-  dpSpacingHint.textContent = spacingPreviewActive() ? "spacing preview: interactions approximate" : "";
-}
+// R18a used to LIMIT the spacing remap to the point cloud's own vertex
+// shader -- the raster tiles, the "vector-points" GeoJSON overlay, the
+// regular author-name labels (drawLabels), and hover/click hit-testing all
+// used unremapped (true) positions, so spacing != 1.0 visibly displaced
+// those layers relative to the cloud's dots. That's the R20 fix above
+// (remapWorld, folded into toLngLat itself): every one of those consumers
+// now applies the identical remap, so there's no more mismatch to warn
+// about, and the "spacing preview: interactions approximate" hint pill this
+// section used to maintain (spacingPreviewActive/updateSpacingHint, plus a
+// drawLabels early-out) was removed outright rather than reworded --
+// raster is a pre-existing, unrelated exception (see updateRasterOpacity's
+// `pointCloudEffectivelyOn() ? 0 : ...`: it's already fully hidden, not
+// mismatched, whenever the cloud is on, at every spacing value including 1.0).
 
 // GLSL ES 1.00 (no #version pragma) -- valid under both a WebGL1 and a
 // WebGL2 context (MapLibre picks whichever the browser supports), per the
@@ -2467,13 +2545,16 @@ async function ensurePointCloudLoaded() {
 function syncPointCloudVisible() {
   pointCloudLayer.visible = pointCloudEffectivelyOn();
   map.triggerRepaint();
-  // R18a: every caller of this function is exactly a moment where
-  // pointCloudEffectivelyOn()'s value can have changed (checkbox toggle,
-  // isolate enter/exit), which is one of spacingPreviewActive's three
-  // inputs -- refresh the hint pill (and the labels it's tied to) here
-  // instead of duplicating this call at each call site.
-  updateSpacingHint();
+  // R20: every caller of this function (checkbox toggle, isolate entry/exit)
+  // is exactly a moment where pointCloudEffectivelyOn() can flip, which is
+  // remapWorld's own gate (see toLngLat) -- so a non-default spacing can go
+  // from identity to actively remapping (or back) right here, same as a
+  // spacing slider change. Refresh the same set the slider's input handler
+  // does, instead of duplicating this call at each call site.
   drawLabels();
+  drawRegions();
+  updateVectorPoints();
+  repositionActiveOverlays();
 }
 
 function setPointCloudActive(on) {
@@ -2585,14 +2666,18 @@ function gradientSegmentFeatures(from, to, colorA, colorB) {
 // branch fills it in as a constant before mapping. A genuinely-undefined
 // community (stale pre-community-rebuild cached tiles) simply drops out of
 // the serialized properties and reads back as undefined in hitTestVector --
-// the same "small community" fallback openInfoCard already handles. xw/yw
-// aren't stored redundantly; that path derives them back out of the
-// feature's own geometry instead (see hitTestVector).
+// the same "small community" fallback openInfoCard already handles.
+// R20: true (unremapped) xw/yw are ALSO carried in properties now -- before
+// the spacing remap moved into toLngLat, hitTestVector could recover them by
+// inverting the feature's own geometry (a pure mercator projection, exactly
+// invertible). Now that geometry can carry a spacing remap, inverting it
+// would hand back the remapped position instead of the true one, so the
+// true values are stored redundantly here instead (see hitTestVector).
 function entryToFeature([name, id, xw, yw, cited, community]) {
   return {
     type: "Feature",
     geometry: { type: "Point", coordinates: toLngLat(xw, yw).toArray() },
-    properties: { cited, color: colorForCommunity(community), name, id: stripId(id), community },
+    properties: { cited, color: colorForCommunity(community), name, id: stripId(id), community, xw, yw },
   };
 }
 // Shared by isolate mode's community-shard render and the R12b global
@@ -3176,17 +3261,19 @@ function hitTestVector(pt) {
   // Rebuilds the same [name, id, xw, yw, cited, community] shape hitTestTiles
   // returns, so openInfoCard (including its legend-row community highlight)
   // and the mousemove tooltip below don't need to know which path a hit came
-  // from. xw/yw come back out of the feature's own geometry (inverse of
-  // entryToFeature's toLngLat) rather than a duplicate stored property;
-  // name/id/cited/community come from the properties entryToFeature stored.
-  // A missing community property reads back as undefined here, which
+  // from. R20: xw/yw come from the feature's own stored properties now, NOT
+  // by inverting its geometry -- entryToFeature's geometry can carry a
+  // spacing remap (see toLngLat/remapWorld), so inverting it would hand back
+  // the remapped position instead of the true one, and every downstream
+  // consumer of a hit (flyTo, drawCoauthorRays, connect panel, share-URL
+  // highlight restore) expects true coords, same as hitTestTiles' entries.
+  // name/id/cited/community still come from the properties entryToFeature
+  // stored. A missing community property reads back as undefined here, which
   // openInfoCard already maps to its "small community (grey dust)" legend
   // note -- the same fallback the deep-zoom path uses for off-legend
   // communities.
-  const [lng, lat] = best.geometry.coordinates;
-  const m = maplibregl.MercatorCoordinate.fromLngLat({ lng, lat });
-  const { name, id, cited, community } = best.properties;
-  return [name, id, m.x, 1 - m.y, cited, community];
+  const { name, id, xw, yw, cited, community } = best.properties;
+  return [name, id, xw, yw, cited, community];
 }
 // Single entry point for both the mousemove and click handlers below, so the
 // two hit-test paths never fight over cursor/tooltip/card state -- one
@@ -3299,14 +3386,10 @@ function throttle(fn, wait) {
     }
   };
 }
-// R18a: updateSpacingHint added alongside the others here -- zoom crossing
-// VECTOR_POINTS_MIN_ZOOM is the third input to spacingPreviewActive (besides
-// the checkbox/isolate transitions syncPointCloudVisible already covers),
-// and pan/zoom doesn't go through that function.
-const throttledMoveRedraw = throttle(() => { drawLabels(); drawRegions(); updateVectorPoints(); updateRasterOpacity(); updateSpacingHint(); }, 180);
+const throttledMoveRedraw = throttle(() => { drawLabels(); drawRegions(); updateVectorPoints(); updateRasterOpacity(); }, 180);
 map.on("move", throttledMoveRedraw);
 map.on("moveend", () => { drawLabels(); drawRegions(); writeHash(); });
-map.on("zoomend", () => { drawLabels(); drawRegions(); updateSpacingHint(); });
+map.on("zoomend", () => { drawLabels(); drawRegions(); });
 
 // ---- Task 2 (night-polish): Share button ----
 const shareBtn = document.getElementById("share-btn");
