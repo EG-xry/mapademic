@@ -397,6 +397,21 @@
       <div class="dp-row-head"><label for="dp-spacing">Spacing</label><span id="dp-spacing-n" class="n"></span></div>
       <input id="dp-spacing" type="range" min="0.55" max="1.0" step="0.05" value="1.0">
     </div>
+    <!-- R22c: GPU connection-lines layer, same persisted-toggle shape as
+         Full point cloud above -- see edgeLinesLayer / DISPLAY_DEFAULTS.edgeLines. -->
+    <label class="dp-check" title="Renders repeat-coauthorship edges as GPU line segments, colored endpoint-to-endpoint by community; one 218MB download, cached afterwards. Temporarily hidden while a community isolate is active.">
+      <input id="dp-edge-lines" type="checkbox">
+      Connection lines (14M, 218MB)
+    </label>
+    <div id="dp-edge-lines-status"></div>
+    <div class="dp-row">
+      <div class="dp-row-head"><label for="dp-edge-intensity">Line visibility</label><span id="dp-edge-intensity-n" class="n"></span></div>
+      <input id="dp-edge-intensity" type="range" min="0.02" max="0.6" step="0.01" value="0.12">
+    </div>
+    <div class="dp-row">
+      <div class="dp-row-head"><span>Line count</span><span id="dp-edge-count-n" class="n"></span></div>
+      <input id="dp-edge-count" type="range" min="0" max="3" step="1" value="1" aria-label="Line count">
+    </div>
     <button id="display-reset" type="button">Reset</button>
   </div>
 </div>
@@ -1847,7 +1862,12 @@ function collides(placed, x, y, w, h) {
 // R18a: spacing defaults to 1.0 (identity remap, u_gamma == 1 -- see
 // POINT_CLOUD_VERT_SRC) so a visitor who never touches the slider sees the
 // cloud's true, undistorted layout.
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 0.5, allPoints: false, spacing: 1.0 };
+// R22c: edgeLines defaults false (same 200MB-class opt-in reasoning as
+// allPoints); edgeIntensity/edgeCount default to a readable-but-sparse
+// preview (0.12 alpha scale, top 3M of 14.3M by weight) rather than the
+// heaviest settings, so a first-time enable doesn't shove 218MB and the
+// densest possible draw at a visitor by default.
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 0.5, allPoints: false, spacing: 1.0, edgeLines: false, edgeIntensity: 0.12, edgeCount: 3000000 };
 const DISPLAY_KEY = "mapademic.display";
 
 // R12b: a stale localStorage value still carrying the removed "boundaries"
@@ -2026,6 +2046,19 @@ dpReset.addEventListener("click", () => {
   // R16: reset can change sizeContrast too -- same live-repaint need as the
   // slider's own input handler above.
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
+  // R22c: connection lines reset the same way allPoints does just above --
+  // dpEdgeLines/setEdgeLinesActive/edgeCountIndex/EDGE_COUNT_LABELS are all
+  // declared later in this file (edge-lines section, after pointCloudLayer),
+  // but this callback only ever runs on a user click long after the whole
+  // script has executed top-to-bottom, same reasoning as the allPoints reset
+  // just above (which references dpAllPoints/setPointCloudActive the same way).
+  dpEdgeLines.checked = displaySettings.edgeLines;
+  setEdgeLinesActive(displaySettings.edgeLines);
+  dpEdgeIntensity.value = displaySettings.edgeIntensity;
+  dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(2);
+  dpEdgeCount.value = edgeCountIndex(displaySettings.edgeCount);
+  dpEdgeCountN.textContent = EDGE_COUNT_LABELS[edgeCountIndex(displaySettings.edgeCount)];
+  if (edgeLinesEffectivelyOn()) map.triggerRepaint();
 });
 
 let markers = [];
@@ -2162,6 +2195,25 @@ function beforeIdAbove(afterId) {
   const idx = layers.findIndex(l => l.id === afterId);
   return idx >= 0 && idx + 1 < layers.length ? layers[idx + 1].id : undefined;
 }
+
+// R22c note (learned the hard way against the live MapLibre 4.7.1 bundle):
+// map.getStyle().layers -- what beforeIdAbove above walks -- is a
+// SERIALIZED style, and MapLibre silently omits "custom" layers from it
+// (they aren't JSON-serializable style-spec objects). So beforeIdAbove can
+// never resolve "edge-lines" or "point-cloud" as an anchor id, even once
+// added -- it always skips straight to the next REAL (non-custom) layer,
+// which in this stack is "vector-points". That's actually fine for
+// beforeIdAbove("dots") specifically: it reliably still returns
+// "vector-points" regardless of which custom layers already sit between
+// them, so `map.addLayer(x, beforeIdAbove("dots"))` always inserts x
+// directly below vector-points -- i.e. on TOP of whatever custom layer(s)
+// already claimed that spot. See setPointCloudActive (uses exactly that,
+// unchanged) and setEdgeLinesActive (needs to explicitly anchor before the
+// raw "point-cloud" id -- not through beforeIdAbove -- when point-cloud
+// already exists, or it would also land "on top", above point-cloud instead
+// of below it). map.addLayer's own `before` lookup is a direct internal id
+// lookup, not through getStyle(), so passing a custom layer's raw id works
+// fine even though beforeIdAbove itself can't discover it.
 
 // community shard fetch (R10b: isolate-anywhere). Only one isolate is ever
 // active at a time, so the cache is small -- just enough to make re-isolating
@@ -2698,6 +2750,11 @@ function setPointCloudActive(on) {
       // this lands point-cloud directly below it, matching the spec's
       // "above dots, below GeoJSON overlays"; path-line/coauthor-rays are
       // always appended with no beforeId, so they stay on top regardless.
+      // R22c: this also always lands point-cloud correctly above an
+      // already-added edge-lines (see the R22c note above beforeIdAbove's
+      // own definition) -- unchanged from pre-R22c, deliberately not special
+      // -cased for edge-lines; setEdgeLinesActive is the side that special-
+      // cases point-cloud, not this one.
       map.addLayer(pointCloudLayer, beforeIdAbove("dots"));
     }
     // Checking the box during an active isolate still preloads the data
@@ -2729,11 +2786,458 @@ dpAllPoints.addEventListener("change", () => {
 map.on("webglcontextlost", () => {
   console.warn("point-cloud: WebGL context lost");
   if (pointCloudLayer.visible) setPointCloudStatus("WebGL context lost, recovering…");
+  if (edgeLinesLayer.visible) setEdgeLinesStatus("WebGL context lost, recovering…");   // R22c
 });
 map.on("webglcontextrestored", () => {
   console.warn("point-cloud: WebGL context restored");
   setPointCloudStatus("");
+  setEdgeLinesStatus("");   // R22c
   map.triggerRepaint();
+});
+
+// ---- R22c: GPU connection-lines layer ----
+// Instanced thick lines via ANGLE_instanced_arrays (WebGL1) / native
+// instancing (WebGL2, whichever MapLibre's context turns out to be -- see
+// getInstancingAPI): a 4-vertex unit quad template (corner attrib (t, side))
+// drawn TRIANGLES-indexed per instance, with per-edge data pulled from
+// data/vector_experiment/edges_pos.bin (u16 x0,y0,x1,y1) and edges_attr.bin
+// (u8 r0,g0,b0,r1,g1,b1,w,s), 14,316,429 edges ordered weight-desc (see
+// scripts/export_edges_bin.py). Deliberately mirrors pointCloudLayer's shape
+// (lazy add, chunked fetch+upload, cached ArrayBuffers for context-restore,
+// visible flag + effectively-on gate) rather than sharing code with it --
+// the two layers' vertex formats/instancing model are different enough that
+// a shared abstraction would just add indirection for ~150 lines of overlap.
+//
+// Layer stacking: added below vector-points/point-cloud, above "dots" (the
+// raster) -- see the R22c note above beforeIdAbove's own definition, and
+// setEdgeLinesActive below. Isolate suppresses it exactly like the cloud
+// (edgeLinesEffectivelyOn, wired into setIsolate/clearIsolate above).
+let edgeLinesOn = false;   // checkbox state; not itself persisted (displaySettings.edgeLines is, see R17's allPointsCloudOn comment for why the split)
+function edgeLinesEffectivelyOn() {
+  return edgeLinesOn && isolateCommunity == null;
+}
+
+// GLSL ES 1.00, same WebGL1-compatible constraint as the point cloud's shaders.
+const EDGE_LINES_VERT_SRC = `
+attribute vec2 a_corner;
+attribute vec2 aP0;
+attribute vec2 aP1;
+attribute vec3 aC0;
+attribute vec3 aC1;
+attribute float aW;
+attribute float aS;
+uniform mat4 u_matrix;
+uniform float u_gamma;
+uniform float u_widthBase;
+uniform vec2 u_viewport;
+uniform float u_intensity;
+varying vec3 vColor;
+varying float vAlpha;
+
+// Mirrors POINT_CLOUD_VERT_SRC's radial "spacing" decompression exactly (see
+// that shader for the full derivation) so edges track the cloud's dots at
+// every spacing setting -- applied to BOTH endpoints independently, same as
+// this file's own JS-side remapWorld, before the midpoint mix below.
+vec2 remapWorld(vec2 world) {
+  vec2 d = world - vec2(0.5);
+  float r = length(d) / 0.48;
+  float rr = pow(clamp(r, 0.0, 1.0), u_gamma);
+  float scale = r > 1.0 ? 1.0 : (r > 1e-6 ? (rr * 0.48) / (r * 0.48) : 1.0);
+  return vec2(0.5) + d * scale;
+}
+// World (already remapped) -> mercator (y flip, same as toLngLat) -> clip.
+vec4 toClip(vec2 world) {
+  return u_matrix * vec4(world.x, 1.0 - world.y, 0.0, 1.0);
+}
+
+void main() {
+  vec2 w0 = remapWorld(aP0 / 65535.0);
+  vec2 w1 = remapWorld(aP1 / 65535.0);
+  vec4 clip0 = toClip(w0);
+  vec4 clip1 = toClip(w1);
+  // The actual drawn vertex sits at the t-mix of the two REMAPPED world
+  // positions (its own clip transform), not a clip-space mix of clip0/clip1
+  // -- avoids the perspective-divide distortion a linear clip-space lerp
+  // would introduce.
+  vec4 clipM = toClip(mix(w0, w1, a_corner.x));
+
+  // Screen-space perpendicular expansion: direction of the full p0->p1
+  // segment in screen px (NDC * half-viewport), rotated 90deg for the
+  // normal -- computed from the endpoints (not the per-vertex mixed point)
+  // so both edges of the quad share one consistent width direction.
+  vec2 ndc0 = clip0.xy / clip0.w;
+  vec2 ndc1 = clip1.xy / clip1.w;
+  vec2 dirPx = (ndc1 - ndc0) * (u_viewport * 0.5);
+  float dirLen = length(dirPx);
+  vec2 normalPx = dirLen > 1e-6 ? vec2(-dirPx.y, dirPx.x) / dirLen : vec2(0.0, 1.0);
+
+  // aS = max(endpoint citations) byte -- thickness scales with citations.
+  float halfWidthPx = clamp(u_widthBase * mix(0.5, 2.5, aS), 0.35, 6.0);
+  vec2 offsetNdc = (normalPx * a_corner.y * halfWidthPx) / (u_viewport * 0.5);
+  // clip.w-scaled offset: converts the screen-px offset back into clip
+  // space at clipM's own depth/perspective, same trick as offsetting after
+  // an NDC computation generally.
+  gl_Position = vec4(clipM.xy + offsetNdc * clipM.w, clipM.z, clipM.w);
+
+  vColor = mix(aC0, aC1, a_corner.x);        // endpoint-community gradient
+  vAlpha = u_intensity * mix(0.25, 1.0, aW); // weight-graded intensity
+}`;
+const EDGE_LINES_FRAG_SRC = `
+precision mediump float;
+varying vec3 vColor;
+varying float vAlpha;
+void main() {
+  // Premultiplied-alpha output, paired with render()'s
+  // gl.blendFunc(ONE, ONE_MINUS_SRC_ALPHA), same convention as the point cloud.
+  gl_FragColor = vec4(vColor * vAlpha, vAlpha);
+}`;
+
+function compileEdgeLinesShader(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    const info = gl.getShaderInfoLog(sh);
+    gl.deleteShader(sh);
+    throw new Error("edge-lines shader compile failed: " + info);
+  }
+  return sh;
+}
+
+// WebGL2 has instancing built in; WebGL1 needs the ANGLE_instanced_arrays
+// extension. MapLibre 4.x picks whichever context the browser supports, so
+// this feature-detects rather than assuming either -- returns a small
+// uniform wrapper so render()/onAdd don't need their own branches.
+function getInstancingAPI(gl) {
+  if (typeof WebGL2RenderingContext !== "undefined" && gl instanceof WebGL2RenderingContext) {
+    return {
+      drawElementsInstanced: (mode, count, type, offset, n) => gl.drawElementsInstanced(mode, count, type, offset, n),
+      vertexAttribDivisor: (index, divisor) => gl.vertexAttribDivisor(index, divisor),
+    };
+  }
+  const ext = gl.getExtension("ANGLE_instanced_arrays");
+  if (!ext) throw new Error("edge-lines: instanced rendering not supported (no WebGL2, no ANGLE_instanced_arrays)");
+  return {
+    drawElementsInstanced: (mode, count, type, offset, n) => ext.drawElementsInstancedANGLE(mode, count, type, offset, n),
+    vertexAttribDivisor: (index, divisor) => ext.vertexAttribDivisorANGLE(index, divisor),
+  };
+}
+
+// u_widthBase interpolation: 0.5px at z2 -> 1.2px at z6 -> 2px at z10, held
+// flat past either end -- same shape/reasoning as pointCloudBaseSizePx.
+function edgeLinesBaseWidthPx(zoom) {
+  if (zoom <= 2) return 0.5;
+  if (zoom <= 6) return 0.5 + (zoom - 2) * ((1.2 - 0.5) / 4);
+  if (zoom <= 10) return 1.2 + (zoom - 6) * ((2.0 - 1.2) / 4);
+  return 2.0;
+}
+
+const edgeLinesLayer = {
+  id: "edge-lines",
+  type: "custom",
+  renderingMode: "2d",
+
+  visible: false,
+  loaded: false,
+  loading: false,
+  loadedCount: 0,
+  totalCount: 0,
+  gl: null, program: null, inst: null,
+  cornerBuffer: null, indexBuffer: null, posBuffer: null, attrBuffer: null,
+  aCorner: -1, aP0: -1, aP1: -1, aC0: -1, aC1: -1, aW: -1, aS: -1,
+  uMatrix: null, uGamma: null, uWidthBase: null, uViewport: null, uIntensity: null,
+  // Raw ArrayBuffers retained for the lifetime of the page (~218MB once
+  // loaded) purely so a GL context restore can re-upload without
+  // re-fetching -- same reasoning/pattern as pointCloudLayer's cachedPosBuf/
+  // cachedAttrBuf.
+  cachedPosBuf: null, cachedAttrBuf: null,
+
+  onAdd(_map, gl) {
+    const vs = compileEdgeLinesShader(gl, gl.VERTEX_SHADER, EDGE_LINES_VERT_SRC);
+    const fs = compileEdgeLinesShader(gl, gl.FRAGMENT_SHADER, EDGE_LINES_FRAG_SRC);
+    const program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error("edge-lines program link failed: " + gl.getProgramInfoLog(program));
+    }
+    this.gl = gl;
+    this.program = program;
+    this.inst = getInstancingAPI(gl);
+    this.aCorner = gl.getAttribLocation(program, "a_corner");
+    this.aP0 = gl.getAttribLocation(program, "aP0");
+    this.aP1 = gl.getAttribLocation(program, "aP1");
+    this.aC0 = gl.getAttribLocation(program, "aC0");
+    this.aC1 = gl.getAttribLocation(program, "aC1");
+    this.aW = gl.getAttribLocation(program, "aW");
+    this.aS = gl.getAttribLocation(program, "aS");
+    this.uMatrix = gl.getUniformLocation(program, "u_matrix");
+    this.uGamma = gl.getUniformLocation(program, "u_gamma");
+    this.uWidthBase = gl.getUniformLocation(program, "u_widthBase");
+    this.uViewport = gl.getUniformLocation(program, "u_viewport");
+    this.uIntensity = gl.getUniformLocation(program, "u_intensity");
+
+    // 4-vertex unit quad template: (t, side) per corner. t in {0,1} selects
+    // which endpoint the vertex sits at before the perpendicular offset;
+    // side in {-1,1} selects which edge of the thick line it belongs to.
+    // Per-vertex (divisor stays 0, the GL default), shared by every instance.
+    this.cornerBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.cornerBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      0, -1,
+      0, 1,
+      1, -1,
+      1, 1,
+    ]), gl.STATIC_DRAW);
+
+    this.indexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2, 2, 1, 3]), gl.STATIC_DRAW);
+
+    this.posBuffer = gl.createBuffer();
+    this.attrBuffer = gl.createBuffer();
+    this.loadedCount = 0;
+    // Context-restore replay (see pointCloudLayer.onAdd's comment for why
+    // this fires automatically on webglcontextrestored): re-upload straight
+    // from the cached ArrayBuffers instead of re-fetching, if we have them.
+    if (this.cachedPosBuf && this.cachedAttrBuf) {
+      const count = Math.min(this.cachedPosBuf.byteLength, this.cachedAttrBuf.byteLength) >>> 3;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(this.cachedPosBuf, 0, count * 8), gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.attrBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(this.cachedAttrBuf, 0, count * 8), gl.STATIC_DRAW);
+      this.totalCount = count;
+      this.loadedCount = count;
+      this.loaded = true;
+    }
+  },
+
+  onRemove(_map, gl) {
+    if (this.cornerBuffer) gl.deleteBuffer(this.cornerBuffer);
+    if (this.indexBuffer) gl.deleteBuffer(this.indexBuffer);
+    if (this.posBuffer) gl.deleteBuffer(this.posBuffer);
+    if (this.attrBuffer) gl.deleteBuffer(this.attrBuffer);
+    if (this.program) gl.deleteProgram(this.program);
+    this.cornerBuffer = null;
+    this.indexBuffer = null;
+    this.posBuffer = null;
+    this.attrBuffer = null;
+    this.program = null;
+  },
+
+  render(gl, matrix) {
+    if (!this.visible || this.loadedCount === 0) return;
+    const zoom = map.getZoom();
+    // Deep zoom (>=10.25, same threshold as the point cloud's handoff to
+    // vector-points -- VECTOR_POINTS_MIN_ZOOM) keeps the precise interactive
+    // view: drawing 14M quantized line segments there would just duplicate
+    // and clutter the exact per-author vector geometry that takes over at
+    // that zoom, for no added information.
+    if (zoom >= VECTOR_POINTS_MIN_ZOOM) return;
+
+    gl.useProgram(this.program);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+    gl.uniformMatrix4fv(this.uMatrix, false, matrix);
+    const dpr = window.devicePixelRatio || 1;
+    gl.uniform1f(this.uWidthBase, edgeLinesBaseWidthPx(zoom) * dpr);
+    gl.uniform1f(this.uGamma, displaySettings.spacing);
+    gl.uniform1f(this.uIntensity, displaySettings.edgeIntensity);
+    gl.uniform2f(this.uViewport, gl.drawingBufferWidth, gl.drawingBufferHeight);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.cornerBuffer);
+    gl.enableVertexAttribArray(this.aCorner);
+    gl.vertexAttribPointer(this.aCorner, 2, gl.FLOAT, false, 8, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
+    gl.enableVertexAttribArray(this.aP0);
+    gl.vertexAttribPointer(this.aP0, 2, gl.UNSIGNED_SHORT, false, 8, 0);
+    this.inst.vertexAttribDivisor(this.aP0, 1);
+    gl.enableVertexAttribArray(this.aP1);
+    gl.vertexAttribPointer(this.aP1, 2, gl.UNSIGNED_SHORT, false, 8, 4);
+    this.inst.vertexAttribDivisor(this.aP1, 1);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.attrBuffer);
+    gl.enableVertexAttribArray(this.aC0);
+    gl.vertexAttribPointer(this.aC0, 3, gl.UNSIGNED_BYTE, true, 8, 0);
+    this.inst.vertexAttribDivisor(this.aC0, 1);
+    gl.enableVertexAttribArray(this.aC1);
+    gl.vertexAttribPointer(this.aC1, 3, gl.UNSIGNED_BYTE, true, 8, 3);
+    this.inst.vertexAttribDivisor(this.aC1, 1);
+    gl.enableVertexAttribArray(this.aW);
+    gl.vertexAttribPointer(this.aW, 1, gl.UNSIGNED_BYTE, true, 8, 6);
+    this.inst.vertexAttribDivisor(this.aW, 1);
+    gl.enableVertexAttribArray(this.aS);
+    gl.vertexAttribPointer(this.aS, 1, gl.UNSIGNED_BYTE, true, 8, 7);
+    this.inst.vertexAttribDivisor(this.aS, 1);
+
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
+    // Strongest-first draw: edges_pos.bin/edges_attr.bin are weight-desc, so
+    // the count slider capping the instance count to the first N instances
+    // always keeps the heaviest edges, matching the point cloud's
+    // cited-desc "important skeleton first" ordering.
+    const drawCount = Math.min(this.loadedCount, displaySettings.edgeCount);
+    if (drawCount > 0) this.inst.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, drawCount);
+
+    // Divisor state is global per attribute LOCATION index, not per-program
+    // -- if left at 1, a later draw (point-cloud, or MapLibre's own layers)
+    // that happens to reuse one of these same location indices for a
+    // per-vertex attribute would silently sample only its first vertex
+    // every instance. Reset to 0 (the GL default) right after this layer's
+    // own draw call so nothing downstream inherits it.
+    this.inst.vertexAttribDivisor(this.aP0, 0);
+    this.inst.vertexAttribDivisor(this.aP1, 0);
+    this.inst.vertexAttribDivisor(this.aC0, 0);
+    this.inst.vertexAttribDivisor(this.aC1, 0);
+    this.inst.vertexAttribDivisor(this.aW, 0);
+  },
+};
+
+const dpEdgeLines = document.getElementById("dp-edge-lines");
+const edgeLinesStatusEl = document.getElementById("dp-edge-lines-status");
+function setEdgeLinesStatus(text) { edgeLinesStatusEl.textContent = text || ""; }
+const dpEdgeIntensity = document.getElementById("dp-edge-intensity");
+const dpEdgeIntensityN = document.getElementById("dp-edge-intensity-n");
+const dpEdgeCount = document.getElementById("dp-edge-count");
+const dpEdgeCountN = document.getElementById("dp-edge-count-n");
+// Line count slider stops: 1M/3M/7M/14.3M (the last is the real total edge
+// count, edges_meta.json's 14,316,429, not a rounded 14,300,000 -- so the
+// top stop always means "everything loaded", not 16,429 edges short of it).
+const EDGE_COUNT_STOPS = [1000000, 3000000, 7000000, 14316429];
+const EDGE_COUNT_LABELS = ["1M", "3M", "7M", "14.3M"];
+function edgeCountIndex(count) {
+  const idx = EDGE_COUNT_STOPS.indexOf(count);
+  return idx >= 0 ? idx : 1;   // default stop (3M) if a stale/corrupt localStorage value doesn't match any stop
+}
+// dpEdgeLines/dpEdgeIntensity/dpEdgeCount don't exist yet at syncDisplayUI's
+// own definition/first call further up the file -- same reasoning as
+// dpAllPoints (R17), their initial UI state is set directly here instead.
+dpEdgeLines.checked = displaySettings.edgeLines;
+dpEdgeIntensity.value = displaySettings.edgeIntensity;
+dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(2);
+dpEdgeCount.value = edgeCountIndex(displaySettings.edgeCount);
+dpEdgeCountN.textContent = EDGE_COUNT_LABELS[edgeCountIndex(displaySettings.edgeCount)];
+
+// Fetches + progressively uploads edges_pos.bin/edges_attr.bin, same chunked
+// pattern as ensurePointCloudLoaded (see that function's comment) -- 8
+// bytes/edge in both files here (vs 4 for the point cloud), and more chunks
+// (the combined download is ~3.4x the cloud's) for a smoother progressive
+// reveal. Always fetches the FULL 14.3M edges regardless of the chosen Line
+// count -- that slider only ever caps the draw call's instance count (see
+// render() above), not what gets downloaded/uploaded.
+const EDGE_LINES_CHUNKS = 20;
+const EDGE_LINES_TOTAL_BYTES = 229062864;   // edges_pos.bin + edges_attr.bin combined, from data/vector_experiment/edges_meta.json
+async function ensureEdgeLinesLoaded() {
+  if (edgeLinesLayer.loaded || edgeLinesLayer.loading) return;
+  edgeLinesLayer.loading = true;
+  setEdgeLinesStatus("loading 14.3M connections (218MB)… 0%");
+  try {
+    const receivedByFile = [0, 0];
+    let lastStatusUpdate = 0;
+    const onBytes = (i) => (n) => {
+      receivedByFile[i] = n;
+      const now = performance.now();
+      if (now - lastStatusUpdate < 250) return;   // throttle to ~4x/second
+      lastStatusUpdate = now;
+      const total = receivedByFile[0] + receivedByFile[1];
+      const mb = (bytes) => (bytes / 1048576).toFixed(1);
+      setEdgeLinesStatus(`loading 14.3M connections… ${mb(total)} of ${mb(EDGE_LINES_TOTAL_BYTES)}MB`);
+    };
+    const [posBuf, attrBuf] = await Promise.all([
+      fetchWithProgress(DATA_BASE + "/data/vector_experiment/edges_pos.bin", onBytes(0)),
+      fetchWithProgress(DATA_BASE + "/data/vector_experiment/edges_attr.bin", onBytes(1)),
+    ]);
+    const count = Math.min(posBuf.byteLength, attrBuf.byteLength) >>> 3;   // 8 bytes/edge in both files
+    edgeLinesLayer.totalCount = count;
+    // Retained for onAdd's context-restore re-upload path -- see the
+    // cachedPosBuf/cachedAttrBuf comment above edgeLinesLayer.
+    edgeLinesLayer.cachedPosBuf = posBuf;
+    edgeLinesLayer.cachedAttrBuf = attrBuf;
+    const gl = edgeLinesLayer.gl;
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, edgeLinesLayer.posBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, count * 8, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, edgeLinesLayer.attrBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, count * 8, gl.STATIC_DRAW);
+
+    const chunkSize = Math.ceil(count / EDGE_LINES_CHUNKS);
+    for (let i = 0; i < EDGE_LINES_CHUNKS; i++) {
+      const start = i * chunkSize;
+      const end = Math.min(count, start + chunkSize);
+      if (end <= start) break;
+      const posChunk = new Uint8Array(posBuf, start * 8, (end - start) * 8);
+      const attrChunk = new Uint8Array(attrBuf, start * 8, (end - start) * 8);
+      gl.bindBuffer(gl.ARRAY_BUFFER, edgeLinesLayer.posBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, start * 8, posChunk);
+      gl.bindBuffer(gl.ARRAY_BUFFER, edgeLinesLayer.attrBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, start * 8, attrChunk);
+      edgeLinesLayer.loadedCount = end;
+      setEdgeLinesStatus(`loading 14.3M connections (218MB)… ${Math.round(end / count * 100)}%`);
+      map.triggerRepaint();
+      await new Promise(r => requestAnimationFrame(r));   // let the growing line set actually paint
+    }
+    edgeLinesLayer.loaded = true;
+    setEdgeLinesStatus("");
+  } catch (err) {
+    setEdgeLinesStatus("connection lines failed to load - toggle to retry");
+    console.error("edge-lines load failed:", err);
+    dpEdgeLines.checked = false;
+    displaySettings.edgeLines = false;
+    saveDisplaySettings();
+    setEdgeLinesActive(false);
+  } finally {
+    edgeLinesLayer.loading = false;
+  }
+}
+
+// Single owner of edgeLinesLayer.visible -- mirrors syncPointCloudVisible.
+function syncEdgeLinesVisible() {
+  edgeLinesLayer.visible = edgeLinesEffectivelyOn();
+  map.triggerRepaint();
+}
+
+function setEdgeLinesActive(on) {
+  edgeLinesOn = on;
+  if (on) {
+    if (!map.getLayer("edge-lines")) {
+      // Anchored directly above "dots", below vector-points AND below
+      // point-cloud if it already exists. beforeIdAbove("dots") alone isn't
+      // enough here -- it always resolves to "vector-points" regardless of
+      // any custom layers already in between (see the R22c note above
+      // beforeIdAbove's definition), which would land edge-lines ABOVE an
+      // already-added point-cloud instead of below it. Anchoring directly
+      // on the raw "point-cloud" id sidesteps that: map.addLayer's `before`
+      // lookup is a direct internal id lookup (not through getStyle()), so
+      // it works even though beforeIdAbove itself can't discover a custom
+      // layer's id.
+      map.addLayer(edgeLinesLayer, map.getLayer("point-cloud") ? "point-cloud" : beforeIdAbove("dots"));
+    }
+    ensureEdgeLinesLoaded();   // no-op if already loaded/loading
+  }
+  syncEdgeLinesVisible();
+}
+dpEdgeLines.addEventListener("change", () => {
+  displaySettings.edgeLines = dpEdgeLines.checked;
+  saveDisplaySettings();
+  setEdgeLinesActive(dpEdgeLines.checked);
+});
+dpEdgeIntensity.addEventListener("input", () => {
+  displaySettings.edgeIntensity = Number(dpEdgeIntensity.value);
+  dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(2);
+  saveDisplaySettings();
+  // u_intensity is read fresh every render() frame, but an input event alone
+  // never triggers a MapLibre repaint -- same reasoning as sizeContrast/
+  // spacing's own live-repaint calls above.
+  if (edgeLinesEffectivelyOn()) map.triggerRepaint();
+});
+dpEdgeCount.addEventListener("input", () => {
+  const idx = Number(dpEdgeCount.value);
+  displaySettings.edgeCount = EDGE_COUNT_STOPS[idx];
+  dpEdgeCountN.textContent = EDGE_COUNT_LABELS[idx];
+  saveDisplaySettings();
+  if (edgeLinesEffectivelyOn()) map.triggerRepaint();
 });
 
 let vectorGen = 0;           // invalidates stale in-flight tile/shard fetches (labelGen pattern)
@@ -3141,6 +3645,7 @@ function setIsolate(community, row, name) {
   updateIsolatePillText();
   legendIsolatePill.style.display = "block";
   syncPointCloudVisible();   // R15b: isolate suppresses the experimental cloud (checkbox untouched)
+  syncEdgeLinesVisible();    // R22c: isolate suppresses connection lines too (same contract as the cloud)
   updateVectorPoints();
   updateRasterOpacity();
   drawRegions();
@@ -3155,6 +3660,7 @@ function clearIsolate() {
   legendIsolatePill.style.display = "none";
   legendIsolatePill.textContent = "";
   syncPointCloudVisible();   // R15b: restore the cloud if its checkbox is still on
+  syncEdgeLinesVisible();    // R22c: restore connection lines if their checkbox is still on
   updateVectorPoints();
   updateRasterOpacity();
   drawRegions();
@@ -3481,6 +3987,13 @@ map.on("load", () => {
   // first effective enable, whether that's this load-time call or a later
   // manual check; ensurePointCloudLoaded's loaded/loading guard is unchanged.
   if (displaySettings.allPoints) setPointCloudActive(true);
+  // R22c: same lazy-enable-on-load pattern as allPoints just above.
+  // setEdgeLinesActive checks for an existing "point-cloud" layer at call
+  // time and anchors accordingly either way, so this doesn't actually need
+  // to run after the allPoints line above -- see setEdgeLinesActive's own
+  // comment -- kept in this order simply to match the panel's top-to-bottom
+  // row order (Full point cloud above Connection lines).
+  if (displaySettings.edgeLines) setEdgeLinesActive(true);
   applyDisplayPaint();
   drawLabels();
   drawRegions();
