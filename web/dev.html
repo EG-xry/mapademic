@@ -156,11 +156,12 @@
     #display-panel .dp-row-head { display: flex; justify-content: space-between; align-items: center; }
     #display-panel .dp-row-head .n { color: #888; }
     #display-panel input[type="range"] { width: 100%; }
-    /* R13: flex-wrap keeps the new "Points" row's longer "Raster + vector"
-       label from breaking word-by-word (word-wrap inside a squeezed flex
-       item); an item that doesn't fit now wraps to its own line instead.
-       Existing rows (Label density, Author names) already fit on one line
-       and are unaffected. */
+    /* R13: flex-wrap keeps a long radio-label option from breaking
+       word-by-word (word-wrap inside a squeezed flex item); an item that
+       doesn't fit now wraps to its own line instead. Introduced for the
+       "Points" row's "Raster + vector" label, which R24 retired (see
+       displaySettings.overlayDots) -- still shared by Label density/Author
+       names, both of which already fit on one line and are unaffected. */
     #display-panel .dp-radios { display: flex; flex-wrap: wrap; gap: 10px; }
     #display-panel .dp-radios label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
     #display-panel .dp-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
@@ -285,9 +286,11 @@
           by searching them or via the info card's Coauthors button. The
           faint grey speckle in dark areas is background dust - authors with
           no retained coauthor links, kept searchable but not rendered as
-          interactive dots. The gear's Points setting sizes and colors dots
-          by citations and community at every zoom, not just up close, and
-          can hide the raster splats entirely.</p>
+          interactive dots. The gear's Full point cloud toggle sizes and
+          colors every author as a dot at every zoom, not just up close, and
+          hides the raster splats while it's on; the Top-author dots
+          checkbox controls a lighter top-cited overlay below deep zoom on
+          its own.</p>
       </section>
       <section>
         <h3>Controls</h3>
@@ -364,16 +367,16 @@
       Region names
     </label>
     <!-- R12b: category-boundaries UI removed (pipeline builder + data/index/boundaries.json stay dormant on disk). -->
-    <!-- R13: replaced the old "Vector points" on/off checkbox with a
-         three-way mode -- see displaySettings.pointMode. -->
-    <div class="dp-row">
-      <div class="dp-row-head"><span>Points</span></div>
-      <div class="dp-radios" role="radiogroup" aria-label="Points">
-        <label><input type="radio" name="dp-point-mode" value="both" checked> Raster + vector</label>
-        <label><input type="radio" name="dp-point-mode" value="vector"> Vector only</label>
-        <label><input type="radio" name="dp-point-mode" value="raster"> Raster only</label>
-      </div>
-    </div>
+    <!-- R13 replaced the old "Vector points" checkbox with a three-way
+         pointMode radio (raster/vector/both). R24 retires that radio in turn
+         -- raster-only and vector-only are gone, behavior is always the old
+         "both" -- leaving a single checkbox for the one thing that used to
+         vary: whether the mid-zoom top-author overlay renders. See
+         displaySettings.overlayDots. -->
+    <label class="dp-check">
+      <input id="dp-overlay-dots" type="checkbox" checked>
+      Top-author dots at low zoom
+    </label>
     <div class="dp-row">
       <div class="dp-row-head"><label for="dp-size-contrast">Citation size contrast</label><span id="dp-size-contrast-n" class="n"></span></div>
       <input id="dp-size-contrast" type="range" min="0" max="5" step="0.1" value="0.5">
@@ -434,7 +437,7 @@
     </div>
     <div class="dp-row">
       <div class="dp-row-head"><span>Line count</span><span id="dp-edge-count-n" class="n"></span></div>
-      <input id="dp-edge-count" type="range" min="0" max="3" step="1" value="1" aria-label="Line count">
+      <input id="dp-edge-count" type="range" min="0" max="3" step="1" value="0" aria-label="Line count">
     </div>
     <button id="display-reset" type="button">Reset</button>
   </div>
@@ -585,17 +588,17 @@ function safePaint(prop, v) {
 // this file, once displaySettings/VECTOR_POINTS_MIN_ZOOM/isolateCommunity
 // exist) never fight over the same paint property. renderPath/clearPath only
 // ever set pathDimActive and call this -- they no longer touch raster-opacity
-// directly. Precedence (R13: pointMode replaces the old vectorPoints
-// checkbox; R15b: the experimental full point-cloud layer added a new
-// top-precedence case, see allPointsCloudOn below; R22d: equalizeActive()
-// added right under it, see below; R23: wideActive() joins it for the same
-// reason): the cloud, when EFFECTIVELY on (checkbox
-// on AND no active isolate -- an isolate suppresses the cloud, see
-// pointCloudEffectivelyOn), always wins outright (same as pointMode "vector"
-// -- the cloud renders every author itself, so the raster splats underneath
-// would just be redundant double-drawing); while an isolate suppresses the
-// cloud, the resolver falls through to the pre-cloud precedence below, so
-// the isolate's own 0.2 dim applies exactly as with the cloud off; otherwise
+// directly. Precedence (R15b: the experimental full point-cloud layer added a
+// top-precedence case, see pointCloudEffectivelyOn below; R22d:
+// equalizeActive() added right under it; R23: wideActive() joins it for the
+// same reason; R24: the old pointMode "vector"/"raster" branches are gone --
+// see this function's own R24 comment for why): the cloud, when EFFECTIVELY
+// on (checkbox on AND no active isolate -- an isolate suppresses the cloud,
+// see pointCloudEffectivelyOn), always wins outright -- the cloud renders
+// every author itself, so the raster splats underneath would just be
+// redundant double-drawing; while an isolate suppresses the cloud, the
+// resolver falls through to the pre-cloud precedence below, so the isolate's
+// own 0.2 dim applies exactly as with the cloud off; otherwise
 // equalizeActive() (Equalize slider above 0 AND its field loaded) or
 // wideActive() (Wide layout slider above its 1.0 default) also win outright,
 // for an unrelated reason from the cloud's own case above -- the raster is a
@@ -603,22 +606,15 @@ function safePaint(prop, v) {
 // remapWorld), so leaving it visible while equalize/wide actively displace
 // labels/vector-points/overlays would reproduce the exact raster-vs-remap
 // mismatch R20 fixed for Spacing (see remapWorld's own R22d comment);
-// otherwise pointMode "vector" always wins outright,
-// forcing the raster fully out at every zoom (not just deep zoom) since that
-// mode's whole point is vector-only rendering; otherwise pointMode "both" at
-// deep zoom (zoom >= VECTOR_POINTS_MIN_ZOOM) fades the raster out the same
-// way the old vectorPoints-enabled behavior did, so vector circles are the
-// only dots layer visible there (isolate filtering happens inside
-// updateVectorPoints itself in that case); otherwise a path in flight dims
-// the raster to 0.45 (unchanged pre-vector-points behavior); otherwise a
-// community isolate in effect (Task R10a) dims the raster to 0.2 at ALL
-// zooms -- this is the isolate's only effect below vector zoom (or in
-// pointMode "raster" at any zoom), since the raster itself isn't filterable
-// per-community until R10b's per-community shards ship; otherwise full
-// opacity. pointMode "raster" never forces 0 here -- see updateVectorPoints
-// for how its isolate shard dots still render as vector points regardless
-// (deliberate, isolate is an explicit action) without this resolver treating
-// that as "vector active".
+// otherwise deep zoom (zoom >= VECTOR_POINTS_MIN_ZOOM) fades the raster out
+// the same way the old vectorPoints-enabled/pointMode "both" behavior did,
+// so vector circles are the only dots layer visible there (isolate filtering
+// happens inside updateVectorPoints itself in that case); otherwise a path
+// in flight dims the raster to 0.45 (unchanged pre-vector-points behavior);
+// otherwise a community isolate in effect (Task R10a) dims the raster to 0.2
+// at ALL zooms -- this is the isolate's only effect below vector zoom, since
+// the raster itself isn't filterable per-community until R10b's
+// per-community shards ship; otherwise full opacity.
 let pathDimActive = false;   // true while renderPath owns a drawn path, cleared by clearPath
 // R23: gate shared by remapWorld and updateRasterOpacity, same shape as
 // equalizeActive() below -- not gated on pointCloudEffectivelyOn() since
@@ -627,15 +623,22 @@ let pathDimActive = false;   // true while renderPath owns a drawn path, cleared
 function wideActive() {
   return displaySettings.wide !== DISPLAY_DEFAULTS.wide;
 }
+// R24: the old pointMode "vector"/"raster" branches (force raster fully off
+// / never dim it below deep zoom) are gone along with the retired radio --
+// behavior is unconditionally the old "both": deep zoom always hands off
+// from raster to vector circles, nothing forces the raster off at every
+// zoom anymore. The mid-zoom top-author overlay (now gated by the
+// overlayDots checkbox instead of pointMode) never dimmed the raster on its
+// own even under the old "both" mode -- see updateVectorPoints'
+// globalMidZoomActive comment -- so overlayDots has no branch here either.
 function updateRasterOpacity() {
-  const vectorActive = displaySettings.pointMode === "both" && map.getZoom() >= VECTOR_POINTS_MIN_ZOOM;
+  const vectorActive = map.getZoom() >= VECTOR_POINTS_MIN_ZOOM;
   // Deliberate precedence: a drawn path's dim (0.45) wins over isolate's
   // deeper dim (0.2) when both are active, since the path is the fresher,
   // more specific intent and path drawing doesn't clear isolate state.
   const opacity = pointCloudEffectivelyOn() ? 0
     : equalizeActive() ? 0
     : wideActive() ? 0
-    : displaySettings.pointMode === "vector" ? 0
     : vectorActive ? 0
     : pathDimActive ? 0.45
     : isolateCommunity != null ? 0.2
@@ -2002,15 +2005,25 @@ function collides(placed, x, y, w, h) {
 // cloud's true, undistorted layout.
 // R22c: edgeLines defaults false (same 200MB-class opt-in reasoning as
 // allPoints); edgeIntensity/edgeCount default to a readable-but-sparse
-// preview (0.12 alpha scale, top 3M of 14.3M by weight) rather than the
-// heaviest settings, so a first-time enable doesn't shove 218MB and the
-// densest possible draw at a visitor by default.
+// preview (0.12 alpha scale, top 1M of 14.3M by weight -- R24: lowered from
+// 3M, Eric: "lag at 3M+") rather than the heaviest settings, so a first-time
+// enable doesn't shove 218MB and the densest possible draw at a visitor by
+// default. R24: this is a DEFAULT-only change -- a persisted edgeCount
+// (localStorage already carries the visitor's own past choice, 3M or
+// otherwise) still wins via loadDisplaySettings' `{...DISPLAY_DEFAULTS,
+// ...parsed}` spread, so nobody who already picked 3M+ gets silently
+// downgraded.
 // R22d: equalize defaults to 0 (identity -- see remapWorld/equalizeActive),
 // same "visitor never touches it, sees the true layout" reasoning as
 // spacing's own default above.
 // R23: wide defaults to 1.0 (identity -- see remapWorld's own wide step),
 // same reasoning again.
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 0.5, allPoints: false, spacing: 1.0, edgeLines: false, edgeIntensity: 0.12, edgeCount: 3000000, equalize: 0, wide: 1.0 };
+// R24: overlayDots defaults to true (mid-zoom top-author GeoJSON overlay
+// visible below VECTOR_POINTS_MIN_ZOOM by default) -- matches the old
+// pointMode "both" default's behavior, the mode this checkbox replaces (see
+// loadDisplaySettings' migration comment below for the retired three-way
+// radio).
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, overlayDots: true, labelMode: "normal", sizeContrast: 0.5, allPoints: false, spacing: 1.0, edgeLines: false, edgeIntensity: 0.12, edgeCount: 1000000, equalize: 0, wide: 1.0 };
 const DISPLAY_KEY = "mapademic.display";
 
 // R12b: a stale localStorage value still carrying the removed "boundaries"
@@ -2018,16 +2031,27 @@ const DISPLAY_KEY = "mapademic.display";
 // (loadDisplaySettings' `{...DISPLAY_DEFAULTS, ...JSON.parse(raw)}`) -- no
 // code reads it anymore, so it's silently harmless rather than an error.
 // R13: the boolean "vectorPoints" checkbox setting was replaced by the
-// three-way "pointMode" radio (see DISPLAY_DEFAULTS above and the Points
-// row in #display-panel). A stale vectorPoints value is actively migrated
-// (true -> "both", matching the old overlay-everywhere default; false ->
-// "raster", matching the old fully-off state) rather than left to spread in
-// inert like "boundaries" above, since leaving it alone would silently drop
-// the user's prior on/off choice back to the new default every load. Only
-// applies when pointMode itself isn't already present in the saved value --
-// an explicit new-format save always wins. The stale vectorPoints property
-// is otherwise left in place afterward (same as "boundaries"); nothing reads
-// it again, so it's harmless.
+// three-way "pointMode" radio (true -> "both", matching the old
+// overlay-everywhere default; false -> "raster", matching the old fully-off
+// state).
+// R24: pointMode itself is now retired -- raster-only and vector-only are
+// gone (the full point cloud already covers the vector-only case), so
+// behavior is unconditionally the old "both". The one thing that genuinely
+// varied under pointMode -- whether the mid-zoom top-author GeoJSON overlay
+// renders below VECTOR_POINTS_MIN_ZOOM -- is now the single "overlayDots"
+// checkbox. Migration chains through both steps in one pass so a visitor on
+// ANY prior format (pre-R13 boolean, R13-R23 three-way radio, or already
+// R24) lands correctly: "vector"/"both" -> overlayDots true (the two modes
+// that showed the overlay); "raster" -> overlayDots false (closest a single
+// checkbox can get to the old raster-only "no vector overlays" contract).
+// allPoints (the separate full point-cloud checkbox) was never controlled by
+// pointMode and needs no migration of its own -- it's already just spread
+// through untouched by the `{...DISPLAY_DEFAULTS, ...parsed}` below. Once
+// migrated, the stale pointMode/vectorPoints properties are deleted rather
+// than left to spread in inert like "boundaries" above -- pointMode
+// specifically must not survive, since a leftover pointMode value would
+// silently satisfy the `parsed.pointMode !== undefined` guard forever and
+// re-run (harmlessly, but pointlessly) on every future load.
 function loadDisplaySettings() {
   try {
     const raw = localStorage.getItem(DISPLAY_KEY);
@@ -2036,6 +2060,11 @@ function loadDisplaySettings() {
     if (parsed.pointMode === undefined && typeof parsed.vectorPoints === "boolean") {
       parsed.pointMode = parsed.vectorPoints ? "both" : "raster";
     }
+    if (parsed.pointMode !== undefined && parsed.overlayDots === undefined) {
+      parsed.overlayDots = parsed.pointMode !== "raster";
+    }
+    delete parsed.pointMode;
+    delete parsed.vectorPoints;
     return { ...DISPLAY_DEFAULTS, ...parsed };
   } catch {
     return { ...DISPLAY_DEFAULTS };
@@ -2068,7 +2097,7 @@ const dpSaturationN = document.getElementById("dp-saturation-n");
 const dpDensityRadios = document.querySelectorAll('input[name="dp-density"]');
 const dpLabelModeRadios = document.querySelectorAll('input[name="dp-label-mode"]');
 const dpRegions = document.getElementById("dp-regions");
-const dpPointModeRadios = document.querySelectorAll('input[name="dp-point-mode"]');
+const dpOverlayDots = document.getElementById("dp-overlay-dots");   // R24: replaces dpPointModeRadios
 const dpSizeContrast = document.getElementById("dp-size-contrast");
 const dpSizeContrastN = document.getElementById("dp-size-contrast-n");
 const dpSpacing = document.getElementById("dp-spacing");
@@ -2089,7 +2118,7 @@ function syncDisplayUI() {
   dpDensityRadios.forEach(r => { r.checked = Number(r.value) === displaySettings.labelDensity; });
   dpLabelModeRadios.forEach(r => { r.checked = r.value === displaySettings.labelMode; });
   dpRegions.checked = displaySettings.regionNames;
-  dpPointModeRadios.forEach(r => { r.checked = r.value === displaySettings.pointMode; });
+  dpOverlayDots.checked = displaySettings.overlayDots;
   dpSizeContrast.value = displaySettings.sizeContrast;
   dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
   dpSpacing.value = displaySettings.spacing;
@@ -2106,23 +2135,34 @@ dpGear.addEventListener("click", () => {
   dpGear.setAttribute("aria-expanded", String(open));
 });
 
+// R24: brightness/contrast/saturation now also drive the point cloud's own
+// u_color* uniforms (see POINT_CLOUD_FRAG_SRC), read fresh every render()
+// frame the same way u_gamma/u_wide/u_contrast already are -- so, same
+// pattern as those, an "input" event alone never causes a repaint (MapLibre
+// only repaints on camera changes/triggerRepaint), so each handler forces
+// one whenever the cloud is actually visible. applyDisplayPaint's raster
+// paint-property writes are unaffected/unchanged -- the raster and the cloud
+// are two independent consumers of the same three displaySettings values now.
 dpBrightness.addEventListener("input", () => {
   displaySettings.brightness = Number(dpBrightness.value);
   dpBrightnessN.textContent = displaySettings.brightness.toFixed(2);
   applyDisplayPaint();
   saveDisplaySettings();
+  if (pointCloudEffectivelyOn()) map.triggerRepaint();
 });
 dpContrast.addEventListener("input", () => {
   displaySettings.contrast = Number(dpContrast.value);
   dpContrastN.textContent = displaySettings.contrast.toFixed(2);
   applyDisplayPaint();
   saveDisplaySettings();
+  if (pointCloudEffectivelyOn()) map.triggerRepaint();
 });
 dpSaturation.addEventListener("input", () => {
   displaySettings.saturation = Number(dpSaturation.value);
   dpSaturationN.textContent = displaySettings.saturation.toFixed(2);
   applyDisplayPaint();
   saveDisplaySettings();
+  if (pointCloudEffectivelyOn()) map.triggerRepaint();
 });
 dpDensityRadios.forEach(r => r.addEventListener("change", () => {
   if (!r.checked) return;
@@ -2141,13 +2181,18 @@ dpRegions.addEventListener("change", () => {
   saveDisplaySettings();
   drawRegions();
 });
-dpPointModeRadios.forEach(r => r.addEventListener("change", () => {
-  if (!r.checked) return;
-  displaySettings.pointMode = r.value;
+// R24: replaces the retired three-way pointMode radio -- see
+// displaySettings.overlayDots / loadDisplaySettings' migration comment.
+// Only updateVectorPoints needs to re-run: overlayDots only ever gates the
+// mid-zoom top-author GeoJSON branch inside that function, it has no effect
+// on raster-opacity (unlike the old pointMode "vector"/"raster" branches,
+// which forced the raster fully on/off -- see updateRasterOpacity's own R24
+// comment for why that branch is gone too).
+dpOverlayDots.addEventListener("change", () => {
+  displaySettings.overlayDots = dpOverlayDots.checked;
   saveDisplaySettings();
   updateVectorPoints();
-  updateRasterOpacity();
-}));
+});
 // R23 perf: a slider drag fires "input" continuously (many events/sec).
 // Reading displaySettings straight into a GPU uniform + triggerRepaint is
 // cheap and stays fully live every tick (see each handler below), but the
@@ -2205,6 +2250,34 @@ dpSpacing.addEventListener("input", () => {
   scheduleHeavyRefresh();
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
 });
+// R24: camera compensation for Wide (Eric: "just squishes... I want to pan
+// left and right"). Wide's y-compression alone just makes the whole layout
+// visually shorter at a fixed camera zoom -- it doesn't, by itself, make
+// anything pannable. Zooming IN by exactly the ratio the y-axis was just
+// compressed by re-magnifies the (compressed) vertical extent back to its
+// prior on-screen size while the untouched x-axis gets magnified by that
+// same camera zoom too -- so the map now visibly overflows the viewport's
+// width at that zoom, and panning left/right becomes meaningful. Tracked as
+// its own trailing debounce (same 250ms delay as scheduleHeavyRefresh, but a
+// separate timer/state) rather than folded into that shared one:
+// scheduleHeavyRefresh doesn't know which slider triggered it, but this
+// needs the wide value from the START of the settled drag (w0) compared
+// against the final value (w1) once it settles, not just "refresh
+// everything" -- doing it per-tick (every "input" event) would compound a
+// separate easeTo for every intermediate value instead of one clean move
+// from the pre-drag zoom to the post-drag zoom.
+let wideCompensateTimer = null;
+let wideCompensateFrom = displaySettings.wide;
+function scheduleWideCompensation() {
+  if (wideCompensateTimer) clearTimeout(wideCompensateTimer);
+  wideCompensateTimer = setTimeout(() => {
+    wideCompensateTimer = null;
+    const w0 = wideCompensateFrom, w1 = displaySettings.wide;
+    wideCompensateFrom = w1;
+    if (w0 === w1) return;
+    map.easeTo({ zoom: map.getZoom() + Math.log2(w1 / w0), duration: 200 });
+  }, 250);
+}
 dpWide.addEventListener("input", () => {
   displaySettings.wide = Number(dpWide.value);
   dpWideN.textContent = displaySettings.wide.toFixed(2);
@@ -2214,6 +2287,9 @@ dpWide.addEventListener("input", () => {
   // all they need live; everything else (labels/regions/vector-points/
   // overlays/raster) catches up after the drag settles.
   scheduleHeavyRefresh();
+  // R24: camera compensation -- see scheduleWideCompensation's own comment
+  // above. Deliberately not done per-tick, only once the drag settles.
+  scheduleWideCompensation();
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
   if (edgeLinesEffectivelyOn()) map.triggerRepaint();
 });
@@ -2411,6 +2487,12 @@ dpEqualize.addEventListener("input", () => {
 dpReset.addEventListener("click", () => {
   displaySettings = { ...DISPLAY_DEFAULTS };
   try { localStorage.removeItem(DISPLAY_KEY); } catch { /* ignore storage errors */ }
+  // R24: Reset is a click, not a drag -- same "immediate, no debounce" reasoning
+  // as the rest of this handler (see its own comment further below). Just
+  // re-anchor the compensation baseline to the now-default 1.0; Reset doesn't
+  // itself easeTo the camera (a click isn't the drag-release gesture the
+  // compensation is for).
+  wideCompensateFrom = displaySettings.wide;
   syncDisplayUI();
   applyDisplayPaint();
   drawLabels();
@@ -2539,17 +2621,19 @@ function drawRegions() {
 //     pixels are fixed size, and isolate mode's shard dots "replicate that
 //     globally"): the global top_authors.json shard (50k, citation-sorted)
 //     renders instead, capped by shardCapForZoom same as isolate's
-//     per-community shard. In pointMode "both" the raster is NOT dimmed for
-//     this -- see updateRasterOpacity, whose "both"-mode vectorActive check
-//     stays gated on z >= VECTOR_POINTS_MIN_ZOOM, so this overlay only ever
-//     complements the raster there, never replaces it. R13: pointMode
-//     "vector" dims the raster to 0 at every zoom regardless (a separate,
-//     unconditional top-precedence branch in updateRasterOpacity), so at
-//     that point this same overlay IS the only dots layer visible below
-//     10.25 too. R15b: same idea, one more layer up -- when the experimental
-//     full point-cloud is on, it supersedes this overlay below 10.25 (see
-//     updateVectorPoints' hiddenByCloud), since the cloud already draws
-//     every author itself; at/above 10.25 this overlay is unaffected.
+//     per-community shard. The raster is NOT dimmed for this -- see
+//     updateRasterOpacity, whose vectorActive check stays gated on
+//     z >= VECTOR_POINTS_MIN_ZOOM, so this overlay only ever complements the
+//     raster there, never replaces it. R24: this overlay is now gated by the
+//     "overlayDots" checkbox (default on) rather than pointMode -- see
+//     updateVectorPoints' globalMidZoomActive; the old pointMode "vector"
+//     mode that dimmed the raster to 0 at every zoom regardless is gone
+//     (raster-only and vector-only modes were both retired, see
+//     updateRasterOpacity's own R24 comment). R15b: same idea, one more
+//     layer up -- when the experimental full point-cloud is on, it
+//     supersedes this overlay below 10.25 (see updateVectorPoints'
+//     hiddenByCloud), since the cloud already draws every author itself;
+//     at/above 10.25 this overlay is unaffected.
 const VECTOR_POINTS_MIN_ZOOM = 10.25;
 // Hard cap on rendered features regardless of how many tiles are visible --
 // keeps the GeoJSON source (and MapLibre's rebuild of it) bounded on a very
@@ -2823,7 +2907,12 @@ void main() {
   // stops not required" per spec.
   float sizeFactor = mix(0.6, 4.0, a_attr.a);
   gl_PointSize = clamp(u_base * mix(1.0, sizeFactor, u_contrast), u_min, 64.0);
-  v_color = a_attr.rgb;
+  // R24 (Eric's idea): citation luminance -- low-cited dots are dimmer,
+  // scaled by the same a_attr.a citation byte the size curve above already
+  // reads (0 = least-cited, 1 = most). Applied BEFORE the fragment shader's
+  // brightness/contrast/saturation user adjustments (see POINT_CLOUD_FRAG_SRC),
+  // since it's baked into v_color here, upstream of those.
+  v_color = a_attr.rgb * mix(0.6, 1.0, a_attr.a);
 }`;
 // R22d: equalize-capable variant of POINT_CLOUD_VERT_SRC above -- a separate
 // source string, not a runtime branch inside the one shader, because merely
@@ -2896,20 +2985,56 @@ void main() {
   gl_Position = u_matrix * vec4(mercX, mercY, 0.0, 1.0);
   float sizeFactor = mix(0.6, 4.0, a_attr.a);
   gl_PointSize = clamp(u_base * mix(1.0, sizeFactor, u_contrast), u_min, 64.0);
-  v_color = a_attr.rgb;
+  // R24: same citation-luminance dimming as POINT_CLOUD_VERT_SRC above --
+  // see that copy's comment for the full reasoning (kept in both variants
+  // since they're separate shader source strings, not a shared include).
+  v_color = a_attr.rgb * mix(0.6, 1.0, a_attr.a);
 }`;
 const POINT_CLOUD_FRAG_SRC = `
 precision mediump float;
 varying vec3 v_color;
+// R24: cloud color controls (Eric: "brightness/contrast/saturation do not
+// apply to the cloud" -- true, those sliders only ever wrote MapLibre raster
+// paint properties, see applyDisplayPaint, which apply to the "dots" raster
+// layer only, never this custom GL layer). Deliberately named u_color* rather
+// than reusing u_contrast: vertex and fragment shader uniforms share ONE
+// namespace once linked into a single program, and u_contrast already names
+// the vertex shader's UNRELATED citation-size-contrast uniform (driven by
+// displaySettings.sizeContrast) -- redeclaring "uniform float u_contrast"
+// here with different intended semantics would silently alias that same
+// uniform location instead of creating a second one. u_colorBrightness/
+// u_colorContrast/u_colorSaturation are fed the exact same
+// displaySettings.brightness/contrast/saturation values the raster sliders
+// already write, set fresh every render() frame (see pointCloudLayer.render),
+// same live pattern as u_gamma/u_wide.
+uniform float u_colorBrightness;
+uniform float u_colorContrast;
+uniform float u_colorSaturation;
 void main() {
   // Circular point sprite: discard the square gl_PointCoord's corners.
   vec2 d = gl_PointCoord - vec2(0.5);
   if (dot(d, d) > 0.25) discard;
+  vec3 color = v_color;
+  // Saturation: mix toward the color's own luminance (Rec. 601 weights --
+  // a visual control, not a colorimetric one, so exact primaries aren't
+  // required). u_colorSaturation is displaySettings.saturation directly
+  // (slider range -0.6..0.6): 0 is identity, negative desaturates toward
+  // grey, positive pushes away from it.
+  float luma = dot(color, vec3(0.299, 0.587, 0.114));
+  color = mix(vec3(luma), color, 1.0 + u_colorSaturation);
+  // Contrast: centered scale around mid-grey. u_colorContrast is
+  // displaySettings.contrast directly (slider range -0.4..0.4): 0 is
+  // identity.
+  color = (color - 0.5) * (1.0 + u_colorContrast) + 0.5;
+  // Brightness: plain multiply. u_colorBrightness is displaySettings.brightness
+  // directly (slider range 0.6..1.0): 1.0 is identity, lower dims.
+  color *= u_colorBrightness;
+  color = clamp(color, 0.0, 1.0);
   // Premultiplied-alpha output, paired with render()'s
   // gl.blendFunc(ONE, ONE_MINUS_SRC_ALPHA) -- MapLibre custom layers are
   // expected to composite this way onto its own premultiplied framebuffer.
   float alpha = 0.9;
-  gl_FragColor = vec4(v_color * alpha, alpha);
+  gl_FragColor = vec4(color * alpha, alpha);
 }`;
 
 function compilePointCloudShader(gl, type, src) {
@@ -2950,6 +3075,9 @@ const pointCloudLayer = {
   gl: null, program: null, posBuffer: null, attrBuffer: null,
   aPos: -1, aAttr: -1,
   uMatrix: null, uBase: null, uContrast: null, uMin: null, uGamma: null, uWide: null,
+  // R24: cloud color controls -- see POINT_CLOUD_FRAG_SRC's own comment for
+  // why these are named u_color* rather than reusing u_contrast.
+  uColorBrightness: null, uColorContrast: null, uColorSaturation: null,
   // R22d: uEqualize/uEqualizeTex stay null (harmless -- gl.uniform* on a null
   // location is a spec-defined no-op) when onAdd picked the plain
   // POINT_CLOUD_VERT_SRC (equalizeSupported false); equalizeTexture is
@@ -2999,6 +3127,9 @@ const pointCloudLayer = {
     this.uMin = gl.getUniformLocation(program, "u_min");
     this.uGamma = gl.getUniformLocation(program, "u_gamma");
     this.uWide = gl.getUniformLocation(program, "u_wide");
+    this.uColorBrightness = gl.getUniformLocation(program, "u_colorBrightness");
+    this.uColorContrast = gl.getUniformLocation(program, "u_colorContrast");
+    this.uColorSaturation = gl.getUniformLocation(program, "u_colorSaturation");
     this.uEqualize = gl.getUniformLocation(program, "u_equalize");
     this.uEqualizeTex = gl.getUniformLocation(program, "u_equalizeTex");
     this.equalizeTexture = null;   // GL objects don't survive a context loss -- rebuilt lazily in render()
@@ -3064,6 +3195,13 @@ const pointCloudLayer = {
     // R23: same live-every-frame pattern -- u_wide exists in BOTH shader
     // variants (unlike u_equalize below), so this is unconditional.
     gl.uniform1f(this.uWide, displaySettings.wide);
+    // R24: cloud color controls -- same live-every-frame pattern, same
+    // displaySettings values the raster's brightness/contrast/saturation
+    // sliders already write via applyDisplayPaint's raster paint properties.
+    // See POINT_CLOUD_FRAG_SRC for the u_color* naming/collision comment.
+    gl.uniform1f(this.uColorBrightness, displaySettings.brightness);
+    gl.uniform1f(this.uColorContrast, displaySettings.contrast);
+    gl.uniform1f(this.uColorSaturation, displaySettings.saturation);
     // R22d: only meaningful on the EQ program variant (see onAdd) -- on the
     // plain variant uEqualize/uEqualizeTex are both null locations, and
     // gl.uniform*/no texture bind on a null location is a spec-defined
@@ -3718,7 +3856,7 @@ const EDGE_COUNT_STOPS = [1000000, 3000000, 7000000, 14316429];
 const EDGE_COUNT_LABELS = ["1M", "3M", "7M", "14.3M"];
 function edgeCountIndex(count) {
   const idx = EDGE_COUNT_STOPS.indexOf(count);
-  return idx >= 0 ? idx : 1;   // default stop (3M) if a stale/corrupt localStorage value doesn't match any stop
+  return idx >= 0 ? idx : 0;   // R24: default stop (1M, was 3M) if a stale/corrupt localStorage value doesn't match any stop
 }
 // dpEdgeLines/dpEdgeIntensity/dpEdgeCount don't exist yet at syncDisplayUI's
 // own definition/first call further up the file -- same reasoning as
@@ -3944,13 +4082,20 @@ function shardEntriesToFeatures(entries, z) {
 // removed for the rest of the session; on/off transitions here now just flip
 // the layer's "visibility" layout property (setVectorPointsVisible), and a
 // content-fingerprint cache (vectorPointsLastKey) skips setData outright
-// when the computed feature set can't have changed -- e.g. a pointMode radio
-// bounce back to the same mode, or a pan/zoom tick that lands in the same
-// shard-cap bucket with no isolate/legend change. The label-tile branch's
-// key includes the actual visible-tile set (not just a zoom bucket) since
-// that branch's feature set genuinely is pan-sensitive, unlike the two
-// shard-based branches below, whose output depends only on the isolate id,
-// the zoom-derived cap, and whether community colors have resolved yet.
+// when the computed feature set can't have changed -- e.g. an overlayDots
+// toggle bounce back to the same state, or a pan/zoom tick that lands in the
+// same shard-cap bucket with no isolate/legend change. The label-tile
+// branch's key includes the actual visible-tile set (not just a zoom
+// bucket) since that branch's feature set genuinely is pan-sensitive, unlike
+// the two shard-based branches below, whose output depends only on the
+// isolate id, the zoom-derived cap, and whether community colors have
+// resolved yet. R24 bug fix: every branch's key also folds in
+// equalize/spacing/wide (see transformKey below) -- entryToFeature bakes
+// remapWorld into each feature's geometry, so a transform-only change is a
+// real feature-set change even when nothing else about the key moved; before
+// this fix a transform change alone matched the stale key and the rebuild
+// was skipped outright, leaving these dots exactly where they sat before the
+// transform was touched.
 let vectorPointsLastKey = null;
 function setVectorPointsVisible(visible) {
   if (!map.getLayer("vector-points")) return;
@@ -4005,10 +4150,12 @@ function setupVectorPointsLayer() {
 async function updateVectorPoints() {
   const gen = ++vectorGen;
   const z = map.getZoom();
-  // R13: pointMode "raster" suppresses every vector-point branch below EXCEPT
-  // shardActive (isolate's own shard dots, right below) -- see that branch's
-  // comment for why isolate keeps rendering even in "raster" mode.
-  const vectorActive = displaySettings.pointMode !== "raster" && z >= VECTOR_POINTS_MIN_ZOOM;
+  // R24: the deep-zoom label-tile layer is the interactive layer (hover/
+  // click hit-testing lives here, see hitTestVector) and is unconditional --
+  // it's no longer suppressible by any display-panel toggle, unlike the
+  // retired pointMode "raster" mode, which used to gate this off too. Only
+  // zoom decides whether it's active.
+  const vectorActive = z >= VECTOR_POINTS_MIN_ZOOM;
   // R10b "isolate anywhere": below vector-points zoom, an active community
   // isolate still renders its top-cited authors as points over the dimmed
   // raster (see updateRasterOpacity's isolate branch, which is already
@@ -4017,28 +4164,24 @@ async function updateVectorPoints() {
   // label tiles. At/above VECTOR_POINTS_MIN_ZOOM the label-tile branch below
   // already filters by community and has every author (not just the top
   // 20k), so this branch only ever applies strictly below the threshold, and
-  // is independent of pointMode -- R13: including pointMode "raster". That is
-  // a deliberate choice, not an oversight: isolating a community is an
-  // explicit user action, and its shard dots are the only way to see who's
-  // in that community below vector zoom once the raster itself dims (raster
-  // isn't filterable per-community). "Raster" mode's contract is "no vector
-  // point layers by default", not "no vector points, ever" -- it doesn't
-  // reach into isolate's own explicit rendering. The deep-zoom label-tile
-  // isolate filter (vectorActive branch below) does NOT get this exemption --
-  // "raster" mode suppresses that one same as everything else, per spec.
+  // is unconditional the same way vectorActive above now is: isolating a
+  // community is an explicit user action, and its shard dots are the only
+  // way to see who's in that community below vector zoom once the raster
+  // itself dims (raster isn't filterable per-community) -- no
+  // displaySettings toggle reaches into isolate's own explicit rendering.
   const shardActive = isolateCommunity != null && z < VECTOR_POINTS_MIN_ZOOM;
   setIsolateShardActive(shardActive);
-  // R12b: below vector-points zoom, when vector points are enabled and no
-  // isolate is active, render the global top_authors.json shard instead --
-  // gated on isolateCommunity == null so isolate always takes precedence
-  // when active (its dim + filter behavior is unchanged). Unlike shardActive,
-  // this DOES depend on pointMode (R13: not "raster"): it's the mode's own
-  // mid-zoom rendering, not an isolate side effect. updateRasterOpacity's
-  // vectorActive check stays gated on pointMode "both" AND z >=
-  // VECTOR_POINTS_MIN_ZOOM, so this path never dims the raster on its own --
-  // it only ever complements it (pointMode "vector" dims the raster
-  // separately, unconditionally, at the top of that resolver).
-  const globalMidZoomActive = displaySettings.pointMode !== "raster" && !vectorActive && isolateCommunity == null;
+  // R12b: below vector-points zoom, when no isolate is active, render the
+  // global top_authors.json shard instead -- gated on isolateCommunity ==
+  // null so isolate always takes precedence when active (its dim + filter
+  // behavior is unchanged). R24: this is the ONE branch the "Top-author dots
+  // at low zoom" checkbox (displaySettings.overlayDots, replacing the
+  // retired pointMode radio) controls -- it's the mode's own mid-zoom
+  // rendering, not an isolate side effect, and not the deep-zoom interactive
+  // layer above. updateRasterOpacity's vectorActive check stays gated purely
+  // on z >= VECTOR_POINTS_MIN_ZOOM, so this path never dims the raster on
+  // its own -- it only ever complements it.
+  const globalMidZoomActive = displaySettings.overlayDots && !vectorActive && isolateCommunity == null;
 
   // R15b: the full point-cloud custom layer renders every author itself, so
   // below vector-points zoom the capped GeoJSON overlay (shard/global-top,
@@ -4060,10 +4203,27 @@ async function updateVectorPoints() {
     return;
   }
 
+  // R24 bug fix: entryToFeature bakes remapWorld (equalize/spacing/wide) into
+  // each feature's geometry via toLngLat, but none of the three setKey
+  // strings below used to include those values -- a transform-only change
+  // (e.g. dragging Equalize) recomputes the exact same key (same zoom bucket/
+  // tiles/isolate/communityColors.size) as before the drag, so the
+  // `setKey === vectorPointsLastKey` short-circuit skipped the rebuild and
+  // left this layer's dots at their pre-remap positions while the point
+  // cloud/edge lines (which read the transform live, every frame, via GPU
+  // uniforms) had already moved -- exactly the "equalize doesn't affect
+  // overlay dots/labels" and "hub disappears when zooming in, no longer
+  // matches the lines" bugs Eric reported. Folding the three transform
+  // values into every branch's key (not just adding a fourth cache
+  // dimension nobody reads) makes the cache correctly treat any transform
+  // change as a new feature set, same as an isolate/pan/zoom change already
+  // did.
+  const transformKey = `${displaySettings.equalize}:${displaySettings.spacing}:${displaySettings.wide}`;
+
   let features, setKey;
   if (shardActive) {
     const cap = shardCapForZoom(z);
-    setKey = `shard:${isolateCommunity}:${cap}:${communityColors.size}`;
+    setKey = `shard:${isolateCommunity}:${cap}:${communityColors.size}:${transformKey}`;
     if (setKey === vectorPointsLastKey) { setVectorPointsVisible(true); return; }
     const shard = await fetchCommunityShard(isolateCommunity);
     if (gen !== vectorGen) return;   // a newer call (isolate change/move/zoom) owns the source now
@@ -4076,7 +4236,7 @@ async function updateVectorPoints() {
     features = shardEntriesToFeatures(entries, z);
   } else if (globalMidZoomActive) {
     const cap = shardCapForZoom(z);
-    setKey = `top:${cap}:${communityColors.size}`;
+    setKey = `top:${cap}:${communityColors.size}:${transformKey}`;
     if (setKey === vectorPointsLastKey) { setVectorPointsVisible(true); return; }
     // top_authors.json entries already carry community (field 5), unlike
     // community shards, so no remapping is needed before capping.
@@ -4086,7 +4246,7 @@ async function updateVectorPoints() {
   } else {
     const tiles = visibleTiles(9);
     const tilesKey = tiles.map(([x, y]) => `${x}.${y}`).join(",");
-    setKey = `tiles:${isolateCommunity}:${tilesKey}:${communityColors.size}`;
+    setKey = `tiles:${isolateCommunity}:${tilesKey}:${communityColors.size}:${transformKey}`;
     if (setKey === vectorPointsLastKey) { setVectorPointsVisible(true); return; }
     const lists = await Promise.all(tiles.map(([x, y]) => fetchTile(9, x, y)));
     if (gen !== vectorGen) return;     // a newer call (toggle/move/zoom) owns the source now
@@ -4321,8 +4481,8 @@ fetch(DATA_BASE + "/data/index/legend.json").then(r => r.ok ? r.json() : []).cat
       legendCommunityRows.set(e.community, row);
     }
     // Vector points may have already rendered (grey fallback) before this
-    // fetch resolved -- e.g. pointMode defaults to "both" and the initial
-    // view is already >= VECTOR_POINTS_MIN_ZOOM -- so re-run once colors are known.
+    // fetch resolved -- e.g. the initial view is already >=
+    // VECTOR_POINTS_MIN_ZOOM -- so re-run once colors are known.
     updateVectorPoints();
   });
 
@@ -4493,7 +4653,7 @@ async function hitTestTiles(pt) {
 }
 // R13: z < HIT_ZOOM -- hover/click on whatever's actually rendered in the
 // "vector-points" layer (isolate's shard dots, the global mid-zoom overlay,
-// or nothing at all in pointMode "raster" with no isolate active), rather
+// or nothing at all with overlayDots off and no isolate active), rather
 // than the old dead zone below HIT_ZOOM. Guarded on layer existence mostly
 // for defensiveness pre-style-load: R15b Part 2 made "vector-points" a
 // persistent layer (created once in setupVectorPointsLayer, toggled via the
