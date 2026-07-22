@@ -294,10 +294,12 @@
         <ul>
           <li>Search finds one researcher and draws rays to their top
             coauthorships, colored by community membership - a ray's
-            gradient means it crosses between fields.</li>
+            gradient means it crosses between fields. Rays work standalone,
+            straight from OpenAlex, with no companion server required.</li>
           <li>Connect finds the shortest coauthor path between two
             researchers via the degree-of-separation engine, colored the
-            same way hop to hop.</li>
+            same way hop to hop - this does need that companion server
+            running.</li>
           <li>Hover a dot at deep zoom to see the author's name and
             citations; click it for full details.</li>
           <li>Share copies a link to the exact view.</li>
@@ -1444,6 +1446,111 @@ function clearRays() {
   setSearchStatus("");
 }
 
+// ---- R21: browser-native coauthor rays (no backend required) ----
+// The degree-of-separation backend is now an optional accelerator: when
+// probeBackendHealth says it's unreachable, fetchCoauthorsBrowser queries
+// OpenAlex's works list-endpoint directly and aggregates coauthors from the
+// results instead. Cached in-memory (cap 50, FIFO, successful fetches only,
+// same eviction pattern as infoCardCache above) and mirrored to localStorage
+// for 7 days so repeat searches for the same author don't re-hit the API.
+const coauthorBrowserCache = new Map();   // bareId -> Promise<[{id,name,count}]>
+const COAUTHOR_CACHE_KEY_PREFIX = "mapademic.coauthors.";
+const COAUTHOR_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;   // 7 days
+
+function readCoauthorLocalCache(bareId) {
+  try {
+    const raw = localStorage.getItem(COAUTHOR_CACHE_KEY_PREFIX + bareId);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.data) || typeof parsed.ts !== "number") return null;
+    if (Date.now() - parsed.ts > COAUTHOR_CACHE_TTL_MS) return null;
+    return parsed.data;
+  } catch {
+    return null;   // corrupt entry or localStorage unavailable -- just refetch
+  }
+}
+function writeCoauthorLocalCache(bareId, data) {
+  try {
+    localStorage.setItem(COAUTHOR_CACHE_KEY_PREFIX + bareId, JSON.stringify({ ts: Date.now(), data }));
+  } catch {
+    /* quota exceeded, or unavailable (private browsing etc) -- in-memory
+       cache for this session still works fine without it */
+  }
+}
+
+// One page of the OpenAlex works list-endpoint, filtered to this author.
+// Throws a readable Error (surfaced straight to the status pill by the
+// caller) rather than swallowing rate limits/failures.
+async function fetchOpenAlexWorksPage(url) {
+  let r;
+  try {
+    r = await fetch(url);
+  } catch {
+    throw new Error("couldn't reach OpenAlex - check your connection");
+  }
+  if (r.status === 429) throw new Error("OpenAlex rate limit - try again shortly");
+  if (!r.ok) throw new Error(`OpenAlex request failed (${r.status})`);
+  return r.json();
+}
+
+// Aggregates a researcher's most-frequent coauthors straight from OpenAlex,
+// with no backend involved: filters works to this author (per-page=200,
+// selecting only authorships + cited_by_count to keep the payload small),
+// and counts, per distinct coauthor author.id, how many returned works they
+// share. Most-collaborative coauthors dominate the first page of results,
+// so one page is enough for ray purposes; a second page (meta.count > 200)
+// is fetched as a nice-to-have, capped at 2 pages / 400 works total. Returns
+// the top 25 by shared-work count desc (alphabetical id tiebreak) as
+// [{id, name, count}], id/name shaped exactly like the "expansion" events
+// the backend path collects into `coauthors` below, so finishCoauthorRays
+// treats both sources identically.
+async function fetchCoauthorsBrowser(bareId) {
+  if (coauthorBrowserCache.has(bareId)) return coauthorBrowserCache.get(bareId);
+
+  const local = readCoauthorLocalCache(bareId);
+  if (local) {
+    coauthorBrowserCache.set(bareId, Promise.resolve(local));
+    if (coauthorBrowserCache.size > 50) coauthorBrowserCache.delete(coauthorBrowserCache.keys().next().value);
+    return local;
+  }
+
+  const promise = (async () => {
+    const base = `https://api.openalex.org/works?filter=author.id:${encodeURIComponent(bareId)}` +
+      `&per-page=200&select=authorships,cited_by_count&mailto=mapademic@example.com`;
+    const page1 = await fetchOpenAlexWorksPage(base);
+    let works = page1.results || [];
+    if (page1.meta && page1.meta.count > 200) {
+      const page2 = await fetchOpenAlexWorksPage(base + "&page=2");
+      works = works.concat(page2.results || []);
+    }
+
+    const counts = new Map();   // bare coauthor id -> {name, count}
+    for (const w of works) {
+      for (const a of w.authorships || []) {
+        const aid = a.author && a.author.id ? stripId(a.author.id) : null;
+        if (!aid || aid === bareId) continue;   // no author.id, or the searched author themself
+        const name = (a.author && a.author.display_name) || aid;
+        const entry = counts.get(aid);
+        if (entry) entry.count++;
+        else counts.set(aid, { name, count: 1 });
+      }
+    }
+
+    const top = [...counts.entries()]
+      .map(([id, v]) => ({ id, name: v.name, count: v.count }))
+      .sort((x, y) => y.count - x.count || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0))
+      .slice(0, 25);
+
+    writeCoauthorLocalCache(bareId, top);
+    return top;
+  })();
+
+  coauthorBrowserCache.set(bareId, promise);
+  promise.catch(() => coauthorBrowserCache.delete(bareId));   // don't cache failures -- allow retry
+  if (coauthorBrowserCache.size > 50) coauthorBrowserCache.delete(coauthorBrowserCache.keys().next().value);
+  return promise;
+}
+
 // Streams /api/graph/expand?new_id=<bareId>&depth=1&top_k=25&edges=coauthor
 // (see backend/graph_expand.py in the degree-of-separation repo). With no
 // origin_ids/path_ids passed, the stream is just: one "node" event for the
@@ -1451,11 +1558,13 @@ function clearRays() {
 // "expansion" event per depth level (here just depth 1) carrying the kept
 // coauthor nodes (type "expansion": {id, name, institution, works_count,
 // cited_by_count, type, depth, expand_owners}) and their edges, then "done"
-// ({}) once a cache-only stitch pass has also flushed. Coauthor coords are
-// resolved through the id shards (fetchIdBucket/idBucketNum/stripId, same as
-// resolvePathCoords) only after "done", so every candidate is known before
-// drawing. searchRayGen is checked after every await and on every streamed
-// event so a stale stream (superseded by a newer search/Escape/clearRays)
+// ({}) once a cache-only stitch pass has also flushed. When the backend
+// isn't reachable, fetchCoauthorsBrowser above is used instead (R21) --
+// either way, finishCoauthorRays resolves coauthor coords through the id
+// shards (fetchIdBucket/idBucketNum/stripId, same as resolvePathCoords) only
+// once every candidate is known, so drawing is identical regardless of
+// source. searchRayGen is checked after every await and on every streamed
+// event so a stale call (superseded by a newer search/Escape/clearRays)
 // can't paint over newer state.
 async function drawCoauthorRays(bareId, xw, yw) {
   clearPath();                 // rays and path never coexist
@@ -1465,7 +1574,22 @@ async function drawCoauthorRays(bareId, xw, yw) {
   setSearchStatus("loading coauthors…");
   const healthy = await probeBackendHealth();
   if (gen !== searchRayGen) return;
-  if (!healthy) { setSearchStatus("coauthor backend offline"); return; }
+
+  if (!healthy) {
+    // R21: no backend reachable -- OpenAlex directly, browser-native.
+    setSearchStatus("loading coauthors from OpenAlex…");
+    let top;
+    try {
+      top = await fetchCoauthorsBrowser(bareId);
+    } catch (err) {
+      if (gen !== searchRayGen) return;
+      setSearchStatus(err.message || "couldn't load coauthors");
+      return;
+    }
+    if (gen !== searchRayGen) return;
+    finishCoauthorRays(bareId, xw, yw, gen, top.map(c => ({ id: c.id, name: c.name })));
+    return;
+  }
 
   const coauthors = [];        // [{id, name}], populated from "expansion" events
   const coauthorIds = new Set();   // dedupe across frames; don't rely on backend set semantics
@@ -1488,89 +1612,12 @@ async function drawCoauthorRays(bareId, xw, yw) {
     }
   });
 
-  async function finish() {
+  es.addEventListener("done", () => {
     if (rayEventSource === es) rayEventSource = null;
     es.close();
     if (gen !== searchRayGen) return;
-
-    const buckets = await Promise.all(coauthors.map(c => fetchIdBucket(idBucketNum(c.id))));
-    if (gen !== searchRayGen) return;
-
-    const from = toLngLat(xw, yw).toArray();
-    const hits = [];   // {c, xw, yw} for every coauthor actually resolved on-map
-    let offMap = 0;
-    coauthors.forEach((c, i) => {
-      const m = buckets[i];
-      const hit = m ? m.get(stripId(c.id)) : null;
-      if (!hit) { offMap++; return; }
-      hits.push({ c, xw: hit[0], yw: hit[1] });
-    });
-
-    // R19: origin color reuses the legend highlight's already-resolved value
-    // when it's for this same author (true for all three drawCoauthorRays
-    // callers -- search select, info-card Coauthors, and hash restore --
-    // since each sets the legend highlight for this exact id right before
-    // calling in); otherwise (still in flight, or a race) resolve fresh. Up
-    // to `hits.length` (<= 25) further cached z9-tile fetches resolve the
-    // endpoints, guarded by searchRayGen like every other await here.
-    const originColorP = bareId === legendHighlightedId && legendHighlightedColor
-      ? Promise.resolve(legendHighlightedColor)
-      : resolveCommunityColor(bareId, xw, yw).then(c => c || VECTOR_POINT_FALLBACK_COLOR);
-    const [originColor, endpointColors] = await Promise.all([
-      originColorP,
-      Promise.all(hits.map(h => resolveCommunityColor(stripId(h.c.id), h.xw, h.yw).then(c => c || VECTOR_POINT_FALLBACK_COLOR))),
-    ]);
-    if (gen !== searchRayGen) return;
-
-    const features = [];
-    const endpoints = hits.map((h, i) => {
-      const color = endpointColors[i];
-      features.push(...gradientSegmentFeatures(from, toLngLat(h.xw, h.yw).toArray(), originColor, color));
-      return { xw: h.xw, yw: h.yw, name: h.c.name, id: stripId(h.c.id), color };
-    });
-
-    if (features.length) {
-      map.addSource("coauthor-rays", {
-        type: "geojson",
-        data: { type: "FeatureCollection", features },
-      });
-      // Casing first so the colored line lands above it (both addLayer calls
-      // append with no beforeId, so add order is the stacking order) -- see
-      // beforeIdAbove's comment above for why path-line/coauthor-rays always
-      // stay on top of vector-points/point-cloud regardless.
-      map.addLayer({
-        id: "coauthor-rays-casing", type: "line", source: "coauthor-rays",
-        paint: { "line-color": "#0a0a0c", "line-width": 4, "line-opacity": 0.5 },
-      });
-      map.addLayer({
-        id: "coauthor-rays", type: "line", source: "coauthor-rays",
-        // R19: community-gradient rays replace the flat white/green line --
-        // color is per-segment (see gradientSegmentFeatures), not per-layer.
-        paint: { "line-color": ["get", "color"], "line-width": 2, "line-opacity": 0.55 },
-      });
-    }
-
-    rayMarkers = endpoints.map(p => {
-      const el = document.createElement("div");
-      el.className = "coauthor-node";
-      const dot = document.createElement("div");
-      dot.className = "coauthor-dot";
-      dot.style.background = p.color;   // R19: endpoint's community color; border/stroke unchanged
-      const label = document.createElement("div");
-      label.className = "coauthor-label";
-      label.textContent = p.name;
-      el.append(dot, label);
-      return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
-    });
-    activeRays = endpoints.length ? { originXw: xw, originYw: yw, originColor, endpoints } : null;
-
-    rayOverlayIds = endpoints.map(p => p.id);
-    overlayLabelAdd("ray", rayOverlayIds);
-    drawLabels();          // hide these authors' regular labels immediately
-
-    setSearchStatus(`${endpoints.length} coauthors shown (${offMap} off-map)`);
-  }
-  es.addEventListener("done", finish);
+    finishCoauthorRays(bareId, xw, yw, gen, coauthors);
+  });
 
   es.addEventListener("app_error", ev => {
     if (rayEventSource === es) rayEventSource = null;
@@ -1592,6 +1639,91 @@ async function drawCoauthorRays(bareId, xw, yw) {
     if (gen !== searchRayGen) return;
     setSearchStatus("coauthor backend offline");
   });
+}
+
+// Shared downstream half of drawCoauthorRays: resolves each candidate
+// coauthor's on-map coords via the id shards, builds the R19 gradient-
+// segment rays + endpoint markers, and updates the status pill. Called from
+// both the backend ("done" above) and browser (fetchCoauthorsBrowser above)
+// paths so coord resolution/rendering behaves identically regardless of
+// source -- `coauthors` is [{id, name}] either way.
+async function finishCoauthorRays(bareId, xw, yw, gen, coauthors) {
+  const buckets = await Promise.all(coauthors.map(c => fetchIdBucket(idBucketNum(c.id))));
+  if (gen !== searchRayGen) return;
+
+  const from = toLngLat(xw, yw).toArray();
+  const hits = [];   // {c, xw, yw} for every coauthor actually resolved on-map
+  let offMap = 0;
+  coauthors.forEach((c, i) => {
+    const m = buckets[i];
+    const hit = m ? m.get(stripId(c.id)) : null;
+    if (!hit) { offMap++; return; }
+    hits.push({ c, xw: hit[0], yw: hit[1] });
+  });
+
+  // R19: origin color reuses the legend highlight's already-resolved value
+  // when it's for this same author (true for all three drawCoauthorRays
+  // callers -- search select, info-card Coauthors, and hash restore --
+  // since each sets the legend highlight for this exact id right before
+  // calling in); otherwise (still in flight, or a race) resolve fresh. Up
+  // to `hits.length` (<= 25) further cached z9-tile fetches resolve the
+  // endpoints, guarded by searchRayGen like every other await here.
+  const originColorP = bareId === legendHighlightedId && legendHighlightedColor
+    ? Promise.resolve(legendHighlightedColor)
+    : resolveCommunityColor(bareId, xw, yw).then(c => c || VECTOR_POINT_FALLBACK_COLOR);
+  const [originColor, endpointColors] = await Promise.all([
+    originColorP,
+    Promise.all(hits.map(h => resolveCommunityColor(stripId(h.c.id), h.xw, h.yw).then(c => c || VECTOR_POINT_FALLBACK_COLOR))),
+  ]);
+  if (gen !== searchRayGen) return;
+
+  const features = [];
+  const endpoints = hits.map((h, i) => {
+    const color = endpointColors[i];
+    features.push(...gradientSegmentFeatures(from, toLngLat(h.xw, h.yw).toArray(), originColor, color));
+    return { xw: h.xw, yw: h.yw, name: h.c.name, id: stripId(h.c.id), color };
+  });
+
+  if (features.length) {
+    map.addSource("coauthor-rays", {
+      type: "geojson",
+      data: { type: "FeatureCollection", features },
+    });
+    // Casing first so the colored line lands above it (both addLayer calls
+    // append with no beforeId, so add order is the stacking order) -- see
+    // beforeIdAbove's comment above for why path-line/coauthor-rays always
+    // stay on top of vector-points/point-cloud regardless.
+    map.addLayer({
+      id: "coauthor-rays-casing", type: "line", source: "coauthor-rays",
+      paint: { "line-color": "#0a0a0c", "line-width": 4, "line-opacity": 0.5 },
+    });
+    map.addLayer({
+      id: "coauthor-rays", type: "line", source: "coauthor-rays",
+      // R19: community-gradient rays replace the flat white/green line --
+      // color is per-segment (see gradientSegmentFeatures), not per-layer.
+      paint: { "line-color": ["get", "color"], "line-width": 2, "line-opacity": 0.55 },
+    });
+  }
+
+  rayMarkers = endpoints.map(p => {
+    const el = document.createElement("div");
+    el.className = "coauthor-node";
+    const dot = document.createElement("div");
+    dot.className = "coauthor-dot";
+    dot.style.background = p.color;   // R19: endpoint's community color; border/stroke unchanged
+    const label = document.createElement("div");
+    label.className = "coauthor-label";
+    label.textContent = p.name;
+    el.append(dot, label);
+    return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
+  });
+  activeRays = endpoints.length ? { originXw: xw, originYw: yw, originColor, endpoints } : null;
+
+  rayOverlayIds = endpoints.map(p => p.id);
+  overlayLabelAdd("ray", rayOverlayIds);
+  drawLabels();          // hide these authors' regular labels immediately
+
+  setSearchStatus(`${endpoints.length} coauthors shown (${offMap} off-map)`);
 }
 
 // R20: re-projects every currently-drawn ephemeral overlay (search
