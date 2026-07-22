@@ -425,10 +425,12 @@
       <input id="dp-wide" type="range" min="1.0" max="1.8" step="0.05" value="1.0">
     </div>
     <!-- R22c: GPU connection-lines layer, same persisted-toggle shape as
-         Full point cloud above -- see edgeLinesLayer / DISPLAY_DEFAULTS.edgeLines. -->
-    <label class="dp-check" title="Renders repeat-coauthorship edges as GPU line segments, colored endpoint-to-endpoint by community; one 218MB download, cached afterwards. Temporarily hidden while a community isolate is active.">
+         Full point cloud above -- see edgeLinesLayer / DISPLAY_DEFAULTS.edgeLines.
+         R25: download size now depends on the Line count slider below --
+         see EDGE_TIERS -- 16MB at the default 1M, up to 218MB at 14.3M. -->
+    <label class="dp-check" title="Renders repeat-coauthorship edges as GPU line segments, colored endpoint-to-endpoint by community; downloads only the smallest tier covering the Line count slider (16-218MB), cached afterwards -- raising the slider fetches more. Temporarily hidden while a community isolate is active.">
       <input id="dp-edge-lines" type="checkbox">
-      Connection lines (14M, 218MB)
+      Connection lines (up to 14M, 16-218MB)
     </label>
     <div id="dp-edge-lines-status"></div>
     <div class="dp-row">
@@ -2429,11 +2431,15 @@ function setEqualizeStatus(text) { dpEqualizeStatusEl.textContent = text || ""; 
 async function ensureEqualizeFieldLoaded() {
   if (equalizeField.loaded || equalizeField.loading) return;
   equalizeField.loading = true;
-  setEqualizeStatus("loading density field…");
   try {
-    const r = await fetch(DATA_BASE + "/data/vector_experiment/equalize_field.bin");
-    if (!r.ok) throw new Error(`fetch equalize_field.bin failed: ${r.status}`);
-    const buf = await r.arrayBuffer();
+    // R25: cache-first, same resolveBinSource/startBinLoad pattern as the
+    // point cloud/edge lines below -- see that comment block. 2MB doesn't
+    // need chunked progress, so onBytes is a no-op; the cached-vs-downloading
+    // pill wording still applies.
+    const url = DATA_BASE + "/data/vector_experiment/equalize_field.bin";
+    const src = await resolveBinSource(url);
+    setEqualizeStatus(src.cachedBuf ? "density field cached… loading" : "loading density field…");
+    const buf = await startBinLoad(src, url, () => {});
     equalizeField.floats = new Float32Array(buf);
     equalizeField.packed = packEqualizeField(equalizeField.floats, EQUALIZE_GRID, EQUALIZE_RANGE);
     equalizeField.loaded = true;
@@ -3277,6 +3283,97 @@ async function fetchWithProgress(url, onBytes) {
   return out.buffer;
 }
 
+// ---- R25: persistent IndexedDB binary cache ----
+// Every large positions/attrs/edge-tier/equalize .bin fetched below is also
+// stashed in IndexedDB (db "mapademic-bins", store "bins") so a repeat visit
+// reads it back off local disk in well under a second instead of
+// re-downloading. Keyed by url + the file's actual byte length (a HEAD
+// request's Content-Length), not url alone -- a dataset regeneration that
+// changes a file's size then simply misses the old entry (key no longer
+// matches) instead of serving stale bytes under a size mismatch; the
+// orphaned old entry is harmless dead weight, not actively evicted. A HEAD
+// failure (host blocks it, or storage is disabled/unavailable) just skips
+// caching for that fetch -- never blocks the page from working, this is a
+// pure speed optimization layered on the same fetchWithProgress path used
+// before it existed.
+const BIN_CACHE_DB = "mapademic-bins";
+const BIN_CACHE_STORE = "bins";
+let binCacheDbPromise = null;
+function openBinCacheDb() {
+  if (binCacheDbPromise) return binCacheDbPromise;
+  binCacheDbPromise = new Promise((resolve) => {
+    if (!("indexedDB" in window)) { resolve(null); return; }
+    let req;
+    try { req = indexedDB.open(BIN_CACHE_DB, 1); } catch { resolve(null); return; }
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(BIN_CACHE_STORE)) {
+        req.result.createObjectStore(BIN_CACHE_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);   // storage disabled/blocked -- callers fall back to network
+  });
+  return binCacheDbPromise;
+}
+async function binCacheGet(key) {
+  const db = await openBinCacheDb();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const req = db.transaction(BIN_CACHE_STORE, "readonly").objectStore(BIN_CACHE_STORE).get(key);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    } catch { resolve(null); }
+  });
+}
+// Fire-and-forget write-through; a quota error (Safari's stricter IDB caps,
+// a full disk, etc.) just means the next load re-fetches from the network --
+// same as a cache miss, never surfaced to the user as a failure.
+function writeBinCache(key, buf) {
+  if (!key) return;
+  openBinCacheDb().then((db) => {
+    if (!db) return;
+    try {
+      const tx = db.transaction(BIN_CACHE_STORE, "readwrite");
+      tx.objectStore(BIN_CACHE_STORE).put(buf, key);
+      tx.onerror = (e) => { e.preventDefault(); console.warn("bin cache write skipped (quota?):", key); };
+    } catch (err) {
+      console.warn("bin cache write skipped:", err);
+    }
+  });
+}
+let storagePersistRequested = false;
+function requestStoragePersistOnce() {
+  if (storagePersistRequested) return;
+  storagePersistRequested = true;
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+}
+async function headContentLength(url) {
+  try {
+    const r = await fetch(url, { method: "HEAD" });
+    if (!r.ok) return null;
+    const len = Number(r.headers.get("Content-Length"));
+    return len > 0 ? len : null;
+  } catch { return null; }
+}
+// Resolves whether `url` is already cached (cachedBuf non-null) BEFORE any
+// fetch starts -- callers use this both to decide "cached" vs "downloading"
+// pill wording up front and to get the `key` a fresh fetch should write
+// through under. Just a HEAD, no body transfer.
+async function resolveBinSource(url) {
+  const len = await headContentLength(url);
+  if (len == null) return { key: null, cachedBuf: null };
+  const key = `${url}#${len}`;
+  return { key, cachedBuf: await binCacheGet(key) };
+}
+// Starts the actual load for one file given its already-resolved source:
+// the cached buffer instantly on a hit, otherwise the existing streamed
+// fetchWithProgress path, write-through to IDB on success.
+function startBinLoad(src, url, onBytes) {
+  if (src.cachedBuf) return Promise.resolve(src.cachedBuf);
+  return fetchWithProgress(url, onBytes).then((buf) => { writeBinCache(src.key, buf); return buf; });
+}
+
 // Fetches both .bin files with streamed progress, then uploads in
 // POINT_CLOUD_CHUNKS progressive slices via bufferSubData into one
 // full-size-allocated buffer pair -- loadedCount grows after each slice and
@@ -3292,8 +3389,15 @@ const POINT_CLOUD_TOTAL_BYTES = 67043648;   // combined size of both .bin files,
 async function ensurePointCloudLoaded() {
   if (pointCloudLayer.loaded || pointCloudLayer.loading) return;
   pointCloudLayer.loading = true;
-  setPointCloudStatus("loading 8.4M points… 0 of 64MB");
   try {
+    const posUrl = DATA_BASE + "/data/vector_experiment/positions.bin";
+    const attrUrl = DATA_BASE + "/data/vector_experiment/attrs.bin";
+    // R25: cache-first -- resolveBinSource does a HEAD + IDB lookup for each
+    // file before any download starts, so the pill can say "cached" instead
+    // of implying a slow download when a prior session already has these.
+    const [posSrc, attrSrc] = await Promise.all([resolveBinSource(posUrl), resolveBinSource(attrUrl)]);
+    const cached = !!posSrc.cachedBuf && !!attrSrc.cachedBuf;
+    setPointCloudStatus(cached ? "8.4M points cached… loading" : "loading 8.4M points… 0 of 64MB");
     const receivedByFile = [0, 0];
     let lastStatusUpdate = 0;
     const onBytes = (i) => (n) => {
@@ -3306,8 +3410,8 @@ async function ensurePointCloudLoaded() {
       setPointCloudStatus(`loading 8.4M points… ${mb(total)} of ${mb(POINT_CLOUD_TOTAL_BYTES)}MB`);
     };
     const [posBuf, attrBuf] = await Promise.all([
-      fetchWithProgress(DATA_BASE + "/data/vector_experiment/positions.bin", onBytes(0)),
-      fetchWithProgress(DATA_BASE + "/data/vector_experiment/attrs.bin", onBytes(1)),
+      startBinLoad(posSrc, posUrl, onBytes(0)),
+      startBinLoad(attrSrc, attrUrl, onBytes(1)),
     ]);
     const count = Math.min(posBuf.byteLength, attrBuf.byteLength) >>> 2;   // 4 bytes/point in both files
     pointCloudLayer.totalCount = count;
@@ -3659,6 +3763,13 @@ const edgeLinesLayer = {
   loading: false,
   loadedCount: 0,
   totalCount: 0,
+  // R25: highest EDGE_TIERS.max covered by the tier currently uploaded to
+  // the GL buffers (0 = nothing loaded yet). Raising the Line count slider
+  // past this re-fetches the next tier up and replaces the buffers outright
+  // (see loadEdgeTier); lowering it never needs a re-fetch since a bigger
+  // tier already covers every smaller one -- render() just draws fewer of
+  // the already-uploaded instances.
+  loadedTierMax: 0,
   gl: null, program: null, inst: null,
   cornerBuffer: null, indexBuffer: null, posBuffer: null, attrBuffer: null,
   aCorner: -1, aP0: -1, aP1: -1, aC0: -1, aC1: -1, aW: -1, aS: -1,
@@ -3666,8 +3777,8 @@ const edgeLinesLayer = {
   // R22d: same pattern/reasoning as pointCloudLayer's own uEqualize/
   // uEqualizeTex/equalizeSupported/equalizeTexture fields.
   uEqualize: null, uEqualizeTex: null, equalizeSupported: false, equalizeTexture: null,
-  // Raw ArrayBuffers retained for the lifetime of the page (~218MB once
-  // loaded) purely so a GL context restore can re-upload without
+  // Raw ArrayBuffers retained for the lifetime of the page (up to ~218MB at
+  // the full tier) purely so a GL context restore can re-upload without
   // re-fetching -- same reasoning/pattern as pointCloudLayer's cachedPosBuf/
   // cachedAttrBuf.
   cachedPosBuf: null, cachedAttrBuf: null,
@@ -3762,13 +3873,15 @@ const edgeLinesLayer = {
   render(gl, matrix) {
     if (!this.visible || this.loadedCount === 0) return;
     const zoom = map.getZoom();
-    // Deep zoom (>=10.25, same threshold as the point cloud's handoff to
-    // vector-points -- VECTOR_POINTS_MIN_ZOOM) keeps the precise interactive
-    // view: drawing 14M quantized line segments there would just duplicate
-    // and clutter the exact per-author vector geometry that takes over at
-    // that zoom, for no added information.
-    if (zoom >= VECTOR_POINTS_MIN_ZOOM) return;
-
+    // R25 (Eric: lines vanish when zooming in): edges used to stop drawing
+    // at VECTOR_POINTS_MIN_ZOOM (10.25), the same handoff point the point
+    // cloud cedes to the precise per-author vector layer at. Edges have no
+    // such precise replacement, so that early-return just made every
+    // connection disappear past mid zoom -- removed; edges now draw at
+    // every zoom. Endpoints are u16-quantized (edges_pos.bin, 65535 levels
+    // per axis), so at z11+ a line's endpoint can sit a few px off the
+    // exact (float-precision) dot it connects to -- a known, accepted
+    // trade-off (Eric), not a bug to chase.
     gl.useProgram(this.program);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -3780,7 +3893,13 @@ const edgeLinesLayer = {
     // R23: u_wide exists in BOTH shader variants (unlike u_equalize below), so
     // this is unconditional -- same pattern as pointCloudLayer.render.
     gl.uniform1f(this.uWide, displaySettings.wide);
-    gl.uniform1f(this.uIntensity, displaySettings.edgeIntensity);
+    // R25: gentle deep-zoom taper -- past z11, 14M quantized edges drawn
+    // over the now-unconditional precise vector layer gets visually
+    // overwhelming, so intensity ramps down linearly from z11 (full
+    // strength) and floors at 0.55 (never fades to nothing) rather than
+    // cutting off outright. Identity (1.0) at/below z11.
+    const deepZoomTaper = Math.min(1.0, Math.max(0.55, 1.0 - (zoom - 11.0) * 0.5));
+    gl.uniform1f(this.uIntensity, displaySettings.edgeIntensity * deepZoomTaper);
     gl.uniform2f(this.uViewport, gl.drawingBufferWidth, gl.drawingBufferHeight);
     // R22d: same pattern as pointCloudLayer.render's own equalize block.
     if (this.equalizeSupported) {
@@ -3858,6 +3977,23 @@ function edgeCountIndex(count) {
   const idx = EDGE_COUNT_STOPS.indexOf(count);
   return idx >= 0 ? idx : 0;   // R24: default stop (1M, was 3M) if a stale/corrupt localStorage value doesn't match any stop
 }
+// R25: tiered edge fetch -- edges_meta.json's 1m/3m subsets are literal
+// strongest-first prefixes of the full edges_pos.bin/edges_attr.bin pair
+// (same weight-desc order), so the smallest file covering the current Line
+// count slider is always enough: 1M -> edges_*_1m.bin (16MB total, the
+// default first-experience download), 3M -> edges_*_3m.bin (48MB). 7M and
+// 14.3M both need the full pair (218MB) -- there's no standalone 7m subset
+// file. See loadEdgeTier below for how raising the slider past an
+// already-loaded tier re-fetches and replaces; lowering it never re-fetches,
+// since a bigger tier already covers every smaller one.
+const EDGE_TIERS = [
+  { max: 1000000, suffix: "_1m", label: "1M", bytes: 16000000 },
+  { max: 3000000, suffix: "_3m", label: "3M", bytes: 48000000 },
+  { max: Infinity, suffix: "", label: "14.3M", bytes: 229062864 },
+];
+function edgeTierFor(count) {
+  return EDGE_TIERS.find(t => count <= t.max);
+}
 // dpEdgeLines/dpEdgeIntensity/dpEdgeCount don't exist yet at syncDisplayUI's
 // own definition/first call further up the file -- same reasoning as
 // dpAllPoints (R17), their initial UI state is set directly here instead.
@@ -3867,20 +4003,27 @@ dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(2);
 dpEdgeCount.value = edgeCountIndex(displaySettings.edgeCount);
 dpEdgeCountN.textContent = EDGE_COUNT_LABELS[edgeCountIndex(displaySettings.edgeCount)];
 
-// Fetches + progressively uploads edges_pos.bin/edges_attr.bin, same chunked
-// pattern as ensurePointCloudLoaded (see that function's comment) -- 8
+// R25: fetches + progressively uploads the smallest edges_pos*/edges_attr*
+// tier covering the current Line count slider (see EDGE_TIERS/edgeTierFor
+// above), same chunked-upload pattern as ensurePointCloudLoaded -- 8
 // bytes/edge in both files here (vs 4 for the point cloud), and more chunks
-// (the combined download is ~3.4x the cloud's) for a smoother progressive
-// reveal. Always fetches the FULL 14.3M edges regardless of the chosen Line
-// count -- that slider only ever caps the draw call's instance count (see
-// render() above), not what gets downloaded/uploaded.
+// (the full tier's combined download is ~3.4x the cloud's) for a smoother
+// progressive reveal. Cache-first via resolveBinSource/startBinLoad (see
+// that comment block above fetchWithProgress).
 const EDGE_LINES_CHUNKS = 20;
-const EDGE_LINES_TOTAL_BYTES = 229062864;   // edges_pos.bin + edges_attr.bin combined, from data/vector_experiment/edges_meta.json
-async function ensureEdgeLinesLoaded() {
-  if (edgeLinesLayer.loaded || edgeLinesLayer.loading) return;
+async function loadEdgeTier(tier) {
+  if (edgeLinesLayer.loading) return;
+  if (edgeLinesLayer.loaded && edgeLinesLayer.loadedTierMax >= tier.max) return;   // already covers this tier
   edgeLinesLayer.loading = true;
-  setEdgeLinesStatus("loading 14.3M connections (218MB)… 0%");
   try {
+    const posUrl = DATA_BASE + `/data/vector_experiment/edges_pos${tier.suffix}.bin`;
+    const attrUrl = DATA_BASE + `/data/vector_experiment/edges_attr${tier.suffix}.bin`;
+    const [posSrc, attrSrc] = await Promise.all([resolveBinSource(posUrl), resolveBinSource(attrUrl)]);
+    const cached = !!posSrc.cachedBuf && !!attrSrc.cachedBuf;
+    const mb = (bytes) => (bytes / 1048576).toFixed(1);
+    setEdgeLinesStatus(cached
+      ? `${tier.label} connections cached… loading`
+      : `loading ${tier.label} connections (${mb(tier.bytes)}MB)… 0%`);
     const receivedByFile = [0, 0];
     let lastStatusUpdate = 0;
     const onBytes = (i) => (n) => {
@@ -3889,12 +4032,11 @@ async function ensureEdgeLinesLoaded() {
       if (now - lastStatusUpdate < 250) return;   // throttle to ~4x/second
       lastStatusUpdate = now;
       const total = receivedByFile[0] + receivedByFile[1];
-      const mb = (bytes) => (bytes / 1048576).toFixed(1);
-      setEdgeLinesStatus(`loading 14.3M connections… ${mb(total)} of ${mb(EDGE_LINES_TOTAL_BYTES)}MB`);
+      setEdgeLinesStatus(`loading ${tier.label} connections… ${mb(total)} of ${mb(tier.bytes)}MB`);
     };
     const [posBuf, attrBuf] = await Promise.all([
-      fetchWithProgress(DATA_BASE + "/data/vector_experiment/edges_pos.bin", onBytes(0)),
-      fetchWithProgress(DATA_BASE + "/data/vector_experiment/edges_attr.bin", onBytes(1)),
+      startBinLoad(posSrc, posUrl, onBytes(0)),
+      startBinLoad(attrSrc, attrUrl, onBytes(1)),
     ]);
     const count = Math.min(posBuf.byteLength, attrBuf.byteLength) >>> 3;   // 8 bytes/edge in both files
     edgeLinesLayer.totalCount = count;
@@ -3904,6 +4046,10 @@ async function ensureEdgeLinesLoaded() {
     edgeLinesLayer.cachedAttrBuf = attrBuf;
     const gl = edgeLinesLayer.gl;
 
+    // A tier switch REPLACES the buffers outright (bufferData re-allocates
+    // rather than patching/extending the previous tier's contents) -- see
+    // this function's own header comment.
+    edgeLinesLayer.loadedCount = 0;
     gl.bindBuffer(gl.ARRAY_BUFFER, edgeLinesLayer.posBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, count * 8, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, edgeLinesLayer.attrBuffer);
@@ -3921,22 +4067,37 @@ async function ensureEdgeLinesLoaded() {
       gl.bindBuffer(gl.ARRAY_BUFFER, edgeLinesLayer.attrBuffer);
       gl.bufferSubData(gl.ARRAY_BUFFER, start * 8, attrChunk);
       edgeLinesLayer.loadedCount = end;
-      setEdgeLinesStatus(`loading 14.3M connections (218MB)… ${Math.round(end / count * 100)}%`);
+      setEdgeLinesStatus(`loading ${tier.label} connections (${mb(tier.bytes)}MB)… ${Math.round(end / count * 100)}%`);
       map.triggerRepaint();
       await new Promise(r => requestAnimationFrame(r));   // let the growing line set actually paint
     }
     edgeLinesLayer.loaded = true;
+    edgeLinesLayer.loadedTierMax = tier.max;
     setEdgeLinesStatus("");
   } catch (err) {
     setEdgeLinesStatus("connection lines failed to load - toggle to retry");
     console.error("edge-lines load failed:", err);
-    dpEdgeLines.checked = false;
-    displaySettings.edgeLines = false;
-    saveDisplaySettings();
-    setEdgeLinesActive(false);
+    // R25: only force the whole feature off if NOTHING has loaded yet (the
+    // first-ever enable failed) -- a failed tier UPGRADE with an
+    // already-working smaller tier loaded leaves that smaller tier's edges
+    // drawing rather than yanking a feature the visitor already has a
+    // working view of.
+    if (edgeLinesLayer.loadedTierMax === 0) {
+      dpEdgeLines.checked = false;
+      displaySettings.edgeLines = false;
+      saveDisplaySettings();
+      setEdgeLinesActive(false);
+    }
   } finally {
     edgeLinesLayer.loading = false;
   }
+}
+// Thin entry point -- always resolves the tier the CURRENT slider value
+// needs, so both the initial checkbox-on (whatever tier the visitor's
+// persisted/default Line count implies) and setEdgeLinesActive's "no-op if
+// already loaded" re-check (see that function) go through one path.
+async function ensureEdgeLinesLoaded() {
+  return loadEdgeTier(edgeTierFor(displaySettings.edgeCount));
 }
 
 // Single owner of edgeLinesLayer.visible -- mirrors syncPointCloudVisible.
@@ -3984,6 +4145,12 @@ dpEdgeCount.addEventListener("input", () => {
   displaySettings.edgeCount = EDGE_COUNT_STOPS[idx];
   dpEdgeCountN.textContent = EDGE_COUNT_LABELS[idx];
   saveDisplaySettings();
+  // R25: raising the slider past the currently-loaded tier re-fetches the
+  // next tier up (loadEdgeTier's own guard no-ops otherwise) -- only
+  // meaningful once the layer has actually loaded something; if Connection
+  // lines has never been turned on, the eventual checkbox-on already
+  // resolves the right tier directly (see ensureEdgeLinesLoaded).
+  if (edgeLinesLayer.loaded) ensureEdgeLinesLoaded();
   if (edgeLinesEffectivelyOn()) map.triggerRepaint();
 });
 
