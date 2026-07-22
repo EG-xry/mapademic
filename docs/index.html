@@ -2458,16 +2458,7 @@ async function drawLabels() {
   // "hover only" mode (R9 labelMode) draws no regular author labels at any
   // zoom -- the hover tooltip at HIT_ZOOM and region names are unaffected,
   // this only ever clears/skips the .lbl markers this function itself owns.
-  // R23 perf: same hiddenByCloud gate updateVectorPoints uses (see that
-  // function) -- below VECTOR_POINTS_MIN_ZOOM, an effectively-on point cloud
-  // already draws every author as a dot, so floating name labels over it are
-  // redundant clutter; at/above that zoom the cloud hands off and labels
-  // remain the only name source, unchanged. Previously this function did the
-  // full tile-fetch + collision-pack + marker-rebuild work even while the
-  // cloud made its output redundant -- this early-out (before any of that
-  // work, same as the hover/z<5.5 case above) is the fix.
-  const hiddenByCloud = pointCloudEffectivelyOn() && z < VECTOR_POINTS_MIN_ZOOM;
-  if (displaySettings.labelMode === "hover" || z < 5.5 || hiddenByCloud) {
+  if (displaySettings.labelMode === "hover" || z < 5.5) {
     markers.forEach(m => m.remove()); markers = []; return;
   }
   // R18a used to bail out here while a non-1.0 spacing remap was distorting
