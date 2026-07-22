@@ -403,12 +403,24 @@
     <!-- R22d: second, independent world-space remap -- density equalization,
          applied BEFORE the Spacing remap above (see remapWorld). Lazy-loads
          data/vector_experiment/equalize_field.bin (2MB) the first time this
-         goes above 0; see ensureEqualizeFieldLoaded. -->
+         goes above 0; see ensureEqualizeFieldLoaded. R23: max is a fallback
+         (1.0) until equalize_meta.json's safe_max_strength is fetched -- see
+         the equalizeMaxStrength/clampEqualizeToMax comment further down. -->
     <div class="dp-row">
       <div class="dp-row-head"><label for="dp-equalize">Equalize</label><span id="dp-equalize-n" class="n"></span></div>
-      <input id="dp-equalize" type="range" min="0" max="1.4" step="0.1" value="0">
+      <input id="dp-equalize" type="range" min="0" max="1.0" step="0.1" value="0">
     </div>
     <div id="dp-equalize-status"></div>
+    <!-- R23: third, independent world-space remap -- y-compression about
+         center (x untouched), applied AFTER Equalize and Spacing above (see
+         remapWorld). Widens the visible layout into an ellipse that better
+         fills a widescreen viewport, so panning left/right at a fitting zoom
+         becomes natural instead of the circular layout wasting the screen's
+         wings. Pure uniform/JS-math transform, nothing to lazy-load. -->
+    <div class="dp-row">
+      <div class="dp-row-head"><label for="dp-wide">Wide layout</label><span id="dp-wide-n" class="n"></span></div>
+      <input id="dp-wide" type="range" min="1.0" max="1.8" step="0.05" value="1.0">
+    </div>
     <!-- R22c: GPU connection-lines layer, same persisted-toggle shape as
          Full point cloud above -- see edgeLinesLayer / DISPLAY_DEFAULTS.edgeLines. -->
     <label class="dp-check" title="Renders repeat-coauthorship edges as GPU line segments, colored endpoint-to-endpoint by community; one 218MB download, cached afterwards. Temporarily hidden while a community isolate is active.">
@@ -583,20 +595,22 @@ function safePaint(prop, v) {
 // directly. Precedence (R13: pointMode replaces the old vectorPoints
 // checkbox; R15b: the experimental full point-cloud layer added a new
 // top-precedence case, see allPointsCloudOn below; R22d: equalizeActive()
-// added right under it, see below): the cloud, when EFFECTIVELY on (checkbox
+// added right under it, see below; R23: wideActive() joins it for the same
+// reason): the cloud, when EFFECTIVELY on (checkbox
 // on AND no active isolate -- an isolate suppresses the cloud, see
 // pointCloudEffectivelyOn), always wins outright (same as pointMode "vector"
 // -- the cloud renders every author itself, so the raster splats underneath
 // would just be redundant double-drawing); while an isolate suppresses the
 // cloud, the resolver falls through to the pre-cloud precedence below, so
 // the isolate's own 0.2 dim applies exactly as with the cloud off; otherwise
-// equalizeActive() (Equalize slider above 0 AND its field loaded) also wins
-// outright, for an unrelated reason from the cloud's own case above -- the
-// raster is a pre-rendered PNG tile that can't be remapped like every other
-// layer (see remapWorld), so leaving it visible while equalize actively
-// displaces labels/vector-points/overlays would reproduce the exact
-// raster-vs-remap mismatch R20 fixed for Spacing (see remapWorld's own R22d
-// comment); otherwise pointMode "vector" always wins outright,
+// equalizeActive() (Equalize slider above 0 AND its field loaded) or
+// wideActive() (Wide layout slider above its 1.0 default) also win outright,
+// for an unrelated reason from the cloud's own case above -- the raster is a
+// pre-rendered PNG tile that can't be remapped like every other layer (see
+// remapWorld), so leaving it visible while equalize/wide actively displace
+// labels/vector-points/overlays would reproduce the exact raster-vs-remap
+// mismatch R20 fixed for Spacing (see remapWorld's own R22d comment);
+// otherwise pointMode "vector" always wins outright,
 // forcing the raster fully out at every zoom (not just deep zoom) since that
 // mode's whole point is vector-only rendering; otherwise pointMode "both" at
 // deep zoom (zoom >= VECTOR_POINTS_MIN_ZOOM) fades the raster out the same
@@ -613,6 +627,13 @@ function safePaint(prop, v) {
 // (deliberate, isolate is an explicit action) without this resolver treating
 // that as "vector active".
 let pathDimActive = false;   // true while renderPath owns a drawn path, cleared by clearPath
+// R23: gate shared by remapWorld and updateRasterOpacity, same shape as
+// equalizeActive() below -- not gated on pointCloudEffectivelyOn() since
+// wide is a general layout preference, independent of the experimental
+// cloud toggle (see remapWorld's own R23 comment).
+function wideActive() {
+  return displaySettings.wide !== DISPLAY_DEFAULTS.wide;
+}
 function updateRasterOpacity() {
   const vectorActive = displaySettings.pointMode === "both" && map.getZoom() >= VECTOR_POINTS_MIN_ZOOM;
   // Deliberate precedence: a drawn path's dim (0.45) wins over isolate's
@@ -620,6 +641,7 @@ function updateRasterOpacity() {
   // more specific intent and path drawing doesn't clear isolate state.
   const opacity = pointCloudEffectivelyOn() ? 0
     : equalizeActive() ? 0
+    : wideActive() ? 0
     : displaySettings.pointMode === "vector" ? 0
     : vectorActive ? 0
     : pathDimActive ? 0.45
@@ -681,6 +703,17 @@ function visibleTiles(lz) {
 // declared further down, near the Equalize slider's own wiring) are read the
 // same deferred-TDZ way. p' = p + s * field(p), clamped back into [0,1]; s=0
 // or an unloaded field is the identity, same contract as the shader.
+//
+// R23: a third, independent remap -- "wide layout" -- runs LAST, after both
+// of the above (same order as the shaders' own u_wide block, right after
+// their gamma step). Eric wanted the x-axis used more on a widescreen
+// viewport: the layout is inherently circular (FA2 gravity), so it wastes
+// the screen's left/right wings at a zoom that fits the whole map vertically.
+// y' = 0.5 + (y - 0.5) / wide compresses y about the center (x untouched),
+// turning the circle into an ellipse that fills a wide viewport -- panning
+// left/right at a fitting zoom then becomes natural instead of dead space.
+// Like spacing, not gated on pointCloudEffectivelyOn() -- it's a general
+// layout preference, independent of the experimental cloud toggle.
 function remapWorld(xw, yw) {
   let x = xw, y = yw;
   if (equalizeActive()) {
@@ -688,16 +721,21 @@ function remapWorld(xw, yw) {
     x = clamp01(x + displaySettings.equalize * dx);
     y = clamp01(y + displaySettings.equalize * dy);
   }
-  if (!(pointCloudEffectivelyOn() && displaySettings.spacing !== DISPLAY_DEFAULTS.spacing)) {
-    return [x, y];
+  if (pointCloudEffectivelyOn() && displaySettings.spacing !== DISPLAY_DEFAULTS.spacing) {
+    const gamma = displaySettings.spacing;
+    const dx = x - 0.5, dy = y - 0.5;
+    const r = Math.hypot(dx, dy) / 0.48;
+    if (r <= 1 && r > 1e-6) {   // same defensive no-remap fallback as the shader
+      const rr = Math.pow(r, gamma);   // r is already in (1e-6, 1] here, so clamp(r,0,1) is a no-op
+      const scale = rr / r;
+      x = 0.5 + dx * scale;
+      y = 0.5 + dy * scale;
+    }
   }
-  const gamma = displaySettings.spacing;
-  const dx = x - 0.5, dy = y - 0.5;
-  const r = Math.hypot(dx, dy) / 0.48;
-  if (r > 1 || r <= 1e-6) return [x, y];   // same defensive no-remap fallback as the shader
-  const rr = Math.pow(r, gamma);             // r is already in (1e-6, 1] here, so clamp(r,0,1) is a no-op
-  const scale = rr / r;
-  return [0.5 + dx * scale, 0.5 + dy * scale];
+  if (displaySettings.wide !== DISPLAY_DEFAULTS.wide) {
+    y = 0.5 + (y - 0.5) / displaySettings.wide;
+  }
+  return [x, y];
 }
 // R22d: inverse of remapWorld -- needed by hitTestTiles below. hitTestTiles
 // (the deep-zoom, z>=HIT_ZOOM hover/click path) has to go the OPPOSITE
@@ -719,18 +757,25 @@ function remapWorld(xw, yw) {
 // lives in -- hitTestTiles' 2-4 candidate tiles never include it, so hover/
 // click silently miss every dot while a remap is active.
 //
-// Undoes gamma first, then equalize (exact reverse of remapWorld's order).
-// Gamma inverts analytically (raise the radius to 1/gamma instead of
-// gamma). Equalize has no closed-form inverse (field is an arbitrary
-// sampled grid) -- solved instead by fixed-point iteration: p_in = p_out -
-// s*field(p_in), starting from p_in = p_out and refining. Converges fast
-// because the displacement is small relative to the field's smoothness (see
-// EQUALIZE_RANGE's own comment -- max |dx|,|dy| bounded to 0.12, real data
-// measured under 0.06); 4 iterations is comfortably enough headroom for hit-
-// testing (not pixel-perfect precision -- HIT_RADIUS's own 14px/12px boxes
-// already have slack).
+// Undoes wide first, then gamma, then equalize (exact reverse of
+// remapWorld's order). Wide and gamma both invert analytically (wide: undo
+// the /wide division with a *wide multiply; gamma: raise the radius to
+// 1/gamma instead of gamma). Equalize has no closed-form inverse (field is
+// an arbitrary sampled grid) -- solved instead by fixed-point iteration:
+// p_in = p_out - s*field(p_in), starting from p_in = p_out and refining.
+// Converges fast because the displacement is small relative to the field's
+// smoothness (see EQUALIZE_RANGE's own comment -- max |dx|,|dy| bounded to
+// 0.12, real data measured under 0.06); 4 iterations is comfortably enough
+// headroom for hit-testing (not pixel-perfect precision -- HIT_RADIUS's own
+// 14px/12px boxes already have slack).
 function inverseRemapWorld(rxw, ryw) {
   let x = rxw, y = ryw;
+  // R23: undo wide first -- it was applied last by remapWorld, so it's
+  // undone first here. y = 0.5 + (y' - 0.5) * wide is the exact inverse of
+  // remapWorld's y' = 0.5 + (y - 0.5) / wide.
+  if (displaySettings.wide !== DISPLAY_DEFAULTS.wide) {
+    y = 0.5 + (y - 0.5) * displaySettings.wide;
+  }
   if (pointCloudEffectivelyOn() && displaySettings.spacing !== DISPLAY_DEFAULTS.spacing) {
     const gamma = displaySettings.spacing;
     const dx = x - 0.5, dy = y - 0.5;
@@ -1970,7 +2015,9 @@ function collides(placed, x, y, w, h) {
 // R22d: equalize defaults to 0 (identity -- see remapWorld/equalizeActive),
 // same "visitor never touches it, sees the true layout" reasoning as
 // spacing's own default above.
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 0.5, allPoints: false, spacing: 1.0, edgeLines: false, edgeIntensity: 0.12, edgeCount: 3000000, equalize: 0 };
+// R23: wide defaults to 1.0 (identity -- see remapWorld's own wide step),
+// same reasoning again.
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, pointMode: "both", labelMode: "normal", sizeContrast: 0.5, allPoints: false, spacing: 1.0, edgeLines: false, edgeIntensity: 0.12, edgeCount: 3000000, equalize: 0, wide: 1.0 };
 const DISPLAY_KEY = "mapademic.display";
 
 // R12b: a stale localStorage value still carrying the removed "boundaries"
@@ -2035,6 +2082,8 @@ const dpSpacing = document.getElementById("dp-spacing");
 const dpSpacingN = document.getElementById("dp-spacing-n");
 const dpEqualize = document.getElementById("dp-equalize");
 const dpEqualizeN = document.getElementById("dp-equalize-n");
+const dpWide = document.getElementById("dp-wide");
+const dpWideN = document.getElementById("dp-wide-n");
 const dpReset = document.getElementById("display-reset");
 
 function syncDisplayUI() {
@@ -2054,6 +2103,8 @@ function syncDisplayUI() {
   dpSpacingN.textContent = displaySettings.spacing.toFixed(2);
   dpEqualize.value = displaySettings.equalize;
   dpEqualizeN.textContent = displaySettings.equalize.toFixed(1);
+  dpWide.value = displaySettings.wide;
+  dpWideN.textContent = displaySettings.wide.toFixed(2);
 }
 syncDisplayUI();
 
@@ -2104,34 +2155,74 @@ dpPointModeRadios.forEach(r => r.addEventListener("change", () => {
   updateVectorPoints();
   updateRasterOpacity();
 }));
+// R23 perf: a slider drag fires "input" continuously (many events/sec).
+// Reading displaySettings straight into a GPU uniform + triggerRepaint is
+// cheap and stays fully live every tick (see each handler below), but the
+// label/region tile-fetch + DOM rebuild, vector-points GeoJSON rebuild,
+// overlay repositioning, raster-opacity resolution, and the vector-points
+// circle-radius paint write are all comparatively expensive and only need to
+// reflect the FINAL value once the drag settles -- not every intermediate
+// tick. Coalesced here behind one shared trailing debounce (250ms after the
+// last input across ANY of the sliders below), so a fast drag pays for this
+// work once instead of dozens of times. Eric: "lag when options are toggled/
+// dragged even locally".
+let heavyRefreshTimer = null;
+function scheduleHeavyRefresh() {
+  if (heavyRefreshTimer) clearTimeout(heavyRefreshTimer);
+  heavyRefreshTimer = setTimeout(() => {
+    heavyRefreshTimer = null;
+    drawLabels();
+    drawRegions();
+    updateVectorPoints();
+    repositionActiveOverlays();
+    updateRasterOpacity();
+    applyVectorRadius();
+  }, 250);
+}
 dpSizeContrast.addEventListener("input", () => {
   displaySettings.sizeContrast = Number(dpSizeContrast.value);
   dpSizeContrastN.textContent = displaySettings.sizeContrast.toFixed(1);
   saveDisplaySettings();
-  applyVectorRadius();
   // R16: the point cloud's u_contrast is read fresh every render() frame
   // (see pointCloudLayer.render), but MapLibre only repaints on camera
   // changes/triggerRepaint -- an input event alone never causes one, so the
   // slider would otherwise look dead until an unrelated repaint happened to
   // fire. Force one here whenever the cloud is actually visible.
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
+  // R23: applyVectorRadius (the vector-points circle-radius paint write) is
+  // the only non-uniform work this slider needs -- deferred to the shared
+  // debounce above instead of running on every drag tick.
+  scheduleHeavyRefresh();
 });
 dpSpacing.addEventListener("input", () => {
   displaySettings.spacing = Number(dpSpacing.value);
   dpSpacingN.textContent = displaySettings.spacing.toFixed(2);
   saveDisplaySettings();
-  // R20: toLngLat now folds the spacing remap in for every consumer (see
+  // R20: toLngLat folds the spacing remap in for every consumer (see
   // remapWorld), so a gamma change has to refresh everything that calls it --
   // labels, region names, deep-zoom/mid-zoom vector-point GeoJSON
   // (updateVectorPoints, which the raster/vector-points "hidden while cloud
   // on" gates below VECTOR_POINTS_MIN_ZOOM don't apply to at/above it), and
   // any ephemeral overlay already on screen (search highlight, path,
-  // coauthor rays -- repositionActiveOverlays).
-  drawLabels();
-  drawRegions();
-  updateVectorPoints();
-  repositionActiveOverlays();
+  // coauthor rays -- repositionActiveOverlays). R23: that refresh set is now
+  // the shared debounce (scheduleHeavyRefresh above) rather than running on
+  // every drag tick -- the point cloud/edge lines themselves stay live via
+  // u_gamma, read fresh every render() frame, so triggerRepaint alone keeps
+  // those two layers responsive during the drag.
+  scheduleHeavyRefresh();
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
+});
+dpWide.addEventListener("input", () => {
+  displaySettings.wide = Number(dpWide.value);
+  dpWideN.textContent = displaySettings.wide.toFixed(2);
+  saveDisplaySettings();
+  // R23: same live-uniform/debounced-refresh split as Spacing above -- u_wide
+  // is read fresh every render() frame by both GPU layers, so a repaint is
+  // all they need live; everything else (labels/regions/vector-points/
+  // overlays/raster) catches up after the drag settles.
+  scheduleHeavyRefresh();
+  if (pointCloudEffectivelyOn()) map.triggerRepaint();
+  if (edgeLinesEffectivelyOn()) map.triggerRepaint();
 });
 
 // ---- R22d: density-equalization field ----
@@ -2155,6 +2246,46 @@ function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 function equalizeActive() {
   return displaySettings.equalize > 0 && equalizeField.loaded;
 }
+
+// R23: the slider's max is driven by equalize_meta.json's safe_max_strength
+// rather than a hardcoded constant, since that number is a property of
+// whichever field is currently on disk, not a fixed constant of the slider
+// itself. IMPORTANT semantics note: the field was regenerated as a 2-step
+// COMPOSED field (see equalize_meta.json's composed_steps) which is stronger
+// per unit than the single-pass field the old hardcoded 1.4 max was tuned
+// against -- a persisted value saved under the old field (anything above the
+// new max) is clamped down here rather than silently over-driving the new,
+// stronger field. 1.0 is the fallback ceiling until the fetch below
+// resolves (matches the slider's markup default in the HTML above).
+let equalizeMaxStrength = 1.0;
+function clampEqualizeToMax() {
+  dpEqualize.max = equalizeMaxStrength;
+  if (displaySettings.equalize > equalizeMaxStrength) {
+    displaySettings.equalize = equalizeMaxStrength;
+    saveDisplaySettings();
+  }
+  dpEqualize.value = displaySettings.equalize;
+  dpEqualizeN.textContent = displaySettings.equalize.toFixed(1);
+}
+clampEqualizeToMax();   // apply the 1.0 fallback immediately, ahead of the fetch below
+fetch(DATA_BASE + "/data/vector_experiment/equalize_meta.json")
+  .then(r => r.ok ? r.json() : null)
+  .then(meta => {
+    if (!meta || typeof meta.safe_max_strength !== "number") return;
+    equalizeMaxStrength = meta.safe_max_strength;
+    clampEqualizeToMax();
+    // A clamp here can change the actual remap output (a returning visitor
+    // whose persisted value exceeded the new max) -- refresh everything
+    // remapWorld feeds, same set the slider's own input handler uses.
+    drawLabels();
+    drawRegions();
+    updateVectorPoints();
+    repositionActiveOverlays();
+    updateRasterOpacity();
+    if (pointCloudEffectivelyOn()) map.triggerRepaint();
+    if (edgeLinesEffectivelyOn()) map.triggerRepaint();
+  })
+  .catch(() => { /* keep the 1.0 fallback max */ });
 
 // Bilinear sample of the raw float field at world position (wx, wy) in
 // [0,1]^2, full float precision -- used by the JS-side remapWorld only; the
@@ -2272,16 +2403,14 @@ dpEqualize.addEventListener("input", () => {
   if (displaySettings.equalize > 0) ensureEqualizeFieldLoaded();
   // Same refresh set as the Spacing slider's own input handler above --
   // remapWorld folds equalize in too, so every one of its consumers needs
-  // the same re-run to move. updateRasterOpacity is also needed here (unlike
-  // the Spacing handler, which relies on pointCloudEffectivelyOn() already
-  // being part of its own gate) since equalize can suppress the raster on
-  // its own, independent of the point-cloud toggle -- see equalizeActive()'s
-  // new branch there.
-  drawLabels();
-  drawRegions();
-  updateVectorPoints();
-  repositionActiveOverlays();
-  updateRasterOpacity();
+  // the same re-run to move; updateRasterOpacity is included since equalize
+  // can suppress the raster on its own, independent of the point-cloud
+  // toggle (see equalizeActive()'s branch there). R23: deferred to the
+  // shared debounce (scheduleHeavyRefresh, declared with the Spacing
+  // handler above) instead of running on every drag tick -- u_equalize is
+  // read fresh every render() frame by both GPU layers, so a repaint alone
+  // keeps them live mid-drag.
+  scheduleHeavyRefresh();
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
   if (edgeLinesEffectivelyOn()) map.triggerRepaint();
 });
@@ -2295,7 +2424,7 @@ dpReset.addEventListener("click", () => {
   drawRegions();
   updateVectorPoints();
   applyVectorRadius();
-  updateRasterOpacity();   // also picks up equalize resetting to 0 (syncDisplayUI just set the slider back)
+  updateRasterOpacity();   // also picks up equalize/wide resetting to their defaults (syncDisplayUI just set the sliders back)
   // R17: allPoints resets to false too -- sync the checkbox and turn the
   // cloud off if it was on. This just hides the layer (pointCloudLayer.visible
   // -> false via setPointCloudActive); any already-fetched buffers stay
@@ -2329,7 +2458,16 @@ async function drawLabels() {
   // "hover only" mode (R9 labelMode) draws no regular author labels at any
   // zoom -- the hover tooltip at HIT_ZOOM and region names are unaffected,
   // this only ever clears/skips the .lbl markers this function itself owns.
-  if (displaySettings.labelMode === "hover" || z < 5.5) {
+  // R23 perf: same hiddenByCloud gate updateVectorPoints uses (see that
+  // function) -- below VECTOR_POINTS_MIN_ZOOM, an effectively-on point cloud
+  // already draws every author as a dot, so floating name labels over it are
+  // redundant clutter; at/above that zoom the cloud hands off and labels
+  // remain the only name source, unchanged. Previously this function did the
+  // full tile-fetch + collision-pack + marker-rebuild work even while the
+  // cloud made its output redundant -- this early-out (before any of that
+  // work, same as the hover/z<5.5 case above) is the fix.
+  const hiddenByCloud = pointCloudEffectivelyOn() && z < VECTOR_POINTS_MIN_ZOOM;
+  if (displaySettings.labelMode === "hover" || z < 5.5 || hiddenByCloud) {
     markers.forEach(m => m.remove()); markers = []; return;
   }
   // R18a used to bail out here while a non-1.0 spacing remap was distorting
@@ -2657,6 +2795,7 @@ uniform float u_base;
 uniform float u_contrast;
 uniform float u_min;
 uniform float u_gamma;
+uniform float u_wide;
 varying vec3 v_color;
 void main() {
   // a_pos arrives as raw (non-normalized) unsigned-short values (0..65535)
@@ -2681,6 +2820,12 @@ void main() {
   float rr = pow(clamp(r, 0.0, 1.0), u_gamma);
   float spacingScale = r > 1.0 ? 1.0 : (r > 1e-6 ? (rr * 0.48) / (r * 0.48) : 1.0);
   world = vec2(0.5) + d * spacingScale;
+  // R23: "wide layout" -- y-compression about center, applied AFTER the
+  // spacing decompression above (same order as the JS-side remapWorld's own
+  // wide step). x is untouched; u_wide == 1.0 is the identity. See the panel
+  // slider's own comment for why (Eric wanted the x-axis used more on a
+  // widescreen viewport -- the circular layout otherwise wastes the wings).
+  world.y = 0.5 + (world.y - 0.5) / u_wide;
   // World y is stored up-positive (see the pipeline's coords_web.parquet /
   // this file's own toLngLat: mercator y = 1 - yw), so the flip has to
   // happen here too for the cloud to land on the same pixels as the raster.
@@ -2717,6 +2862,7 @@ uniform float u_base;
 uniform float u_contrast;
 uniform float u_min;
 uniform float u_gamma;
+uniform float u_wide;
 uniform sampler2D u_equalizeTex;
 uniform float u_equalize;
 varying vec3 v_color;
@@ -2758,6 +2904,9 @@ void main() {
   float rr = pow(clamp(r, 0.0, 1.0), u_gamma);
   float spacingScale = r > 1.0 ? 1.0 : (r > 1e-6 ? (rr * 0.48) / (r * 0.48) : 1.0);
   world = vec2(0.5) + d * spacingScale;
+  // R23: "wide layout" -- see POINT_CLOUD_VERT_SRC's own comment for the
+  // full derivation; applied after equalize+spacing here too.
+  world.y = 0.5 + (world.y - 0.5) / u_wide;
   float mercX = world.x;
   float mercY = 1.0 - world.y;
   gl_Position = u_matrix * vec4(mercX, mercY, 0.0, 1.0);
@@ -2816,7 +2965,7 @@ const pointCloudLayer = {
   totalCount: 0,
   gl: null, program: null, posBuffer: null, attrBuffer: null,
   aPos: -1, aAttr: -1,
-  uMatrix: null, uBase: null, uContrast: null, uMin: null, uGamma: null,
+  uMatrix: null, uBase: null, uContrast: null, uMin: null, uGamma: null, uWide: null,
   // R22d: uEqualize/uEqualizeTex stay null (harmless -- gl.uniform* on a null
   // location is a spec-defined no-op) when onAdd picked the plain
   // POINT_CLOUD_VERT_SRC (equalizeSupported false); equalizeTexture is
@@ -2865,6 +3014,7 @@ const pointCloudLayer = {
     this.uContrast = gl.getUniformLocation(program, "u_contrast");
     this.uMin = gl.getUniformLocation(program, "u_min");
     this.uGamma = gl.getUniformLocation(program, "u_gamma");
+    this.uWide = gl.getUniformLocation(program, "u_wide");
     this.uEqualize = gl.getUniformLocation(program, "u_equalize");
     this.uEqualizeTex = gl.getUniformLocation(program, "u_equalizeTex");
     this.equalizeTexture = null;   // GL objects don't survive a context loss -- rebuilt lazily in render()
@@ -2927,6 +3077,9 @@ const pointCloudLayer = {
     // R18a: set fresh every frame from the live slider value, same pattern
     // as u_contrast above -- see POINT_CLOUD_VERT_SRC for the remap itself.
     gl.uniform1f(this.uGamma, displaySettings.spacing);
+    // R23: same live-every-frame pattern -- u_wide exists in BOTH shader
+    // variants (unlike u_equalize below), so this is unconditional.
+    gl.uniform1f(this.uWide, displaySettings.wide);
     // R22d: only meaningful on the EQ program variant (see onAdd) -- on the
     // plain variant uEqualize/uEqualizeTex are both null locations, and
     // gl.uniform*/no texture bind on a null location is a spec-defined
@@ -3191,22 +3344,26 @@ attribute float aW;
 attribute float aS;
 uniform mat4 u_matrix;
 uniform float u_gamma;
+uniform float u_wide;
 uniform float u_widthBase;
 uniform vec2 u_viewport;
 uniform float u_intensity;
 varying vec3 vColor;
 varying float vAlpha;
 
-// Mirrors POINT_CLOUD_VERT_SRC's radial "spacing" decompression exactly (see
-// that shader for the full derivation) so edges track the cloud's dots at
-// every spacing setting -- applied to BOTH endpoints independently, same as
+// Mirrors POINT_CLOUD_VERT_SRC's radial "spacing" decompression (and, R23,
+// its "wide layout" y-compression right after it) exactly -- see that
+// shader for the full derivation -- so edges track the cloud's dots at every
+// spacing/wide setting, applied to BOTH endpoints independently, same as
 // this file's own JS-side remapWorld, before the midpoint mix below.
 vec2 remapWorld(vec2 world) {
   vec2 d = world - vec2(0.5);
   float r = length(d) / 0.48;
   float rr = pow(clamp(r, 0.0, 1.0), u_gamma);
   float scale = r > 1.0 ? 1.0 : (r > 1e-6 ? (rr * 0.48) / (r * 0.48) : 1.0);
-  return vec2(0.5) + d * scale;
+  vec2 spaced = vec2(0.5) + d * scale;
+  spaced.y = 0.5 + (spaced.y - 0.5) / u_wide;
+  return spaced;
 }
 // World (already remapped) -> mercator (y flip, same as toLngLat) -> clip.
 vec4 toClip(vec2 world) {
@@ -3260,6 +3417,7 @@ attribute float aW;
 attribute float aS;
 uniform mat4 u_matrix;
 uniform float u_gamma;
+uniform float u_wide;
 uniform float u_widthBase;
 uniform vec2 u_viewport;
 uniform float u_intensity;
@@ -3279,9 +3437,9 @@ vec2 decodeEqualize(vec2 world) {
   return vec2(dxN * (2.0 * RANGE) - RANGE, dyN * (2.0 * RANGE) - RANGE);
 }
 
-// Mirrors POINT_CLOUD_VERT_SRC_EQ's order exactly (equalize, then spacing) --
-// applied to BOTH endpoints independently, same as this file's own JS-side
-// remapWorld, before the midpoint mix below.
+// Mirrors POINT_CLOUD_VERT_SRC_EQ's order exactly (equalize, then spacing,
+// then R23's wide y-compression) -- applied to BOTH endpoints independently,
+// same as this file's own JS-side remapWorld, before the midpoint mix below.
 vec2 remapWorld(vec2 world) {
   if (u_equalize > 0.0) {
     world = clamp(world + u_equalize * decodeEqualize(world), 0.0, 1.0);
@@ -3290,7 +3448,9 @@ vec2 remapWorld(vec2 world) {
   float r = length(d) / 0.48;
   float rr = pow(clamp(r, 0.0, 1.0), u_gamma);
   float scale = r > 1.0 ? 1.0 : (r > 1e-6 ? (rr * 0.48) / (r * 0.48) : 1.0);
-  return vec2(0.5) + d * scale;
+  vec2 spaced = vec2(0.5) + d * scale;
+  spaced.y = 0.5 + (spaced.y - 0.5) / u_wide;
+  return spaced;
 }
 // World (already remapped) -> mercator (y flip, same as toLngLat) -> clip.
 vec4 toClip(vec2 world) {
@@ -3380,7 +3540,7 @@ const edgeLinesLayer = {
   gl: null, program: null, inst: null,
   cornerBuffer: null, indexBuffer: null, posBuffer: null, attrBuffer: null,
   aCorner: -1, aP0: -1, aP1: -1, aC0: -1, aC1: -1, aW: -1, aS: -1,
-  uMatrix: null, uGamma: null, uWidthBase: null, uViewport: null, uIntensity: null,
+  uMatrix: null, uGamma: null, uWide: null, uWidthBase: null, uViewport: null, uIntensity: null,
   // R22d: same pattern/reasoning as pointCloudLayer's own uEqualize/
   // uEqualizeTex/equalizeSupported/equalizeTexture fields.
   uEqualize: null, uEqualizeTex: null, equalizeSupported: false, equalizeTexture: null,
@@ -3419,6 +3579,7 @@ const edgeLinesLayer = {
     this.aS = gl.getAttribLocation(program, "aS");
     this.uMatrix = gl.getUniformLocation(program, "u_matrix");
     this.uGamma = gl.getUniformLocation(program, "u_gamma");
+    this.uWide = gl.getUniformLocation(program, "u_wide");
     this.uWidthBase = gl.getUniformLocation(program, "u_widthBase");
     this.uViewport = gl.getUniformLocation(program, "u_viewport");
     this.uIntensity = gl.getUniformLocation(program, "u_intensity");
@@ -3494,6 +3655,9 @@ const edgeLinesLayer = {
     const dpr = window.devicePixelRatio || 1;
     gl.uniform1f(this.uWidthBase, edgeLinesBaseWidthPx(zoom) * dpr);
     gl.uniform1f(this.uGamma, displaySettings.spacing);
+    // R23: u_wide exists in BOTH shader variants (unlike u_equalize below), so
+    // this is unconditional -- same pattern as pointCloudLayer.render.
+    gl.uniform1f(this.uWide, displaySettings.wide);
     gl.uniform1f(this.uIntensity, displaySettings.edgeIntensity);
     gl.uniform2f(this.uViewport, gl.drawingBufferWidth, gl.drawingBufferHeight);
     // R22d: same pattern as pointCloudLayer.render's own equalize block.
