@@ -156,6 +156,10 @@
     #display-panel .dp-row-head { display: flex; justify-content: space-between; align-items: center; }
     #display-panel .dp-row-head .n { color: #888; }
     #display-panel input[type="range"] { width: 100%; }
+    /* R26: dimmed note for the Spacing/Equalize/Wide group -- their
+       transforms now only apply while the full point cloud is effectively
+       on (see remapWorld's own R26 comment). */
+    #display-panel .dp-hint { color: #777; font-size: 10.5px; }
     /* R13: flex-wrap keeps a long radio-label option from breaking
        word-by-word (word-wrap inside a squeezed flex item); an item that
        doesn't fit now wraps to its own line instead. Introduced for the
@@ -398,7 +402,11 @@
          (remapWorld, folded into toLngLat) now applies to every consumer --
          raster/vector-points/labels/hitTest/overlays -- not just the cloud's
          own vertex positions, so there's no more preview-only mismatch to
-         flag here (see the R20 comment near pointCloudEffectivelyOn). -->
+         flag here (see the R20 comment near pointCloudEffectivelyOn).
+         R26: Spacing/Equalize/Wide all now only remap anything while the
+         cloud is effectively on -- see remapWorld's own R26 comment -- so
+         one shared note covers all three below. -->
+    <div class="dp-hint">Spacing / Equalize / Wide layout: applies in Full point cloud mode</div>
     <div class="dp-row">
       <div class="dp-row-head"><label for="dp-spacing">Spacing</label><span id="dp-spacing-n" class="n"></span></div>
       <input id="dp-spacing" type="range" min="0.55" max="1.0" step="0.05" value="1.0">
@@ -591,37 +599,35 @@ function safePaint(prop, v) {
 // exist) never fight over the same paint property. renderPath/clearPath only
 // ever set pathDimActive and call this -- they no longer touch raster-opacity
 // directly. Precedence (R15b: the experimental full point-cloud layer added a
-// top-precedence case, see pointCloudEffectivelyOn below; R22d:
-// equalizeActive() added right under it; R23: wideActive() joins it for the
-// same reason; R24: the old pointMode "vector"/"raster" branches are gone --
-// see this function's own R24 comment for why): the cloud, when EFFECTIVELY
-// on (checkbox on AND no active isolate -- an isolate suppresses the cloud,
-// see pointCloudEffectivelyOn), always wins outright -- the cloud renders
-// every author itself, so the raster splats underneath would just be
-// redundant double-drawing; while an isolate suppresses the cloud, the
-// resolver falls through to the pre-cloud precedence below, so the isolate's
-// own 0.2 dim applies exactly as with the cloud off; otherwise
-// equalizeActive() (Equalize slider above 0 AND its field loaded) or
-// wideActive() (Wide layout slider above its 1.0 default) also win outright,
-// for an unrelated reason from the cloud's own case above -- the raster is a
-// pre-rendered PNG tile that can't be remapped like every other layer (see
-// remapWorld), so leaving it visible while equalize/wide actively displace
-// labels/vector-points/overlays would reproduce the exact raster-vs-remap
-// mismatch R20 fixed for Spacing (see remapWorld's own R22d comment);
-// otherwise deep zoom (zoom >= VECTOR_POINTS_MIN_ZOOM) fades the raster out
-// the same way the old vectorPoints-enabled/pointMode "both" behavior did,
-// so vector circles are the only dots layer visible there (isolate filtering
-// happens inside updateVectorPoints itself in that case); otherwise a path
-// in flight dims the raster to 0.45 (unchanged pre-vector-points behavior);
-// otherwise a community isolate in effect (Task R10a) dims the raster to 0.2
-// at ALL zooms -- this is the isolate's only effect below vector zoom, since
-// the raster itself isn't filterable per-community until R10b's
-// per-community shards ship; otherwise full opacity.
+// top-precedence case, see pointCloudEffectivelyOn below; R22d/R23 originally
+// added equalizeActive()/wideActive() branches right under it, R26 removes
+// them again -- see this function's own R26 comment for why; R24: the old
+// pointMode "vector"/"raster" branches are gone -- see this function's own
+// R24 comment for why): the cloud, when EFFECTIVELY on (checkbox on AND no
+// active isolate -- an isolate suppresses the cloud, see
+// pointCloudEffectivelyOn), always wins outright -- the cloud renders every
+// author itself, so the raster splats underneath would just be redundant
+// double-drawing; while an isolate suppresses the cloud, the resolver falls
+// through to the pre-cloud precedence below, so the isolate's own 0.2 dim
+// applies exactly as with the cloud off; otherwise deep zoom
+// (zoom >= VECTOR_POINTS_MIN_ZOOM) fades the raster out the same way the old
+// vectorPoints-enabled/pointMode "both" behavior did, so vector circles are
+// the only dots layer visible there (isolate filtering happens inside
+// updateVectorPoints itself in that case); otherwise a path in flight dims
+// the raster to 0.45 (unchanged pre-vector-points behavior); otherwise a
+// community isolate in effect (Task R10a) dims the raster to 0.2 at ALL
+// zooms -- this is the isolate's only effect below vector zoom, since the
+// raster itself isn't filterable per-community until R10b's per-community
+// shards ship; otherwise full opacity.
 let pathDimActive = false;   // true while renderPath owns a drawn path, cleared by clearPath
-// R23: gate shared by remapWorld and updateRasterOpacity, same shape as
-// equalizeActive() below -- not gated on pointCloudEffectivelyOn() since
-// wide is a general layout preference, independent of the experimental
-// cloud toggle (see remapWorld's own R23 comment).
+// R23: gate shared by remapWorld and (until R26) updateRasterOpacity.
+// R26 (Eric: "cloud off must be the old raster+vector exactly"): wide (like
+// equalize and spacing) now only ever remaps anything while
+// pointCloudEffectivelyOn() -- see remapWorld's own R26 comment -- so this
+// function's own value stays independent of the cloud (a general "is the
+// slider off its default" check other callers can still use, e.g. the R26
+// warp-aware visibleTiles below), and remapWorld is the one place that ANDs
+// it with pointCloudEffectivelyOn().
 function wideActive() {
   return displaySettings.wide !== DISPLAY_DEFAULTS.wide;
 }
@@ -633,14 +639,20 @@ function wideActive() {
 // overlayDots checkbox instead of pointMode) never dimmed the raster on its
 // own even under the old "both" mode -- see updateVectorPoints'
 // globalMidZoomActive comment -- so overlayDots has no branch here either.
+// R26: the equalizeActive()/wideActive() branches R22d/R23 added here are
+// gone -- now that both are gated on pointCloudEffectivelyOn() (see
+// remapWorld's own R26 comment), either one being true implies the cloud is
+// effectively on, which the FIRST branch below already catches; the two
+// extra branches had become dead code, so removing them also directly
+// implements Eric's "cloud off must be the old raster+vector exactly" --
+// with the cloud off, opacity now falls straight through to the pre-R22d
+// rules (vector handoff / path dim / isolate dim / full opacity).
 function updateRasterOpacity() {
   const vectorActive = map.getZoom() >= VECTOR_POINTS_MIN_ZOOM;
   // Deliberate precedence: a drawn path's dim (0.45) wins over isolate's
   // deeper dim (0.2) when both are active, since the path is the fresher,
   // more specific intent and path drawing doesn't clear isolate state.
   const opacity = pointCloudEffectivelyOn() ? 0
-    : equalizeActive() ? 0
-    : wideActive() ? 0
     : vectorActive ? 0
     : pathDimActive ? 0.45
     : isolateCommunity != null ? 0.2
@@ -658,13 +670,86 @@ async function fetchTile(z, x, y) {
   }
   return tileCache.get(k);
 }
+// R26: true when remapWorld would actually displace a point right now --
+// same three gates remapWorld itself checks, exposed here so visibleTiles
+// below can skip the extra inverse-remap work in the common (no active
+// transform) case. Kept independent of remapWorld's own top-level gate so
+// this stays correct even if remapWorld's internals change shape later.
+function transformsActive() {
+  return pointCloudEffectivelyOn() && (
+    equalizeActive() ||
+    wideActive() ||
+    displaySettings.spacing !== DISPLAY_DEFAULTS.spacing
+  );
+}
+// R26 root-cause fix (Eric: "dot visible at overview disappears when zoomed
+// in" under Wide/Equalize): label tiles are keyed by each entry's TRUE
+// (unremapped) position, but this function used to bucket the VISUAL
+// viewport bounds (map.getBounds(), i.e. the on-screen/remapped region)
+// directly into tile indices -- correct with no active transform (visual ==
+// true space), but wrong under an active warp, where the true-coordinate
+// region actually visible on screen differs from the visual bounds. A dot
+// whose true position sits outside the (wrongly-computed) tile range never
+// gets fetched, so it silently vanishes once zoomed in past HIT_ZOOM/
+// VECTOR_POINTS_MIN_ZOOM even though it's plainly visible at overview
+// (where the mid-zoom top-author/shard overlays don't depend on tiles at
+// all -- see updateVectorPoints).
+//
+// Fix: under an active transform, sample the viewport's 4 corners + 4 edge
+// midpoints (corners alone can miss a warp that bulges out mid-edge), run
+// each through inverseRemapWorld to recover its TRUE coordinates, and take
+// the axis-aligned bounding box of those true-space points -- expanded by
+// one tile of margin on each side, since the 8 samples only approximate the
+// true-space boundary rather than tracing it exactly. TILE_RANGE_CAP then
+// clamps the resulting range so an extreme warp can't balloon the fetch
+// into a huge tile count.
+const TILE_RANGE_CAP = 12;   // sanity cap, tiles per side, even under an extreme warp
 function visibleTiles(lz) {
-  const n = 1 << lz, b = map.getBounds();
-  const m0 = maplibregl.MercatorCoordinate.fromLngLat(b.getNorthWest());
-  const m1 = maplibregl.MercatorCoordinate.fromLngLat(b.getSouthEast());
+  const n = 1 << lz;
+  let x0, x1, y0, y1;
+  if (transformsActive()) {
+    const w = innerWidth, h = innerHeight;
+    const samplePts = [
+      [0, 0], [w, 0], [0, h], [w, h],
+      [w / 2, 0], [w / 2, h], [0, h / 2], [w, h / 2],
+    ];
+    let tx0 = Infinity, tx1 = -Infinity, ty0 = Infinity, ty1 = -Infinity;
+    for (const [sx, sy] of samplePts) {
+      const m = maplibregl.MercatorCoordinate.fromLngLat(map.unproject([sx, sy]));
+      // (m.x, 1 - m.y) is the same "remapped world" convention toLngLat/
+      // hitTestTiles use -- see inverseRemapWorld's own comment.
+      const [txw, tyw] = inverseRemapWorld(m.x, 1 - m.y);
+      if (txw < tx0) tx0 = txw; if (txw > tx1) tx1 = txw;
+      if (tyw < ty0) ty0 = tyw; if (tyw > ty1) ty1 = tyw;
+    }
+    // Tile y bucket uses mercator y (1 - world y), same convention as the
+    // non-warped branch below and hitTestTiles. Margin of 1 tile on every
+    // side around the sampled true-space bounding box.
+    x0 = Math.floor(tx0 * n) - 1; x1 = Math.floor(tx1 * n) + 1;
+    y0 = Math.floor((1 - ty1) * n) - 1; y1 = Math.floor((1 - ty0) * n) + 1;
+    // Sanity cap: clamp the margin down (recentering on the same midpoint)
+    // if an extreme warp would otherwise blow the range out past
+    // TILE_RANGE_CAP tiles per side.
+    if (x1 - x0 + 1 > TILE_RANGE_CAP) {
+      const cx = Math.round((x0 + x1) / 2);
+      x0 = cx - Math.floor((TILE_RANGE_CAP - 1) / 2);
+      x1 = x0 + TILE_RANGE_CAP - 1;
+    }
+    if (y1 - y0 + 1 > TILE_RANGE_CAP) {
+      const cy = Math.round((y0 + y1) / 2);
+      y0 = cy - Math.floor((TILE_RANGE_CAP - 1) / 2);
+      y1 = y0 + TILE_RANGE_CAP - 1;
+    }
+    x0 = Math.max(0, x0); x1 = Math.min(n - 1, x1);
+    y0 = Math.max(0, y0); y1 = Math.min(n - 1, y1);
+  } else {
+    const b = map.getBounds();
+    const m0 = maplibregl.MercatorCoordinate.fromLngLat(b.getNorthWest());
+    const m1 = maplibregl.MercatorCoordinate.fromLngLat(b.getSouthEast());
+    x0 = Math.max(0, Math.floor(m0.x * n)); x1 = Math.min(n - 1, Math.floor(m1.x * n));
+    y0 = Math.max(0, Math.floor(m0.y * n)); y1 = Math.min(n - 1, Math.floor(m1.y * n));
+  }
   const tiles = [];
-  const x0 = Math.max(0, Math.floor(m0.x * n)), x1 = Math.min(n - 1, Math.floor(m1.x * n));
-  const y0 = Math.max(0, Math.floor(m0.y * n)), y1 = Math.min(n - 1, Math.floor(m1.y * n));
   for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) tiles.push([x, y]);
   return tiles;
 }
@@ -694,13 +779,14 @@ function visibleTiles(lz) {
 //
 // R22d: a second, independent remap -- density equalization -- runs FIRST,
 // mirroring the same order the GPU shaders apply it in (see
-// POINT_CLOUD_VERT_SRC_EQ / EDGE_LINES_VERT_SRC_EQ). Unlike spacing, its gate
-// does NOT require pointCloudEffectivelyOn() -- it's meant to work as a
-// general overlay/label remap independent of the experimental full-cloud
-// layer -- so equalizeActive()/equalizeField/sampleEqualizeField (all
-// declared further down, near the Equalize slider's own wiring) are read the
-// same deferred-TDZ way. p' = p + s * field(p), clamped back into [0,1]; s=0
-// or an unloaded field is the identity, same contract as the shader.
+// POINT_CLOUD_VERT_SRC_EQ / EDGE_LINES_VERT_SRC_EQ). equalizeActive()/
+// equalizeField/sampleEqualizeField (all declared further down, near the
+// Equalize slider's own wiring) are read the same deferred-TDZ way.
+// p' = p + s * field(p), clamped back into [0,1]; s=0 or an unloaded field is
+// the identity, same contract as the shader. R26: originally NOT gated on
+// pointCloudEffectivelyOn() (meant to work as a general overlay/label remap
+// independent of the experimental full-cloud layer) -- reversed below, see
+// remapWorld's own R26 comment.
 //
 // R23: a third, independent remap -- "wide layout" -- runs LAST, after both
 // of the above (same order as the shaders' own u_wide block, right after
@@ -710,16 +796,28 @@ function visibleTiles(lz) {
 // y' = 0.5 + (y - 0.5) / wide compresses y about the center (x untouched),
 // turning the circle into an ellipse that fills a wide viewport -- panning
 // left/right at a fitting zoom then becomes natural instead of dead space.
-// Like spacing, not gated on pointCloudEffectivelyOn() -- it's a general
-// layout preference, independent of the experimental cloud toggle.
+// R26: originally NOT gated on pointCloudEffectivelyOn() either (a general
+// layout preference, independent of the experimental cloud toggle) -- same
+// reversal as equalize, see below.
 function remapWorld(xw, yw) {
+  // R26 (Eric: "cloud off must be the old raster+vector exactly"): every
+  // transform below now activates ONLY while the full point cloud is
+  // effectively on. Before this, equalize and wide ran unconditionally
+  // (only spacing required the cloud) -- so turning the cloud off left
+  // labels/vector-points/overlays sitting at a warped position while the
+  // raster (which can't be remapped -- see updateRasterOpacity) and the
+  // cloud itself both disappeared, a visible mismatch with the "old" look.
+  // One top-level gate instead of a per-block one: identity for every
+  // consumer the instant the cloud goes off, regardless of which sliders are
+  // non-default.
+  if (!pointCloudEffectivelyOn()) return [xw, yw];
   let x = xw, y = yw;
   if (equalizeActive()) {
     const [dx, dy] = sampleEqualizeField(x, y);
     x = clamp01(x + displaySettings.equalize * dx);
     y = clamp01(y + displaySettings.equalize * dy);
   }
-  if (pointCloudEffectivelyOn() && displaySettings.spacing !== DISPLAY_DEFAULTS.spacing) {
+  if (displaySettings.spacing !== DISPLAY_DEFAULTS.spacing) {
     const gamma = displaySettings.spacing;
     const dx = x - 0.5, dy = y - 0.5;
     const r = Math.hypot(dx, dy) / 0.48;
@@ -730,7 +828,7 @@ function remapWorld(xw, yw) {
       y = 0.5 + dy * scale;
     }
   }
-  if (displaySettings.wide !== DISPLAY_DEFAULTS.wide) {
+  if (wideActive()) {
     y = 0.5 + (y - 0.5) / displaySettings.wide;
   }
   return [x, y];
@@ -767,14 +865,18 @@ function remapWorld(xw, yw) {
 // headroom for hit-testing (not pixel-perfect precision -- HIT_RADIUS's own
 // 14px/12px boxes already have slack).
 function inverseRemapWorld(rxw, ryw) {
+  // R26: same top-level gate as remapWorld -- see its own comment. Keeps
+  // remapWorld/inverseRemapWorld a true inverse pair in every state: whatever
+  // remapWorld returns unchanged, this returns unchanged too.
+  if (!pointCloudEffectivelyOn()) return [rxw, ryw];
   let x = rxw, y = ryw;
   // R23: undo wide first -- it was applied last by remapWorld, so it's
   // undone first here. y = 0.5 + (y' - 0.5) * wide is the exact inverse of
   // remapWorld's y' = 0.5 + (y - 0.5) / wide.
-  if (displaySettings.wide !== DISPLAY_DEFAULTS.wide) {
+  if (wideActive()) {
     y = 0.5 + (y - 0.5) * displaySettings.wide;
   }
-  if (pointCloudEffectivelyOn() && displaySettings.spacing !== DISPLAY_DEFAULTS.spacing) {
+  if (displaySettings.spacing !== DISPLAY_DEFAULTS.spacing) {
     const gamma = displaySettings.spacing;
     const dx = x - 0.5, dy = y - 0.5;
     const rr = Math.hypot(dx, dy) / 0.48;
@@ -2145,12 +2247,21 @@ dpGear.addEventListener("click", () => {
 // one whenever the cloud is actually visible. applyDisplayPaint's raster
 // paint-property writes are unaffected/unchanged -- the raster and the cloud
 // are two independent consumers of the same three displaySettings values now.
+// R26: also recolor the GeoJSON dot layers (deep-zoom/mid-zoom/isolate --
+// see entryToFeature's adjustColorHex call) so brightness/contrast/
+// saturation affect the zoomed-in view too, not just the raster/cloud. That
+// rebuild (tile fetch + feature map) is comparatively expensive, so like
+// every other heavy per-drag refresh it's deferred to the shared debounce
+// (scheduleHeavyRefresh) instead of running on every "input" tick -- the
+// transformKey fix in updateVectorPoints is what makes the debounced call
+// actually rebuild instead of hitting the stale-key short-circuit.
 dpBrightness.addEventListener("input", () => {
   displaySettings.brightness = Number(dpBrightness.value);
   dpBrightnessN.textContent = displaySettings.brightness.toFixed(2);
   applyDisplayPaint();
   saveDisplaySettings();
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
+  scheduleHeavyRefresh();
 });
 dpContrast.addEventListener("input", () => {
   displaySettings.contrast = Number(dpContrast.value);
@@ -2158,6 +2269,7 @@ dpContrast.addEventListener("input", () => {
   applyDisplayPaint();
   saveDisplaySettings();
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
+  scheduleHeavyRefresh();
 });
 dpSaturation.addEventListener("input", () => {
   displaySettings.saturation = Number(dpSaturation.value);
@@ -2165,6 +2277,7 @@ dpSaturation.addEventListener("input", () => {
   applyDisplayPaint();
   saveDisplaySettings();
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
+  scheduleHeavyRefresh();
 });
 dpDensityRadios.forEach(r => r.addEventListener("change", () => {
   if (!r.checked) return;
@@ -2276,7 +2389,13 @@ function scheduleWideCompensation() {
     wideCompensateTimer = null;
     const w0 = wideCompensateFrom, w1 = displaySettings.wide;
     wideCompensateFrom = w1;
-    if (w0 === w1) return;
+    // R26: Wide only actually remaps anything while pointCloudEffectivelyOn()
+    // (see remapWorld's own R26 comment) -- with the cloud off, dragging this
+    // slider isn't visually compressing anything, so there's nothing here to
+    // compensate for. setPointCloudActive handles the compensation for the
+    // cloud toggle itself (the moment Wide's transform actually activates/
+    // deactivates), same log2(wide) shape as below.
+    if (w0 === w1 || !pointCloudEffectivelyOn()) return;
     map.easeTo({ zoom: map.getZoom() + Math.log2(w1 / w0), duration: 200 });
   }, 250);
 }
@@ -2312,8 +2431,11 @@ let equalizeField = { loading: false, loaded: false, floats: null, packed: null 
 
 function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
-// Gate shared by remapWorld and updateRasterOpacity: identity/no-suppress
-// unless the slider is above 0 AND the field has actually finished loading.
+// R26: used by remapWorld and the warp-aware visibleTiles below; no longer
+// by updateRasterOpacity (see that function's own R26 comment) -- identity/
+// no-suppress unless the slider is above 0 AND the field has actually
+// finished loading. remapWorld is the one place that ANDs this with
+// pointCloudEffectivelyOn(), same split as wideActive() above.
 function equalizeActive() {
   return displaySettings.equalize > 0 && equalizeField.loaded;
 }
@@ -3484,6 +3606,11 @@ function syncPointCloudVisible() {
 }
 
 function setPointCloudActive(on) {
+  // R26: captured before allPointsCloudOn changes below, so this reflects
+  // whether the transforms were ACTUALLY active before this call -- not just
+  // the raw checkbox -- since an active isolate can leave pointCloudEffectivelyOn()
+  // false even while `on` (the checkbox) is true (see pointCloudEffectivelyOn).
+  const wasEffectivelyOn = pointCloudEffectivelyOn();
   allPointsCloudOn = on;
   if (on) {
     if (!map.getLayer("point-cloud")) {
@@ -3503,6 +3630,20 @@ function setPointCloudActive(on) {
     // (cheap head start); the cloud just stays suppressed until the isolate
     // ends (pointCloudEffectivelyOn above).
     ensurePointCloudLoaded();   // no-op if already loaded/loading
+  }
+  // R26: transforms (spacing/equalize/wide) are now gated on
+  // pointCloudEffectivelyOn() -- see remapWorld's own R26 comment -- so this
+  // toggle can itself flip Wide's active state exactly like a slider drag
+  // settling does (see scheduleWideCompensation above, which deliberately
+  // no-ops while the cloud is off, leaving this as the one place that
+  // compensates for the toggle itself). Same log2(wide) shape: +log2(wide)
+  // the instant the transform activates (cloud effectively turning on),
+  // -log2(wide) the instant it deactivates (cloud effectively turning off) --
+  // re-magnifying/un-magnifying the y-compression so the on-screen scale
+  // doesn't visibly jump at the toggle.
+  const nowEffectivelyOn = pointCloudEffectivelyOn();
+  if (nowEffectivelyOn !== wasEffectivelyOn && displaySettings.wide !== DISPLAY_DEFAULTS.wide) {
+    map.easeTo({ zoom: map.getZoom() + (nowEffectivelyOn ? 1 : -1) * Math.log2(displaySettings.wide), duration: 200 });
   }
   syncPointCloudVisible();
   updateVectorPoints();   // hides the now-redundant capped GeoJSON overlay below 10.25
@@ -4183,6 +4324,27 @@ function lerpColor(colorA, colorB, t) {
   const a = hexToRgb(colorA), b = hexToRgb(colorB);
   return rgbToHex(a.map((v, i) => v + (b[i] - v) * t));
 }
+// R26 (Eric: "brightness/contrast/saturation don't affect the zoomed-in
+// version" -- the sliders only ever wrote raster paint properties and the
+// point-cloud's own GPU uniforms, see applyDisplayPaint/POINT_CLOUD_FRAG_SRC,
+// never anything feeding the GeoJSON dot layers). JS mirror of
+// POINT_CLOUD_FRAG_SRC's color math, same order (saturation -> contrast ->
+// brightness), operating on a hex color instead of a fragment:
+//   luma = 0.299 r + 0.587 g + 0.114 b (Rec. 601 weights, same as the shader)
+//   color = mix(luma, color, 1 + saturation)   == luma + (color-luma)*(1+saturation)
+//   color = (color - 0.5) * (1 + contrast) + 0.5
+//   color *= brightness
+// rgbToHex's own Math.max/min/round already clamps each channel back into
+// [0,255], same as the shader's clamp(color, 0.0, 1.0) -- no separate clamp
+// needed here.
+function adjustColorHex(hex, brightness, contrast, saturation) {
+  const [r0, g0, b0] = hexToRgb(hex).map(v => v / 255);
+  const luma = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
+  const sat = v => luma + (v - luma) * (1 + saturation);
+  const con = v => (v - 0.5) * (1 + contrast) + 0.5;
+  const rgb = [r0, g0, b0].map(v => con(sat(v)) * brightness * 255);
+  return rgbToHex(rgb);
+}
 const GRADIENT_SEGMENTS = 10;
 // Splits the straight line from `from` to `to` (both [lng, lat]) into
 // GRADIENT_SEGMENTS short LineString features, each carrying a `color`
@@ -4223,11 +4385,19 @@ function gradientSegmentFeatures(from, to, colorA, colorB) {
 // invertible). Now that geometry can carry a spacing remap, inverting it
 // would hand back the remapped position instead of the true one, so the
 // true values are stored redundantly here instead (see hitTestVector).
+// R26: color runs through adjustColorHex so brightness/contrast/saturation
+// affect every one of these dots (deep-zoom label-tile features, the
+// mid-zoom global top-authors overlay, and isolate community shards -- every
+// caller of this function, see shardEntriesToFeatures below) the same way
+// they already affected the raster and the point cloud. See
+// updateVectorPoints' transformKey for the matching cache-key fix that makes
+// a slider release actually rebuild these colors.
 function entryToFeature([name, id, xw, yw, cited, community]) {
+  const color = adjustColorHex(colorForCommunity(community), displaySettings.brightness, displaySettings.contrast, displaySettings.saturation);
   return {
     type: "Feature",
     geometry: { type: "Point", coordinates: toLngLat(xw, yw).toArray() },
-    properties: { cited, color: colorForCommunity(community), name, id: stripId(id), community, xw, yw },
+    properties: { cited, color, name, id: stripId(id), community, xw, yw },
   };
 }
 // Shared by isolate mode's community-shard render and the R12b global
@@ -4385,7 +4555,17 @@ async function updateVectorPoints() {
   // dimension nobody reads) makes the cache correctly treat any transform
   // change as a new feature set, same as an isolate/pan/zoom change already
   // did.
-  const transformKey = `${displaySettings.equalize}:${displaySettings.spacing}:${displaySettings.wide}`;
+  // R26: two more dimensions folded in. (1) pointCloudEffectivelyOn() --
+  // remapWorld's transforms now activate/deactivate purely based on this
+  // flag (see its own R26 comment), which none of equalize/spacing/wide's
+  // own VALUES change, so toggling the cloud on/off with a non-default
+  // transform previously matched the stale key and left these dots at their
+  // already-remapped (or already-true) position instead of snapping to
+  // match the new cloud state. (2) brightness/contrast/saturation --
+  // entryToFeature now runs color through adjustColorHex, so a color-only
+  // slider release also needs to count as a real feature-set change (see
+  // entryToFeature's own R26 comment).
+  const transformKey = `${pointCloudEffectivelyOn()}:${displaySettings.equalize}:${displaySettings.spacing}:${displaySettings.wide}:${displaySettings.brightness}:${displaySettings.contrast}:${displaySettings.saturation}`;
 
   let features, setKey;
   if (shardActive) {
@@ -4791,11 +4971,15 @@ async function hitTestTiles(pt) {
   // R22d: each corner has to go through inverseRemapWorld before bucketing
   // into a tile index -- label tiles are indexed by each entry's TRUE
   // (unremapped) position, but the cursor's unprojected position is
-  // necessarily in REMAPPED (on-screen) space. With no active remap
-  // (equalizeActive() false and spacing at its default) inverseRemapWorld is
-  // the identity, so this is a no-op in the common case. See
-  // inverseRemapWorld's own comment for why this only started mattering with
-  // Equalize.
+  // necessarily in REMAPPED (on-screen) space. With no active transform
+  // (see transformsActive()) inverseRemapWorld is the identity, so this is a
+  // no-op in the common case. See inverseRemapWorld's own comment for why
+  // this only started mattering with Equalize.
+  // R26: verified this tile choice already used TRUE coords (via
+  // inverseRemapWorld) rather than the naive visual-viewport bucketing
+  // visibleTiles used to do -- the same root-cause bug that fix addresses
+  // never applied here, since this candidate set is always built one corner
+  // at a time through the remap, not from a raw viewport bounding box.
   const n = 1 << 9, seen = new Set(), tiles = [];
   for (const dx of [-HIT_RADIUS, HIT_RADIUS]) for (const dy of [-HIT_RADIUS, HIT_RADIUS]) {
     const m = maplibregl.MercatorCoordinate.fromLngLat(
