@@ -449,11 +449,12 @@
       <input id="dp-edge-intensity" type="range" min="0.005" max="0.6" step="0.005" value="0.005">
     </div>
     <div class="dp-row">
-      <!-- R28: max clamped to 0 (the 1M stop) -- Eric's machine lags badly
-           past 1M. EDGE_COUNT_STOPS/EDGE_TIERS/loadEdgeTier keep the 3M/7M/
-           14.3M tiers intact in code, just unreachable from this control. -->
-      <div class="dp-row-head"><span>Line count</span><span id="dp-edge-count-n" class="n"></span></div>
-      <input id="dp-edge-count" type="range" min="0" max="0" step="1" value="0" aria-label="Line count">
+      <!-- R29: slider removed outright -- R28 had already capped it at the
+           1M stop (min=0 max=0, a dead thumb with no range to drag), so a
+           static value is all that's left to show. EDGE_COUNT_STOPS/
+           EDGE_TIERS/loadEdgeTier keep the 3M/7M/14.3M tiers intact in code,
+           just unreachable from any control now. -->
+      <div class="dp-row-head"><span>Line count</span><span class="n">1,000,000</span></div>
     </div>
     <button id="display-reset" type="button">Reset</button>
   </div>
@@ -1570,6 +1571,19 @@ async function renderPath(pathSteps, hops, idA, idB) {
   ));
   if (gen !== pathGen) return;       // a newer Go/Clear owns the overlay now
 
+  drawResolvedPath(points, hopColors, hops, idA, idB);
+}
+
+// R29: split out of renderPath so the startup demo path (see DEMO_PATH/
+// showDemoPath below) can draw the exact same overlay -- segment gradients,
+// hop markers, hop list, label suppression, path-dim, camera framing -- from
+// an already-resolved points/hopColors pair, with zero network access.
+// writeUrl (false only for the demo) gates the activeP/p= hash claim, so the
+// baked demo never looks like a user-requested Connect result in a copied
+// link; every other side effect (activePath, pathMarkers, pathOverlayIds,
+// pathDimActive) is set the same way either way, so clearPath/a real Go both
+// tear it down exactly as they would a normal path.
+function drawResolvedPath(points, hopColors, hops, idA, idB, { writeUrl = true } = {}) {
   // One visual mode at a time: a path about to draw takes over the highlight
   // slot, so drop any active search highlight (and its rays) first -- covers
   // the case where the searched author is also an endpoint/hop of this path,
@@ -1632,10 +1646,50 @@ async function renderPath(pathSteps, hops, idA, idB) {
   );
   map.fitBounds(bounds, { padding: 60, maxZoom: 11 });
 
-  activeP = [idA, idB];
-  pendingP = null;             // the drawn path owns p= from here
-  writeHash();
+  if (writeUrl) {
+    activeP = [idA, idB];
+    pendingP = null;             // the drawn path owns p= from here
+    writeHash();
+  }
   setPathStatus(`${hops} hops`);
+}
+
+// ---- R29: startup demo connection ----
+// Baked snapshot of a real /api/path?from=A5108093963&to=A5067184382&edges=coauthor
+// response (Geoffrey Hinton -> Jennifer Doudna, queried once against the local
+// dev backend), pre-resolved to exactly the {points, hopColors} shape
+// drawResolvedPath consumes -- xw/yw from data/index/ids, hopColors from the
+// z9 label tiles' community field via colorForCommunity/legend.json. The
+// public site has no path backend at all, so this lets a first-time visitor
+// see a real, good-looking Connect result with zero fetches: no /api/path
+// call (there's no backend to call), no /data/index/ids or label-tile fetch
+// either, unlike a normal search-resolved path. Hinton and Doudna sit in
+// clearly different fields (deep learning vs. CRISPR biology) and among the
+// farthest-apart well-known pairs checked, but the real reason this one was
+// picked over farther pairs (Doudna<->Witten, Doudna<->Chomsky) is that those
+// paths both crossed through an OpenAlex author-disambiguation collision (a
+// merged/mismatched author record bridging unrelated fields, "poisoned"
+// looking) -- this 4-hop chain is real coauthorships end to end with
+// respectable citation counts throughout (Sejnowski, Fred Gage, Gene Yeo).
+const DEMO_PATH = {
+  idA: "A5108093963", idB: "A5067184382", hops: 4,
+  points: [
+    { id: "A5108093963", name: "Geoffrey E. Hinton",    xw: 0.568363, yw: 0.553862, ghost: false },
+    { id: "A5044141636", name: "Terrence J. Sejnowski", xw: 0.513473, yw: 0.550736, ghost: false },
+    { id: "A5072968010", name: "Fred H. Gage",          xw: 0.356876, yw: 0.663661, ghost: false },
+    { id: "A5082310752", name: "G Yeo",                 xw: 0.449272, yw: 0.756635, ghost: false },
+    { id: "A5067184382", name: "Jennifer A. Doudna",    xw: 0.503588, yw: 0.732482, ghost: false },
+  ],
+  hopColors: ["#de465a", "#de465a", "#6be95e", "#e2dc5f", "#e2dc5f"],
+};
+
+// Draws DEMO_PATH exactly like a resolved Connect result (writeUrl: false --
+// see drawResolvedPath -- so the demo never appears in a copied link) and
+// counts as this session's pathGen 1, so a real Go/Clear afterwards tears it
+// down through the ordinary clearPath path with no special-casing.
+function showDemoPath() {
+  pathGen++;
+  drawResolvedPath(DEMO_PATH.points, DEMO_PATH.hopColors, DEMO_PATH.hops, DEMO_PATH.idA, DEMO_PATH.idB, { writeUrl: false });
 }
 
 connectGo.addEventListener("click", () => {
@@ -2197,11 +2251,11 @@ function loadDisplaySettings() {
     delete parsed.pointMode;
     delete parsed.vectorPoints;
     const merged = { ...DISPLAY_DEFAULTS, ...parsed };
-    // R28: the Line count slider itself is now capped at the 1M stop (see
-    // its markup's max="0"), but a value saved before this cap existed
+    // R28 capped the Line count slider at the 1M stop; R29 removed the
+    // control outright. Either way a value saved before the cap existed
     // could still be sitting in a visitor's localStorage above 1M -- clamp
-    // it down rather than let a persisted 3M/7M/14.3M silently outrun the
-    // now-unreachable control.
+    // it down rather than let a persisted 3M/7M/14.3M silently outrun what's
+    // now a fixed 1M display.
     if (merged.edgeCount > 1000000) merged.edgeCount = 1000000;
     return merged;
   } catch {
@@ -2703,17 +2757,16 @@ dpReset.addEventListener("click", () => {
   // slider's own input handler above.
   if (pointCloudEffectivelyOn()) map.triggerRepaint();
   // R22c: connection lines reset the same way allPoints does just above --
-  // dpEdgeLines/setEdgeLinesActive/edgeCountIndex/EDGE_COUNT_LABELS are all
-  // declared later in this file (edge-lines section, after pointCloudLayer),
-  // but this callback only ever runs on a user click long after the whole
-  // script has executed top-to-bottom, same reasoning as the allPoints reset
-  // just above (which references dpAllPoints/setPointCloudActive the same way).
+  // dpEdgeLines/setEdgeLinesActive are declared later in this file
+  // (edge-lines section, after pointCloudLayer), but this callback only ever
+  // runs on a user click long after the whole script has executed
+  // top-to-bottom, same reasoning as the allPoints reset just above (which
+  // references dpAllPoints/setPointCloudActive the same way). R29: Line
+  // count has no control to reset anymore (edgeCount is permanently 1M).
   dpEdgeLines.checked = displaySettings.edgeLines;
   setEdgeLinesActive(displaySettings.edgeLines);
   dpEdgeIntensity.value = displaySettings.edgeIntensity;
   dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(3);
-  dpEdgeCount.value = edgeCountIndex(displaySettings.edgeCount);
-  dpEdgeCountN.textContent = EDGE_COUNT_LABELS[edgeCountIndex(displaySettings.edgeCount)];
   if (edgeLinesEffectivelyOn()) map.triggerRepaint();
 });
 
@@ -4238,17 +4291,13 @@ const edgeLinesStatusEl = document.getElementById("dp-edge-lines-status");
 function setEdgeLinesStatus(text) { edgeLinesStatusEl.textContent = text || ""; }
 const dpEdgeIntensity = document.getElementById("dp-edge-intensity");
 const dpEdgeIntensityN = document.getElementById("dp-edge-intensity-n");
-const dpEdgeCount = document.getElementById("dp-edge-count");
-const dpEdgeCountN = document.getElementById("dp-edge-count-n");
-// Line count slider stops: 1M/3M/7M/14.3M (the last is the real total edge
-// count, edges_meta.json's 14,316,429, not a rounded 14,300,000 -- so the
-// top stop always means "everything loaded", not 16,429 edges short of it).
+// R29: the Line count slider is gone (was already capped at the 1M stop by
+// R28); EDGE_COUNT_STOPS stays as the tier system's own vocabulary -- the
+// last value (14,316,429) is the real total edge count from
+// edges_meta.json, not a rounded 14,300,000 -- so the top stop always means
+// "everything loaded", not 16,429 edges short of it. Nothing outside
+// EDGE_TIERS/edgeTierFor below reads this array anymore.
 const EDGE_COUNT_STOPS = [1000000, 3000000, 7000000, 14316429];
-const EDGE_COUNT_LABELS = ["1M", "3M", "7M", "14.3M"];
-function edgeCountIndex(count) {
-  const idx = EDGE_COUNT_STOPS.indexOf(count);
-  return idx >= 0 ? idx : 0;   // R24: default stop (1M, was 3M) if a stale/corrupt localStorage value doesn't match any stop
-}
 // R25: tiered edge fetch -- edges_meta.json's 1m/3m subsets are literal
 // strongest-first prefixes of the full edges_pos.bin/edges_attr.bin pair
 // (same weight-desc order), so the smallest file covering the current Line
@@ -4266,17 +4315,15 @@ const EDGE_TIERS = [
 function edgeTierFor(count) {
   return EDGE_TIERS.find(t => count <= t.max);
 }
-// dpEdgeLines/dpEdgeIntensity/dpEdgeCount don't exist yet at syncDisplayUI's
-// own definition/first call further up the file -- same reasoning as
+// dpEdgeLines/dpEdgeIntensity don't exist yet at syncDisplayUI's own
+// definition/first call further up the file -- same reasoning as
 // dpAllPoints (R17), their initial UI state is set directly here instead.
 dpEdgeLines.checked = displaySettings.edgeLines;
 dpEdgeIntensity.value = displaySettings.edgeIntensity;
 dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(3);
-dpEdgeCount.value = edgeCountIndex(displaySettings.edgeCount);
-dpEdgeCountN.textContent = EDGE_COUNT_LABELS[edgeCountIndex(displaySettings.edgeCount)];
 
 // R25: fetches + progressively uploads the smallest edges_pos*/edges_attr*
-// tier covering the current Line count slider (see EDGE_TIERS/edgeTierFor
+// tier covering the fixed 1M Line count (see EDGE_TIERS/edgeTierFor
 // above), same chunked-upload pattern as ensurePointCloudLoaded -- 8
 // bytes/edge in both files here (vs 4 for the point cloud), and more chunks
 // (the full tier's combined download is ~3.4x the cloud's) for a smoother
@@ -4412,19 +4459,10 @@ dpEdgeIntensity.addEventListener("input", () => {
   // spacing's own live-repaint calls above.
   if (edgeLinesEffectivelyOn()) map.triggerRepaint();
 });
-dpEdgeCount.addEventListener("input", () => {
-  const idx = Number(dpEdgeCount.value);
-  displaySettings.edgeCount = EDGE_COUNT_STOPS[idx];
-  dpEdgeCountN.textContent = EDGE_COUNT_LABELS[idx];
-  saveDisplaySettings();
-  // R25: raising the slider past the currently-loaded tier re-fetches the
-  // next tier up (loadEdgeTier's own guard no-ops otherwise) -- only
-  // meaningful once the layer has actually loaded something; if Connection
-  // lines has never been turned on, the eventual checkbox-on already
-  // resolves the right tier directly (see ensureEdgeLinesLoaded).
-  if (edgeLinesLayer.loaded) ensureEdgeLinesLoaded();
-  if (edgeLinesEffectivelyOn()) map.triggerRepaint();
-});
+// R29: the Line count slider (and its input listener that used to raise
+// edgeCount past the currently-loaded tier) is gone -- edgeCount is now
+// permanently 1M, so ensureEdgeLinesLoaded's checkbox-on call is the only
+// remaining path into loadEdgeTier.
 
 let vectorGen = 0;           // invalidates stale in-flight tile/shard fetches (labelGen pattern)
 // community (label-tile/shard entry field 5) -> raster palette hex, resolved
@@ -5265,6 +5303,15 @@ map.on("load", () => {
   updateVectorPoints();
   updateRasterOpacity();
   restoreFromHash(initialHash);   // async; resolves a=/p= independently of view restore
+  // R29: startup demo path -- only on a truly bare load (no view/a/p at all
+  // in the URL), so a shared link or a returning visitor's own restored view/
+  // search/path is never replaced by the canned example. restoreFromHash
+  // above is async but only acts when a/p is present, which this branch
+  // already excludes, so there's no race between the two over the highlight/
+  // path slot.
+  if (!initialHash || (!initialHash.view && !initialHash.a && !initialHash.p)) {
+    showDemoPath();
+  }
 });
 // ---- Task 5 (data-pipeline): live label/region updates while panning/zooming ----
 // "move" fires repeatedly for the whole duration of a gesture (pan, zoom,
