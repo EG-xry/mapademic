@@ -480,6 +480,7 @@ const HIT_RADIUS = 14;               // px hit-test radius around the cursor
 // same local defaults this file has always used (same-origin /data, :8000).
 const CFG = window.MAPADEMIC_CONFIG || {};
 const DATA_BASE = CFG.dataBase || "";        // e.g. "https://pub-xxx.r2.dev" when deployed; "" = same-origin /data paths as now
+const IDS_BIN_URL = DATA_BASE + "/data/vector_experiment/ids.bin";   // R30: range-fetched, never downloaded whole (see cloudHoverFallback)
 // degree-of-separation backend (Task 7). Render URL goes here when deployed.
 const API_BASE = CFG.apiBase || "http://localhost:8000";
 
@@ -3638,6 +3639,23 @@ function startBinLoad(src, url, onBytes) {
   return fetchWithProgress(url, onBytes).then((buf) => { writeBinCache(src.key, buf); return buf; });
 }
 
+// R30: per-URL memoized wrapper around resolveBinSource+startBinLoad, so the
+// startup prefetch (see prefetchPointCloudBins/prefetchEdgeLines1m below)
+// and a toggle's own load (ensurePointCloudLoaded/loadEdgeTier) always share
+// ONE fetch per url -- whichever call for a given url runs first actually
+// starts it (and its onBytes drives the status pill for the rest of that
+// fetch's life); every other caller for the same url just awaits the same
+// promise instead of starting a second download. onBytes is therefore only
+// ever actually used by the winning first call; later callers' onBytes
+// arguments are simply unused.
+const sharedBinFetches = new Map();   // url -> Promise<ArrayBuffer>
+function loadBinShared(url, onBytes) {
+  if (!sharedBinFetches.has(url)) {
+    sharedBinFetches.set(url, resolveBinSource(url).then((src) => startBinLoad(src, url, onBytes)));
+  }
+  return sharedBinFetches.get(url);
+}
+
 // Fetches both .bin files with streamed progress, then uploads in
 // POINT_CLOUD_CHUNKS progressive slices via bufferSubData into one
 // full-size-allocated buffer pair -- loadedCount grows after each slice and
@@ -3650,18 +3668,32 @@ function startBinLoad(src, url, onBytes) {
 // retries the fetch from scratch.
 const POINT_CLOUD_CHUNKS = 8;
 const POINT_CLOUD_TOTAL_BYTES = 67043648;   // combined size of both .bin files, for the progress denominator
+// R30: one wording for both the startup prefetch and an active toggle,
+// switched live on dpAllPoints.checked -- see loadBinShared's own comment
+// for why only the fetch's original caller's onBytes (whichever of the two
+// this is) ever actually drives this.
+function pointCloudProgressLabel(totalBytes) {
+  const mb = (bytes) => (bytes / 1048576).toFixed(1);
+  return dpAllPoints.checked
+    ? `loading 8.4M points… ${mb(totalBytes)} of ${mb(POINT_CLOUD_TOTAL_BYTES)}MB`
+    : `prefetching… ${Math.min(100, Math.round(totalBytes / POINT_CLOUD_TOTAL_BYTES * 100))}%`;
+}
 async function ensurePointCloudLoaded() {
   if (pointCloudLayer.loaded || pointCloudLayer.loading) return;
   pointCloudLayer.loading = true;
   try {
     const posUrl = DATA_BASE + "/data/vector_experiment/positions.bin";
     const attrUrl = DATA_BASE + "/data/vector_experiment/attrs.bin";
-    // R25: cache-first -- resolveBinSource does a HEAD + IDB lookup for each
-    // file before any download starts, so the pill can say "cached" instead
-    // of implying a slow download when a prior session already has these.
-    const [posSrc, attrSrc] = await Promise.all([resolveBinSource(posUrl), resolveBinSource(attrUrl)]);
-    const cached = !!posSrc.cachedBuf && !!attrSrc.cachedBuf;
-    setPointCloudStatus(cached ? "8.4M points cached… loading" : "loading 8.4M points… 0 of 64MB");
+    // R30: loadBinShared (see its own comment above startBinLoad) adopts an
+    // already-running startup prefetch instead of starting a second
+    // download -- this call may be the winning first call (fresh toggle,
+    // nothing prefetched yet) or a later one just awaiting the same promise.
+    // Either way the pill (pointCloudProgressLabel) reflects dpAllPoints's
+    // live checked state, so it always reads as "loading" wording here
+    // regardless of which call actually owns the network request.
+    if (!sharedBinFetches.has(posUrl) && !sharedBinFetches.has(attrUrl)) {
+      setPointCloudStatus("loading 8.4M points… 0 of 64MB");
+    }
     const receivedByFile = [0, 0];
     let lastStatusUpdate = 0;
     const onBytes = (i) => (n) => {
@@ -3669,13 +3701,11 @@ async function ensurePointCloudLoaded() {
       const now = performance.now();
       if (now - lastStatusUpdate < 250) return;   // throttle to ~4x/second
       lastStatusUpdate = now;
-      const total = receivedByFile[0] + receivedByFile[1];
-      const mb = (bytes) => (bytes / 1048576).toFixed(1);
-      setPointCloudStatus(`loading 8.4M points… ${mb(total)} of ${mb(POINT_CLOUD_TOTAL_BYTES)}MB`);
+      setPointCloudStatus(pointCloudProgressLabel(receivedByFile[0] + receivedByFile[1]));
     };
     const [posBuf, attrBuf] = await Promise.all([
-      startBinLoad(posSrc, posUrl, onBytes(0)),
-      startBinLoad(attrSrc, attrUrl, onBytes(1)),
+      loadBinShared(posUrl, onBytes(0)),
+      loadBinShared(attrUrl, onBytes(1)),
     ]);
     const count = Math.min(posBuf.byteLength, attrBuf.byteLength) >>> 2;   // 4 bytes/point in both files
     pointCloudLayer.totalCount = count;
@@ -3725,6 +3755,199 @@ async function ensurePointCloudLoaded() {
   } finally {
     pointCloudLayer.loading = false;
   }
+}
+
+// ---- R30: cloud-on hover fallback ----
+// Root cause: z >= HIT_ZOOM hover/click (hitTestTiles below) only ever
+// searches the z9 label tiles, which cap at 4000 entries/tile (see
+// pipeline/build_index.py's LABEL_ZOOMS and the "4000/tile cap" comment
+// above VECTOR_POINTS_MIN_ZOOM) -- an assumption that's fine with the cloud
+// off (nothing beyond the cap is even drawn, so there's nothing to miss) but
+// breaks the instant the full point cloud is on: the cloud draws all 8.38M
+// points from positions.bin regardless of the cap, so smaller/less-cited
+// dots beyond a dense tile's top 4000 are visible but absent from hit data.
+//
+// Fix, scoped to exactly that gap: when hitTestTiles finds nothing AND the
+// cloud is effectively on and loaded, fall back to a nearest-neighbor search
+// over the SAME in-memory positions the shader draws (pointCloudLayer.
+// cachedPosBuf), so visual and hit agreement is exact. A coarse uniform grid
+// (CLOUD_GRID_N^2 buckets, CSR layout: offsets + a flat index array, ~34MB
+// for 8.4M points) makes the search fast; it's built lazily, in idle-time
+// chunks so the main thread doesn't jank, the first time this fallback is
+// ever needed (not at cloud-load time, since most sessions with the cloud on
+// never hit a cap gap at all).
+const CLOUD_GRID_N = 1024;
+const cloudGrid = { building: false, ready: false, offsets: null, indices: null };
+// Safety cap on candidates actually distance-checked per query: a handful of
+// grid cells in the very densest cores can hold many more than the typical
+// ~8 points/cell average, and each candidate costs a toLngLat+project call.
+// Capping trades exactness in a pathological cell for guaranteed
+// responsiveness on every mousemove -- HIT_RADIUS is small enough that the
+// true nearest point is overwhelmingly likely to be found well before the cap.
+const CLOUD_FALLBACK_MAX_CANDIDATES = 4000;
+
+function scheduleCloudGridIdle(fn) {
+  if (window.requestIdleCallback) requestIdleCallback(fn, { timeout: 50 });
+  else setTimeout(() => fn(null), 0);
+}
+function cloudGridCellOf(pos, i) {
+  const xw = pos[i * 2] / 65535, yw = pos[i * 2 + 1] / 65535;
+  const cx = Math.min(CLOUD_GRID_N - 1, Math.max(0, (xw * CLOUD_GRID_N) | 0));
+  const cy = Math.min(CLOUD_GRID_N - 1, Math.max(0, (yw * CLOUD_GRID_N) | 0));
+  return cy * CLOUD_GRID_N + cx;
+}
+// Two chunked passes over the loaded positions -- count per bucket, prefix-
+// sum into CSR offsets, then fill a flat Uint32Array of indices -- so no
+// per-bucket JS array allocation is needed for ~1M buckets.
+function buildCloudGridIndexChunked() {
+  if (cloudGrid.building || cloudGrid.ready) return;
+  if (!pointCloudLayer.loaded || !pointCloudLayer.cachedPosBuf) return;
+  cloudGrid.building = true;
+  const pos = new Uint16Array(pointCloudLayer.cachedPosBuf);
+  const n = pointCloudLayer.loadedCount || (pos.length >>> 1);
+  const nb = CLOUD_GRID_N * CLOUD_GRID_N;
+  const counts = new Uint32Array(nb + 1);
+  const CHUNK = 500000;
+  let i = 0;
+
+  function countStep() {
+    const end = Math.min(n, i + CHUNK);
+    for (; i < end; i++) counts[cloudGridCellOf(pos, i) + 1]++;
+    if (i < n) { scheduleCloudGridIdle(countStep); return; }
+    for (let c = 0; c < nb; c++) counts[c + 1] += counts[c];   // prefix sum -> CSR offsets
+    cloudGrid.offsets = counts;
+    const indices = new Uint32Array(n);
+    const cursor = counts.slice(0, nb);   // mutable per-bucket write cursor
+    i = 0;
+    fillStep(cursor, indices);
+  }
+  function fillStep(cursor, indices) {
+    const end = Math.min(n, i + CHUNK);
+    for (; i < end; i++) {
+      const c = cloudGridCellOf(pos, i);
+      indices[cursor[c]++] = i;
+    }
+    if (i < n) { scheduleCloudGridIdle(() => fillStep(cursor, indices)); return; }
+    cloudGrid.indices = indices;
+    cloudGrid.building = false;
+    cloudGrid.ready = true;
+  }
+  scheduleCloudGridIdle(countStep);
+}
+// Same corner-then-inverseRemapWorld candidate-region approach hitTestTiles
+// uses for its z9 tile lookup (see hitTestTiles' own R22d comment) -- here
+// the "tiles" are grid cells instead, since the cloud is one flat array
+// rather than per-tile JSON.
+function cloudGridCandidates(pt) {
+  const n = CLOUD_GRID_N;
+  let cx0 = n, cx1 = -1, cy0 = n, cy1 = -1;
+  for (const dx of [-HIT_RADIUS, HIT_RADIUS]) for (const dy of [-HIT_RADIUS, HIT_RADIUS]) {
+    const m = maplibregl.MercatorCoordinate.fromLngLat(map.unproject([pt.x + dx, pt.y + dy]));
+    const [txw, tyw] = inverseRemapWorld(m.x, 1 - m.y);
+    const cx = Math.min(n - 1, Math.max(0, (txw * n) | 0));
+    const cy = Math.min(n - 1, Math.max(0, (tyw * n) | 0));
+    if (cx < cx0) cx0 = cx; if (cx > cx1) cx1 = cx;
+    if (cy < cy0) cy0 = cy; if (cy > cy1) cy1 = cy;
+  }
+  const out = [];
+  for (let cy = cy0; cy <= cy1 && out.length < CLOUD_FALLBACK_MAX_CANDIDATES; cy++) {
+    for (let cx = cx0; cx <= cx1 && out.length < CLOUD_FALLBACK_MAX_CANDIDATES; cx++) {
+      const c = cy * n + cx;
+      const s = cloudGrid.offsets[c], e = cloudGrid.offsets[c + 1];
+      for (let k = s; k < e && out.length < CLOUD_FALLBACK_MAX_CANDIDATES; k++) out.push(cloudGrid.indices[k]);
+    }
+  }
+  return out;
+}
+// Exact same visual math the shader draws with (u16/65535, remapWorld,
+// project) -- true coords in, screen px out, same as hitTestTiles' entries.
+function nearestCloudIndex(pt) {
+  if (!cloudGrid.ready) return null;
+  const pos = new Uint16Array(pointCloudLayer.cachedPosBuf);
+  let best = -1, bestD = HIT_RADIUS;
+  for (const i of cloudGridCandidates(pt)) {
+    const xw = pos[i * 2] / 65535, yw = pos[i * 2 + 1] / 65535;
+    const p = map.project(toLngLat(xw, yw));
+    const d = Math.hypot(p.x - pt.x, p.y - pt.y);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best >= 0 ? best : null;
+}
+// idx -> [name, id, xw, yw, cited, community] (same shape hitTestTiles/
+// hitTestVector return), cached per session since ids.bin/OpenAlex don't
+// change mid-visit. community is left undefined -- openInfoCard/legend
+// already treat that as the existing "off-legend/dust" fallback (see
+// openInfoCard's own R10a comment), same as any label-tile entry with no
+// community field. Name+citations come from fetchAuthorDetails (OpenAlex
+// People API, already used for the info card's own async detail rows) rather
+// than the id-coord shards, which only carry [xw, yw] -- see
+// fetchDisplayName's own "author names aren't in the id-coord shards" note.
+const cloudFallbackCache = new Map();   // point index -> Promise<hit|null>
+function resolveCloudFallbackHit(idx) {
+  if (cloudFallbackCache.has(idx)) return cloudFallbackCache.get(idx);
+  const promise = (async () => {
+    const pos = new Uint16Array(pointCloudLayer.cachedPosBuf);
+    const xw = pos[idx * 2] / 65535, yw = pos[idx * 2 + 1] / 65535;
+    let bareId;
+    try {
+      const r = await fetch(IDS_BIN_URL, { headers: { Range: `bytes=${idx * 8}-${idx * 8 + 7}` } });
+      if (!r.ok) throw new Error(`ids.bin range fetch failed: ${r.status}`);
+      let buf = await r.arrayBuffer();
+      // A server that ignores Range (200 + full body) still works: slice out
+      // the 8 bytes this index needs instead of assuming byte 0 == this row.
+      if (r.status !== 206) buf = buf.slice(idx * 8, idx * 8 + 8);
+      if (buf.byteLength < 8) throw new Error("ids.bin range fetch returned short read");
+      const view = new DataView(buf);
+      const lo = view.getUint32(0, true), hi = view.getUint32(4, true);
+      const numeric = hi === 0 ? BigInt(lo) : (BigInt(hi) << 32n) | BigInt(lo);
+      bareId = "A" + numeric.toString();
+    } catch (err) {
+      console.warn("cloud hover fallback: ids.bin lookup failed:", err);
+      return null;
+    }
+    const data = await fetchAuthorDetails(bareId);
+    const name = (data && data.display_name) || bareId;
+    const cited = (data && data.cited_by_count) || 0;
+    return [name, bareId, xw, yw, cited, undefined];
+  })();
+  cloudFallbackCache.set(idx, promise);
+  return promise;
+}
+// Entry point shared by click (immediate) and mousemove (debounced below):
+// finds the nearest cloud point, kicking off the grid build on first use.
+// Returns null (not a miss -- "not ready yet") while the grid is still
+// building; the very next hitTest attempt after it finishes will work.
+function cloudHoverFallback(pt) {
+  if (!pointCloudEffectivelyOn() || !pointCloudLayer.loaded) return null;
+  if (!cloudGrid.ready) { buildCloudGridIndexChunked(); return null; }
+  return nearestCloudIndex(pt);
+}
+// Mousemove-only: rapid cursor movement passes over many candidate indices,
+// so the actual ids.bin range fetch only fires once the nearest index has
+// been stable for ~80ms (leading debounce would fire on every new index
+// instead; trailing is what "rests" means here). Already-resolved indices
+// (cloudFallbackCache hit) skip the debounce entirely and resolve instantly.
+// Since the mouse may not move again while resting, the debounce's own
+// resolution directly re-applies the tooltip via applyHoverTip/lastMousePt
+// rather than waiting for a mousemove that may never come.
+let cloudHoverDebounceTimer = null;
+let cloudHoverDebounceIdx = null;
+function mousemoveCloudFallback(pt) {
+  const idx = cloudHoverFallback(pt);
+  if (idx == null) { cloudHoverDebounceIdx = null; clearTimeout(cloudHoverDebounceTimer); return null; }
+  if (cloudFallbackCache.has(idx)) return cloudFallbackCache.get(idx);
+  if (idx !== cloudHoverDebounceIdx) {
+    cloudHoverDebounceIdx = idx;
+    clearTimeout(cloudHoverDebounceTimer);
+    cloudHoverDebounceTimer = setTimeout(() => {
+      resolveCloudFallbackHit(idx).then((hit) => {
+        if (cloudHoverDebounceIdx === idx && lastMousePt && map.getZoom() >= HIT_ZOOM && pointCloudEffectivelyOn()) {
+          applyHoverTip(lastMousePt, hit);
+        }
+      });
+    }, 80);
+  }
+  return null;   // not resolved yet -- the timer above applies it directly once it is
 }
 
 // Single owner of pointCloudLayer.visible: recomputes the effective
@@ -4323,6 +4546,15 @@ dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(3);
 // progressive reveal. Cache-first via resolveBinSource/startBinLoad (see
 // that comment block above fetchWithProgress).
 const EDGE_LINES_CHUNKS = 20;
+// R30: same "one wording, switched live on the checkbox" pattern as
+// pointCloudProgressLabel above -- see loadBinShared's own comment for why
+// only the fetch's original caller's onBytes ever drives this.
+function edgeTierProgressLabel(tier, totalBytes) {
+  const mb = (bytes) => (bytes / 1048576).toFixed(1);
+  return dpEdgeLines.checked
+    ? `loading ${tier.label} connections… ${mb(totalBytes)} of ${mb(tier.bytes)}MB`
+    : `prefetching… ${Math.min(100, Math.round(totalBytes / tier.bytes * 100))}%`;
+}
 async function loadEdgeTier(tier) {
   if (edgeLinesLayer.loading) return;
   if (edgeLinesLayer.loaded && edgeLinesLayer.loadedTierMax >= tier.max) return;   // already covers this tier
@@ -4330,12 +4562,12 @@ async function loadEdgeTier(tier) {
   try {
     const posUrl = DATA_BASE + `/data/vector_experiment/edges_pos${tier.suffix}.bin`;
     const attrUrl = DATA_BASE + `/data/vector_experiment/edges_attr${tier.suffix}.bin`;
-    const [posSrc, attrSrc] = await Promise.all([resolveBinSource(posUrl), resolveBinSource(attrUrl)]);
-    const cached = !!posSrc.cachedBuf && !!attrSrc.cachedBuf;
-    const mb = (bytes) => (bytes / 1048576).toFixed(1);
-    setEdgeLinesStatus(cached
-      ? `${tier.label} connections cached… loading`
-      : `loading ${tier.label} connections (${mb(tier.bytes)}MB)… 0%`);
+    // R30: loadBinShared adopts an already-running startup prefetch instead
+    // of starting a second download -- see its own comment and
+    // ensurePointCloudLoaded's analogous change.
+    if (!sharedBinFetches.has(posUrl) && !sharedBinFetches.has(attrUrl)) {
+      setEdgeLinesStatus(`loading ${tier.label} connections (${(tier.bytes / 1048576).toFixed(1)}MB)… 0%`);
+    }
     const receivedByFile = [0, 0];
     let lastStatusUpdate = 0;
     const onBytes = (i) => (n) => {
@@ -4343,12 +4575,11 @@ async function loadEdgeTier(tier) {
       const now = performance.now();
       if (now - lastStatusUpdate < 250) return;   // throttle to ~4x/second
       lastStatusUpdate = now;
-      const total = receivedByFile[0] + receivedByFile[1];
-      setEdgeLinesStatus(`loading ${tier.label} connections… ${mb(total)} of ${mb(tier.bytes)}MB`);
+      setEdgeLinesStatus(edgeTierProgressLabel(tier, receivedByFile[0] + receivedByFile[1]));
     };
     const [posBuf, attrBuf] = await Promise.all([
-      startBinLoad(posSrc, posUrl, onBytes(0)),
-      startBinLoad(attrSrc, attrUrl, onBytes(1)),
+      loadBinShared(posUrl, onBytes(0)),
+      loadBinShared(attrUrl, onBytes(1)),
     ]);
     const count = Math.min(posBuf.byteLength, attrBuf.byteLength) >>> 3;   // 8 bytes/edge in both files
     edgeLinesLayer.totalCount = count;
@@ -4379,7 +4610,7 @@ async function loadEdgeTier(tier) {
       gl.bindBuffer(gl.ARRAY_BUFFER, edgeLinesLayer.attrBuffer);
       gl.bufferSubData(gl.ARRAY_BUFFER, start * 8, attrChunk);
       edgeLinesLayer.loadedCount = end;
-      setEdgeLinesStatus(`loading ${tier.label} connections (${mb(tier.bytes)}MB)… ${Math.round(end / count * 100)}%`);
+      setEdgeLinesStatus(`loading ${tier.label} connections (${(tier.bytes / 1048576).toFixed(1)}MB)… ${Math.round(end / count * 100)}%`);
       map.triggerRepaint();
       await new Promise(r => requestAnimationFrame(r));   // let the growing line set actually paint
     }
@@ -4442,6 +4673,59 @@ dpEdgeLines.addEventListener("change", () => {
   displaySettings.edgeLines = dpEdgeLines.checked;
   saveDisplaySettings();
   setEdgeLinesActive(dpEdgeLines.checked);
+});
+
+// ---- R30: startup background prefetch ----
+// Both experimental toggles default off, so the first time a visitor turns
+// one on it's a cold 16-67MB download over a throttled public host. Once the
+// map's very first idle fires (initial tiles/labels/search have already had
+// the network to themselves up to that point), quietly warm the cache for
+// both toggles' data through the exact same loadBinShared path the toggles
+// themselves use -- a later toggle either gets an instant IndexedDB hit
+// (repeat visit) or adopts this same in-flight fetch (first visit) rather
+// than starting a second download; see loadBinShared's own comment.
+// Sequential, one file at a time (positions.bin, attrs.bin, then
+// edges_pos_1m.bin, edges_attr_1m.bin), to stay polite on the throttled
+// r2.dev host -- never the 3M/7M/14.3M edge tiers, and never ids.bin (that's
+// range-fetched on demand, see resolveCloudFallbackHit).
+async function prefetchPointCloudBins() {
+  const posUrl = DATA_BASE + "/data/vector_experiment/positions.bin";
+  const attrUrl = DATA_BASE + "/data/vector_experiment/attrs.bin";
+  const receivedByFile = [0, 0];
+  let lastStatusUpdate = 0;
+  const onBytes = (i) => (n) => {
+    receivedByFile[i] = n;
+    const now = performance.now();
+    if (now - lastStatusUpdate < 250) return;
+    lastStatusUpdate = now;
+    setPointCloudStatus(pointCloudProgressLabel(receivedByFile[0] + receivedByFile[1]));
+  };
+  await loadBinShared(posUrl, onBytes(0));
+  await loadBinShared(attrUrl, onBytes(1));
+  if (!dpAllPoints.checked) setPointCloudStatus("");
+}
+async function prefetchEdgeLines1m() {
+  const tier = EDGE_TIERS[0];   // 1M tier only -- 3M/7M/14.3M are never prefetched
+  const posUrl = DATA_BASE + `/data/vector_experiment/edges_pos${tier.suffix}.bin`;
+  const attrUrl = DATA_BASE + `/data/vector_experiment/edges_attr${tier.suffix}.bin`;
+  const receivedByFile = [0, 0];
+  let lastStatusUpdate = 0;
+  const onBytes = (i) => (n) => {
+    receivedByFile[i] = n;
+    const now = performance.now();
+    if (now - lastStatusUpdate < 250) return;
+    lastStatusUpdate = now;
+    setEdgeLinesStatus(edgeTierProgressLabel(tier, receivedByFile[0] + receivedByFile[1]));
+  };
+  await loadBinShared(posUrl, onBytes(0));
+  await loadBinShared(attrUrl, onBytes(1));
+  if (!dpEdgeLines.checked) setEdgeLinesStatus("");
+}
+map.once("idle", () => {
+  (async () => {
+    try { await prefetchPointCloudBins(); } catch (err) { console.warn("startup prefetch: point cloud failed:", err); }
+    try { await prefetchEdgeLines1m(); } catch (err) { console.warn("startup prefetch: connection lines failed:", err); }
+  })();
 });
 dpEdgeIntensity.addEventListener("input", () => {
   displaySettings.edgeIntensity = Number(dpEdgeIntensity.value);
@@ -5208,8 +5492,19 @@ function hitTestVector(pt) {
 // Single entry point for both the mousemove and click handlers below, so the
 // two hit-test paths never fight over cursor/tooltip/card state -- one
 // function owns the branch on zoom, callers stay unchanged.
+// R30: at z >= HIT_ZOOM, a z9-tile miss falls back to the cloud grid search
+// (cloudHoverFallback, see its own comment above) ONLY while the full point
+// cloud is effectively on -- with the cloud off this is a no-op and behavior
+// is unchanged, since cloudHoverFallback itself gates on
+// pointCloudEffectivelyOn(). Click resolves immediately (no debounce), same
+// as hitTestTiles always has.
 async function hitTest(pt) {
-  if (map.getZoom() >= HIT_ZOOM) return hitTestTiles(pt);
+  if (map.getZoom() >= HIT_ZOOM) {
+    const hit = await hitTestTiles(pt);
+    if (hit) return hit;
+    const idx = cloudHoverFallback(pt);
+    return idx == null ? null : resolveCloudFallbackHit(idx);
+  }
   return hitTestVector(pt);
 }
 // R14b perf: hitTestVector's queryRenderedFeatures runs synchronously on the
@@ -5238,19 +5533,36 @@ function hitTestVectorGated(pt) {
   }
   return lastVectorHit;
 }
+// R30: same z9-tile-miss fallback as hitTest above, but via
+// mousemoveCloudFallback -- debounced to the nearest index resting ~80ms
+// (see its own comment) rather than firing an ids.bin range request on every
+// intermediate index a fast mouse sweep passes over.
 async function mousemoveHitTest(pt) {
-  if (map.getZoom() >= HIT_ZOOM) return hitTestTiles(pt);
+  if (map.getZoom() >= HIT_ZOOM) {
+    const hit = await hitTestTiles(pt);
+    if (hit) return hit;
+    return mousemoveCloudFallback(pt);
+  }
   return hitTestVectorGated(pt);
 }
-map.on("mousemove", async ev => {
-  const hit = await mousemoveHitTest(ev.point);
+// Pulled out of the mousemove listener so mousemoveCloudFallback's debounce
+// timer (which can resolve after the mouse has stopped moving, i.e. with no
+// further mousemove event to redraw from) can apply the same tooltip/cursor
+// state directly -- see mousemoveCloudFallback's own comment.
+function applyHoverTip(pt, hit) {
   map.getCanvas().style.cursor = hit ? "pointer" : "";
   if (hit) {
     tip.style.display = "block";
-    tip.style.left = (ev.point.x + 14) + "px";
-    tip.style.top = (ev.point.y + 14) + "px";
+    tip.style.left = (pt.x + 14) + "px";
+    tip.style.top = (pt.y + 14) + "px";
     tip.textContent = `${hit[0]} - ${hit[4].toLocaleString()} citations`;
   } else tip.style.display = "none";
+}
+let lastMousePt = null;   // R30: last cursor position, for mousemoveCloudFallback's debounced re-apply
+map.on("mousemove", async ev => {
+  lastMousePt = ev.point;
+  const hit = await mousemoveHitTest(ev.point);
+  applyHoverTip(ev.point, hit);
 });
 map.on("click", async ev => {
   const hit = await hitTest(ev.point);
