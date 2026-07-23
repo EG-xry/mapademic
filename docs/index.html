@@ -4037,10 +4037,22 @@ const edgeLinesLayer = {
     gl.uniformMatrix4fv(this.uMatrix, false, matrix);
     const dpr = window.devicePixelRatio || 1;
     gl.uniform1f(this.uWidthBase, edgeLinesBaseWidthPx(zoom) * dpr);
-    gl.uniform1f(this.uGamma, displaySettings.spacing);
+    // R26: edges now honor the same cloud-scoped transform gate as
+    // remapWorld/the point cloud's own shader (see remapWorld's own R26
+    // comment) -- gamma/wide/equalize all collapse to identity the instant
+    // pointCloudEffectivelyOn() is false, whether that's the cloud checkbox
+    // off or an active isolate suppressing it (pointCloudEffectivelyOn
+    // already covers both), so edges never sit at a warped position while
+    // the raster/dots they connect show the true one. edgeLinesEffectivelyOn
+    // (this layer's own visible/hidden gate, suppressed during isolate) is
+    // deliberately independent of this -- an isolate hides edges outright
+    // (R22c, unrelated to this fix), but the uniforms stay correct
+    // regardless so there's no stale-warp frame if that ever changes.
+    const cloudTransformsOn = pointCloudEffectivelyOn();
+    gl.uniform1f(this.uGamma, cloudTransformsOn ? displaySettings.spacing : 1.0);
     // R23: u_wide exists in BOTH shader variants (unlike u_equalize below), so
     // this is unconditional -- same pattern as pointCloudLayer.render.
-    gl.uniform1f(this.uWide, displaySettings.wide);
+    gl.uniform1f(this.uWide, cloudTransformsOn ? displaySettings.wide : 1.0);
     // R25: gentle deep-zoom taper -- past z11, 14M quantized edges drawn
     // over the now-unconditional precise vector layer gets visually
     // overwhelming, so intensity ramps down linearly from z11 (full
@@ -4050,8 +4062,10 @@ const edgeLinesLayer = {
     gl.uniform1f(this.uIntensity, displaySettings.edgeIntensity * deepZoomTaper);
     gl.uniform2f(this.uViewport, gl.drawingBufferWidth, gl.drawingBufferHeight);
     // R22d: same pattern as pointCloudLayer.render's own equalize block.
+    // R26: also folded into cloudTransformsOn above -- eqOn is false outright
+    // when the cloud isn't effectively on, regardless of the slider/field state.
     if (this.equalizeSupported) {
-      const eqOn = displaySettings.equalize > 0 && equalizeField.loaded;
+      const eqOn = cloudTransformsOn && displaySettings.equalize > 0 && equalizeField.loaded;
       gl.uniform1f(this.uEqualize, eqOn ? displaySettings.equalize : 0);
       if (eqOn) {
         if (!this.equalizeTexture) this.equalizeTexture = createEqualizeTexture(gl, equalizeField.packed);
