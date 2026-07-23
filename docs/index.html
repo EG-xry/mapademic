@@ -344,7 +344,7 @@
     </div>
     <div class="dp-row">
       <div class="dp-row-head"><label for="dp-contrast">Contrast</label><span id="dp-contrast-n" class="n"></span></div>
-      <input id="dp-contrast" type="range" min="-0.4" max="0.4" step="0.04" value="0">
+      <input id="dp-contrast" type="range" min="-0.4" max="0.4" step="0.04" value="0.16">
     </div>
     <div class="dp-row">
       <div class="dp-row-head"><label for="dp-saturation">Saturation</label><span id="dp-saturation-n" class="n"></span></div>
@@ -361,8 +361,8 @@
     <div class="dp-row">
       <div class="dp-row-head"><span>Author names</span></div>
       <div class="dp-radios" role="radiogroup" aria-label="Author names">
-        <label><input type="radio" name="dp-label-mode" value="normal" checked> Normal</label>
-        <label><input type="radio" name="dp-label-mode" value="faint"> Faint</label>
+        <label><input type="radio" name="dp-label-mode" value="normal"> Normal</label>
+        <label><input type="radio" name="dp-label-mode" value="faint" checked> Faint</label>
         <label><input type="radio" name="dp-label-mode" value="hover"> Hover only</label>
       </div>
     </div>
@@ -378,7 +378,7 @@
          vary: whether the mid-zoom top-author overlay renders. See
          displaySettings.overlayDots. -->
     <label class="dp-check">
-      <input id="dp-overlay-dots" type="checkbox" checked>
+      <input id="dp-overlay-dots" type="checkbox">
       Top-author dots at low zoom
     </label>
     <div class="dp-row">
@@ -419,7 +419,7 @@
          the equalizeMaxStrength/clampEqualizeToMax comment further down. -->
     <div class="dp-row">
       <div class="dp-row-head"><label for="dp-equalize">Equalize</label><span id="dp-equalize-n" class="n"></span></div>
-      <input id="dp-equalize" type="range" min="0" max="1.0" step="0.1" value="0">
+      <input id="dp-equalize" type="range" min="0" max="1.0" step="0.1" value="0.9">
     </div>
     <div id="dp-equalize-status"></div>
     <!-- R23: third, independent world-space remap -- y-compression about
@@ -434,20 +434,26 @@
     </div>
     <!-- R22c: GPU connection-lines layer, same persisted-toggle shape as
          Full point cloud above -- see edgeLinesLayer / DISPLAY_DEFAULTS.edgeLines.
-         R25: download size now depends on the Line count slider below --
-         see EDGE_TIERS -- 16MB at the default 1M, up to 218MB at 14.3M. -->
-    <label class="dp-check" title="Renders repeat-coauthorship edges as GPU line segments, colored endpoint-to-endpoint by community; downloads only the smallest tier covering the Line count slider (16-218MB), cached afterwards -- raising the slider fetches more. Temporarily hidden while a community isolate is active.">
+         R25: download size depends on the Line count slider below -- see
+         EDGE_TIERS. R28: the slider itself is capped at the 1M stop (16MB)
+         -- the 3M/7M/14.3M tiers stay in EDGE_TIERS/loadEdgeTier for the
+         code path, just unreachable from this control, so the label/title
+         below no longer advertise them. -->
+    <label class="dp-check" title="Renders repeat-coauthorship edges as GPU line segments, colored endpoint-to-endpoint by community; downloads the 1M tier (16MB), cached afterwards. Temporarily hidden while a community isolate is active.">
       <input id="dp-edge-lines" type="checkbox">
-      Connection lines (up to 14M, 16-218MB)
+      Connection lines (1M, 16MB)
     </label>
     <div id="dp-edge-lines-status"></div>
     <div class="dp-row">
       <div class="dp-row-head"><label for="dp-edge-intensity">Line visibility</label><span id="dp-edge-intensity-n" class="n"></span></div>
-      <input id="dp-edge-intensity" type="range" min="0.02" max="0.6" step="0.01" value="0.12">
+      <input id="dp-edge-intensity" type="range" min="0.005" max="0.6" step="0.005" value="0.005">
     </div>
     <div class="dp-row">
+      <!-- R28: max clamped to 0 (the 1M stop) -- Eric's machine lags badly
+           past 1M. EDGE_COUNT_STOPS/EDGE_TIERS/loadEdgeTier keep the 3M/7M/
+           14.3M tiers intact in code, just unreachable from this control. -->
       <div class="dp-row-head"><span>Line count</span><span id="dp-edge-count-n" class="n"></span></div>
-      <input id="dp-edge-count" type="range" min="0" max="3" step="1" value="0" aria-label="Line count">
+      <input id="dp-edge-count" type="range" min="0" max="0" step="1" value="0" aria-label="Line count">
     </div>
     <button id="display-reset" type="button">Reset</button>
   </div>
@@ -2116,26 +2122,40 @@ function collides(placed, x, y, w, h) {
 // cloud's true, undistorted layout.
 // R22c: edgeLines defaults false (same 200MB-class opt-in reasoning as
 // allPoints); edgeIntensity/edgeCount default to a readable-but-sparse
-// preview (0.12 alpha scale, top 1M of 14.3M by weight -- R24: lowered from
-// 3M, Eric: "lag at 3M+") rather than the heaviest settings, so a first-time
-// enable doesn't shove 218MB and the densest possible draw at a visitor by
-// default. R24: this is a DEFAULT-only change -- a persisted edgeCount
-// (localStorage already carries the visitor's own past choice, 3M or
-// otherwise) still wins via loadDisplaySettings' `{...DISPLAY_DEFAULTS,
-// ...parsed}` spread, so nobody who already picked 3M+ gets silently
-// downgraded.
-// R22d: equalize defaults to 0 (identity -- see remapWorld/equalizeActive),
-// same "visitor never touches it, sees the true layout" reasoning as
-// spacing's own default above.
+// preview (top 1M of 14.3M by weight -- R24: lowered from 3M, Eric: "lag at
+// 3M+") rather than the heaviest settings, so a first-time enable doesn't
+// shove 218MB and the densest possible draw at a visitor by default. R24:
+// this is a DEFAULT-only change -- a persisted edgeCount (localStorage
+// already carries the visitor's own past choice, 3M or otherwise) still
+// wins via loadDisplaySettings' `{...DISPLAY_DEFAULTS, ...parsed}` spread,
+// so nobody who already picked 3M+ gets silently downgraded. R28: edgeCount
+// is now also hard-capped at 1M by the Line count slider itself (max="0" in
+// the markup -- Eric's machine lags past 1M) and loadDisplaySettings clamps
+// any surviving >1M persisted value down to 1M on load, so the R24 "keep
+// the visitor's past choice" spread can no longer hand back an unreachable
+// 3M/7M/14.3M value. edgeIntensity's own default drops to 0.005 (R28,
+// Eric: the old 0.12 "reads too strong, especially with the cloud off") --
+// the slider's own min/step also move to 0.005 so 0.005 is reachable at all.
+// R22d: equalize defaults to 0.9 (R28, was 0 -- Eric picked the meta-driven
+// safe_max_strength itself as the new default; identity/off reasoning below
+// no longer applies to the DEFAULT, only to a visitor who drags it back
+// down) -- see remapWorld/equalizeActive; the slider is still gated on the
+// cloud being effectively on, so it sits at 0.9 inert until Full point
+// cloud is also on.
 // R23: wide defaults to 1.0 (identity -- see remapWorld's own wide step),
-// same reasoning again.
-// R24: overlayDots defaults to true (mid-zoom top-author GeoJSON overlay
-// visible below VECTOR_POINTS_MIN_ZOOM by default) -- matches the old
-// pointMode "both" default's behavior, the mode this checkbox replaces (see
-// loadDisplaySettings' migration comment below for the retired three-way
-// radio).
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0, saturation: 0, labelDensity: 1, regionNames: true, overlayDots: true, labelMode: "normal", sizeContrast: 0.5, allPoints: false, spacing: 1.0, edgeLines: false, edgeIntensity: 0.12, edgeCount: 1000000, equalize: 0, wide: 1.0 };
-const DISPLAY_KEY = "mapademic.display";
+// same reasoning as spacing's default above.
+// R24: overlayDots default flipped to false in R28 (Eric: top-author dots
+// at low zoom off by default) -- was true, matching the old pointMode
+// "both" default's behavior (see loadDisplaySettings' migration comment
+// below for the retired three-way radio).
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0.16, saturation: 0, labelDensity: 1, regionNames: true, overlayDots: false, labelMode: "faint", sizeContrast: 0.5, allPoints: false, spacing: 1.0, edgeLines: false, edgeIntensity: 0.005, edgeCount: 1000000, equalize: 0.9, wide: 1.0 };
+// R28: bumped key (was "mapademic.display") -- resets every visitor's saved
+// settings ONCE to the new defaults above; the old key is simply never read
+// again (harmless orphan, same "stale key" reasoning as the retired
+// "boundaries"/pointMode/vectorPoints keys below). Persistence itself is
+// unchanged going forward -- saveDisplaySettings still writes here on every
+// change.
+const DISPLAY_KEY = "mapademic.display.v2";
 
 // R12b: a stale localStorage value still carrying the removed "boundaries"
 // key just spreads in as an extra unused property on displaySettings below
@@ -2176,7 +2196,14 @@ function loadDisplaySettings() {
     }
     delete parsed.pointMode;
     delete parsed.vectorPoints;
-    return { ...DISPLAY_DEFAULTS, ...parsed };
+    const merged = { ...DISPLAY_DEFAULTS, ...parsed };
+    // R28: the Line count slider itself is now capped at the 1M stop (see
+    // its markup's max="0"), but a value saved before this cap existed
+    // could still be sitting in a visitor's localStorage above 1M -- clamp
+    // it down rather than let a persisted 3M/7M/14.3M silently outrun the
+    // now-unreachable control.
+    if (merged.edgeCount > 1000000) merged.edgeCount = 1000000;
+    return merged;
   } catch {
     return { ...DISPLAY_DEFAULTS };
   }
@@ -2684,7 +2711,7 @@ dpReset.addEventListener("click", () => {
   dpEdgeLines.checked = displaySettings.edgeLines;
   setEdgeLinesActive(displaySettings.edgeLines);
   dpEdgeIntensity.value = displaySettings.edgeIntensity;
-  dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(2);
+  dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(3);
   dpEdgeCount.value = edgeCountIndex(displaySettings.edgeCount);
   dpEdgeCountN.textContent = EDGE_COUNT_LABELS[edgeCountIndex(displaySettings.edgeCount)];
   if (edgeLinesEffectivelyOn()) map.triggerRepaint();
@@ -4244,7 +4271,7 @@ function edgeTierFor(count) {
 // dpAllPoints (R17), their initial UI state is set directly here instead.
 dpEdgeLines.checked = displaySettings.edgeLines;
 dpEdgeIntensity.value = displaySettings.edgeIntensity;
-dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(2);
+dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(3);
 dpEdgeCount.value = edgeCountIndex(displaySettings.edgeCount);
 dpEdgeCountN.textContent = EDGE_COUNT_LABELS[edgeCountIndex(displaySettings.edgeCount)];
 
@@ -4378,7 +4405,7 @@ dpEdgeLines.addEventListener("change", () => {
 });
 dpEdgeIntensity.addEventListener("input", () => {
   displaySettings.edgeIntensity = Number(dpEdgeIntensity.value);
-  dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(2);
+  dpEdgeIntensityN.textContent = displaySettings.edgeIntensity.toFixed(3);
   saveDisplaySettings();
   // u_intensity is read fresh every render() frame, but an input event alone
   // never triggers a MapLibre repaint -- same reasoning as sizeContrast/
