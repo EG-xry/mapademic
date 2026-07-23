@@ -867,8 +867,8 @@ function remapWorld(xw, yw) {
 // an arbitrary sampled grid) -- solved instead by fixed-point iteration:
 // p_in = p_out - s*field(p_in), starting from p_in = p_out and refining.
 // Converges fast because the displacement is small relative to the field's
-// smoothness (see EQUALIZE_RANGE's own comment -- max |dx|,|dy| bounded to
-// 0.12, real data measured under 0.06); 4 iterations is comfortably enough
+// smoothness (see packEqualizeField's own comment -- max |dx|,|dy| is
+// this load's own measured max, R27); 4 iterations is comfortably enough
 // headroom for hit-testing (not pixel-perfect precision -- HIT_RADIUS's own
 // 14px/12px boxes already have slack).
 function inverseRemapWorld(rxw, ryw) {
@@ -2433,8 +2433,13 @@ dpWide.addEventListener("input", () => {
 // files this loads in one plain fetch (no chunking/progressive upload) --
 // see ensureEqualizeFieldLoaded.
 const EQUALIZE_GRID = 512;
-const EQUALIZE_RANGE = 0.12;   // packing range, world units -- see packEqualizeField
-let equalizeField = { loading: false, loaded: false, floats: null, packed: null };
+// R27: packing range is no longer a fixed constant -- it's derived per-load
+// from the actual field's max magnitude (see ensureEqualizeFieldLoaded), so
+// it can never clip. Kept here only as the pre-load fallback stored on
+// equalizeField.range below (never actually used to pack anything, since
+// packEqualizeField isn't called until the real range is known).
+const EQUALIZE_RANGE_FALLBACK = 0.12;
+let equalizeField = { loading: false, loaded: false, floats: null, packed: null, range: EQUALIZE_RANGE_FALLBACK };
 
 function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
@@ -2508,14 +2513,20 @@ function sampleEqualizeField(wx, wy) {
 // GPU packing: dx,dy each as a 16-bit fixed-point value spread across two
 // UNSIGNED_BYTE channels of an RGBA texture (dx -> R,G hi/lo; dy -> B,A
 // hi/lo) -- a WebGL1-safe alternative to a float texture (which would need
-// the OES_texture_float extension). Clamped to +/-EQUALIZE_RANGE world units
-// (0.12 -- comfortably wider than mean_disp_at_1's 0.035 from
-// equalize_meta.json, so only rare outliers actually clip); precision at
-// that range is 0.24/65535 =~ 0.0000037 world units, ample for a visual
-// transform. packed's byte order mirrors floats' own flat order (element i
-// = (x*512+y)), so a straight texImage2D upload naturally lands row=x,
-// col=y -- matching the field's own row-major [x][y] layout -- with no
-// separate transpose step needed.
+// the OES_texture_float extension). R27: range is no longer the fixed 0.12 --
+// ensureEqualizeFieldLoaded computes it as this load's actual max(|dx|,|dy|)
+// * 1.001, so nothing ever clips (0.12 was already wide enough for the field
+// on disk today -- its true max is ~0.1001, comfortably under 0.12 -- but a
+// fixed constant is one bad re-export away from silently clipping outliers,
+// which a per-load max can't). Precision at the observed ~0.1002 range
+// (max*1.001) is 2*0.1002/65535 =~ 3.06e-6 world units -- at zoom 10.25
+// (512px/tile * 2^10.25 tiles across the world) that's =~ 3.06e-6 * 512 *
+// 2^10.25 =~ 1.9px, i.e. sub-2px 16-bit quantization noise on top of the
+// exact-bilinear fix below -- acceptable.
+// packed's byte order mirrors floats' own flat order (element i = (x*512+y)),
+// so a straight texImage2D upload
+// naturally lands row=x, col=y -- matching the field's own row-major [x][y]
+// layout -- with no separate transpose step needed.
 function packEqualizeField(floats, grid, range) {
   const n = grid * grid;
   const packed = new Uint8Array(n * 4);
@@ -2532,19 +2543,29 @@ function packEqualizeField(floats, grid, range) {
   return packed;
 }
 
-// Shared by both pointCloudLayer and edgeLinesLayer -- LINEAR min/mag filter
-// with no mipmap means texture2DLod(sampler, uv, 0.0) samples level 0 with
-// real bilinear filtering; since hi*256+lo reconstruction is an affine
-// function of the two channel bytes, and bilinear filtering is itself a
-// weighted average (weights summing to 1), filtering-then-reconstructing
-// equals reconstructing-then-filtering -- one texture2DLod call is a
-// correctly bilinearly-interpolated 16-bit fetch, no manual 4-texel sampling
-// needed.
+// Shared by both pointCloudLayer and edgeLinesLayer. R27: NEAREST, not
+// LINEAR -- hi*256+lo reconstruction IS an affine function of the two
+// channel bytes, so hardware LINEAR filtering never corrupts the packed
+// value itself (a weighted average of bytes decodes to the same result as
+// decoding first then averaging). The actual bug was a convention mismatch:
+// GL's built-in bilinear samples at texel-space position u*GRID - 0.5
+// (texel-center convention), while the JS ground truth (sampleEqualizeField,
+// which remapWorld and inverseRemapWorld both call) samples at
+// u*(GRID-1) -- no half-texel offset, endpoints pinned exactly to texel 0
+// and texel GRID-1. The two agree only at u=0.5 and diverge linearly toward
+// the edges (up to half a texel, ~0.001 world units at GRID=512), which is
+// exactly the "same dot shifts between zoomed out and zoomed in" Eric saw --
+// a fixed world-space offset that scans as more screen pixels the further
+// in you zoom. Fix: sampler stays NEAREST, and both EQ vertex shaders'
+// decodeEqualize now does its own manual 4-tap fetch replicating
+// sampleEqualizeField's exact indices/weights (see that function and each
+// shader's own decodeEqualize comment) instead of trusting the hardware's
+// differently-anchored bilinear.
 function createEqualizeTexture(gl, packed) {
   const tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, EQUALIZE_GRID, EQUALIZE_GRID, 0, gl.RGBA, gl.UNSIGNED_BYTE, packed);
@@ -2570,7 +2591,16 @@ async function ensureEqualizeFieldLoaded() {
     setEqualizeStatus(src.cachedBuf ? "density field cached… loading" : "loading density field…");
     const buf = await startBinLoad(src, url, () => {});
     equalizeField.floats = new Float32Array(buf);
-    equalizeField.packed = packEqualizeField(equalizeField.floats, EQUALIZE_GRID, EQUALIZE_RANGE);
+    // R27: dynamic encode range -- see packEqualizeField's own comment.
+    // maxAbs is this load's actual max(|dx|,|dy|); *1.001 gives a hair of
+    // headroom so nothing lands exactly on the +/-range clamp.
+    let maxAbs = 0;
+    for (let i = 0; i < equalizeField.floats.length; i++) {
+      const v = Math.abs(equalizeField.floats[i]);
+      if (v > maxAbs) maxAbs = v;
+    }
+    equalizeField.range = maxAbs * 1.001;
+    equalizeField.packed = packEqualizeField(equalizeField.floats, EQUALIZE_GRID, equalizeField.range);
     equalizeField.loaded = true;
     setEqualizeStatus("");
     // Same refresh set as the slider's own input handler below -- the field
@@ -3073,28 +3103,58 @@ uniform float u_gamma;
 uniform float u_wide;
 uniform sampler2D u_equalizeTex;
 uniform float u_equalize;
+// R27: dynamic encode range, set fresh whenever the field (re)loads --
+// see ensureEqualizeFieldLoaded/packEqualizeField. Replaces the old fixed
+// 0.12 constant.
+uniform float u_fieldRange;
 varying vec3 v_color;
 
-// Decodes one (dx,dy) pair from the packed texture (see packEqualizeField --
-// dx in R,G hi/lo, dy in B,A hi/lo, both 16-bit fixed-point over
-// +/-EQUALIZE_RANGE). texture2DLod (not texture2D) is required here: GLSL ES
-// 1.00 vertex shaders have no implicit derivatives, so there is no automatic
-// level-of-detail to select the way a fragment shader's plain texture2D
-// gets -- an explicit LOD (0.0, the only level actually uploaded) is
-// mandatory. The texture's MIN/MAG filter is LINEAR (createEqualizeTexture),
-// so this one texture2DLod call already returns a correctly
-// bilinearly-interpolated fetch -- see that function's own comment for why
-// filtering the hi/lo bytes separately still reconstructs the right 16-bit
-// value.
-vec2 decodeEqualize(vec2 world) {
+// R27: exact-bilinear fetch of one (dx,dy) pair from the packed texture
+// (see packEqualizeField -- dx in R,G hi/lo, dy in B,A hi/lo, both 16-bit
+// fixed-point over +/-u_fieldRange), replicating sampleEqualizeField's
+// (the JS ground truth remapWorld/inverseRemapWorld both call) exact
+// indices and weights instead of trusting hardware texture filtering.
+// createEqualizeTexture's own comment has the full "why": GL's built-in
+// LINEAR filter samples at texel-space position u*GRID - 0.5 (texel-center
+// convention), but sampleEqualizeField samples at u*(GRID-1) (endpoints
+// pinned to texel 0 / texel GRID-1, no half-texel offset) -- the two
+// conventions disagree everywhere except the exact center, which was the
+// residual GPU-vs-JS shift Eric saw. Manually replicating JS's convention
+// here removes that mismatch outright; the sampler is NEAREST so each tap
+// lands on exactly the requested texel with no hardware interpolation to
+// second-guess.
+const float GRID = 512.0; // must match EQUALIZE_GRID
+vec2 decodeTexel(float ix, float iy) {
   // R22d comment near packEqualizeField: packed byte i = (x*512+y) lines up
   // with a straight row-major texImage2D upload as row=x, col=y -- so the
-  // texture's (u,v) is (world.y, world.x), not (world.x, world.y).
-  vec4 texel = texture2DLod(u_equalizeTex, vec2(world.y, world.x), 0.0);
-  const float RANGE = 0.12;
+  // texture's (u,v) is (col, row) = (iy, ix), not (ix, iy). texture2DLod
+  // (not texture2D) is required in a vertex shader: GLSL ES 1.00 has no
+  // implicit derivatives here, so an explicit LOD (0.0, the only level
+  // actually uploaded) is mandatory. Sampling at the exact texel center
+  // (index + 0.5)/GRID with a NEAREST sampler guarantees this tap reads
+  // texel (ix, iy) and nothing else, regardless of floating-point rounding.
+  vec2 uv = vec2((iy + 0.5) / GRID, (ix + 0.5) / GRID);
+  vec4 texel = texture2DLod(u_equalizeTex, uv, 0.0);
   float dxN = (texel.r * 255.0 * 256.0 + texel.g * 255.0) / 65535.0;
   float dyN = (texel.b * 255.0 * 256.0 + texel.a * 255.0) / 65535.0;
-  return vec2(dxN * (2.0 * RANGE) - RANGE, dyN * (2.0 * RANGE) - RANGE);
+  return vec2(dxN * (2.0 * u_fieldRange) - u_fieldRange, dyN * (2.0 * u_fieldRange) - u_fieldRange);
+}
+// Manual bilinear, replicating sampleEqualizeField exactly: fx/fy scaled by
+// (GRID-1) (not GRID, and no -0.5), corners floor(f) and min(floor(f)+1,
+// GRID-1), weights the fractional remainder -- same corner indices, same
+// tx/ty weights, same mix order (x first, then y) as the JS function.
+vec2 decodeEqualize(vec2 world) {
+  float fx = clamp(world.x, 0.0, 1.0) * (GRID - 1.0);
+  float fy = clamp(world.y, 0.0, 1.0) * (GRID - 1.0);
+  float x0 = floor(fx);
+  float y0 = floor(fy);
+  float x1 = min(x0 + 1.0, GRID - 1.0);
+  float y1 = min(y0 + 1.0, GRID - 1.0);
+  float tx = fx - x0;
+  float ty = fy - y0;
+  vec2 top = mix(decodeTexel(x0, y0), decodeTexel(x1, y0), tx);
+  vec2 bot = mix(decodeTexel(x0, y1), decodeTexel(x1, y1), tx);
+  return mix(top, bot, ty);
 }
 
 void main() {
@@ -3218,7 +3278,7 @@ const pointCloudLayer = {
   // POINT_CLOUD_VERT_SRC (equalizeSupported false); equalizeTexture is
   // rebuilt lazily in render() the first time it's actually needed, not in
   // onAdd, since equalizeField.packed may not exist yet at add time.
-  uEqualize: null, uEqualizeTex: null, equalizeSupported: false, equalizeTexture: null,
+  uEqualize: null, uEqualizeTex: null, uFieldRange: null, equalizeSupported: false, equalizeTexture: null,
   // R15c: raw ArrayBuffers from the last successful fetch, retained for the
   // lifetime of the page (~69MB) purely so a GL context restore can
   // re-upload without re-fetching -- see onAdd below and
@@ -3267,6 +3327,7 @@ const pointCloudLayer = {
     this.uColorSaturation = gl.getUniformLocation(program, "u_colorSaturation");
     this.uEqualize = gl.getUniformLocation(program, "u_equalize");
     this.uEqualizeTex = gl.getUniformLocation(program, "u_equalizeTex");
+    this.uFieldRange = gl.getUniformLocation(program, "u_fieldRange");
     this.equalizeTexture = null;   // GL objects don't survive a context loss -- rebuilt lazily in render()
     this.posBuffer = gl.createBuffer();
     this.attrBuffer = gl.createBuffer();
@@ -3350,6 +3411,7 @@ const pointCloudLayer = {
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, this.equalizeTexture);
         gl.uniform1i(this.uEqualizeTex, 0);
+        gl.uniform1f(this.uFieldRange, equalizeField.range);
       }
     }
 
@@ -3797,18 +3859,37 @@ uniform vec2 u_viewport;
 uniform float u_intensity;
 uniform sampler2D u_equalizeTex;
 uniform float u_equalize;
+// R27: dynamic encode range -- see POINT_CLOUD_VERT_SRC_EQ's own comment.
+uniform float u_fieldRange;
 varying vec3 vColor;
 varying float vAlpha;
 
-// See POINT_CLOUD_VERT_SRC_EQ's decodeEqualize for the full derivation
-// (texture2DLod requirement, hi/lo packing, the (world.y, world.x) axis
-// swap matching the field's row-major [x][y] layout).
-vec2 decodeEqualize(vec2 world) {
-  vec4 texel = texture2DLod(u_equalizeTex, vec2(world.y, world.x), 0.0);
-  const float RANGE = 0.12;
+// R27: exact-bilinear fetch, replicating sampleEqualizeField exactly instead
+// of trusting hardware texture filtering -- see POINT_CLOUD_VERT_SRC_EQ's
+// decodeTexel/decodeEqualize for the full derivation (texture2DLod
+// requirement, hi/lo packing, the (world.y, world.x) axis swap matching the
+// field's row-major [x][y] layout, and why NEAREST + manual 4-tap replaces
+// the old single LINEAR fetch).
+const float GRID = 512.0; // must match EQUALIZE_GRID
+vec2 decodeTexel(float ix, float iy) {
+  vec2 uv = vec2((iy + 0.5) / GRID, (ix + 0.5) / GRID);
+  vec4 texel = texture2DLod(u_equalizeTex, uv, 0.0);
   float dxN = (texel.r * 255.0 * 256.0 + texel.g * 255.0) / 65535.0;
   float dyN = (texel.b * 255.0 * 256.0 + texel.a * 255.0) / 65535.0;
-  return vec2(dxN * (2.0 * RANGE) - RANGE, dyN * (2.0 * RANGE) - RANGE);
+  return vec2(dxN * (2.0 * u_fieldRange) - u_fieldRange, dyN * (2.0 * u_fieldRange) - u_fieldRange);
+}
+vec2 decodeEqualize(vec2 world) {
+  float fx = clamp(world.x, 0.0, 1.0) * (GRID - 1.0);
+  float fy = clamp(world.y, 0.0, 1.0) * (GRID - 1.0);
+  float x0 = floor(fx);
+  float y0 = floor(fy);
+  float x1 = min(x0 + 1.0, GRID - 1.0);
+  float y1 = min(y0 + 1.0, GRID - 1.0);
+  float tx = fx - x0;
+  float ty = fy - y0;
+  vec2 top = mix(decodeTexel(x0, y0), decodeTexel(x1, y0), tx);
+  vec2 bot = mix(decodeTexel(x0, y1), decodeTexel(x1, y1), tx);
+  return mix(top, bot, ty);
 }
 
 // Mirrors POINT_CLOUD_VERT_SRC_EQ's order exactly (equalize, then spacing,
@@ -3924,7 +4005,7 @@ const edgeLinesLayer = {
   uMatrix: null, uGamma: null, uWide: null, uWidthBase: null, uViewport: null, uIntensity: null,
   // R22d: same pattern/reasoning as pointCloudLayer's own uEqualize/
   // uEqualizeTex/equalizeSupported/equalizeTexture fields.
-  uEqualize: null, uEqualizeTex: null, equalizeSupported: false, equalizeTexture: null,
+  uEqualize: null, uEqualizeTex: null, uFieldRange: null, equalizeSupported: false, equalizeTexture: null,
   // Raw ArrayBuffers retained for the lifetime of the page (up to ~218MB at
   // the full tier) purely so a GL context restore can re-upload without
   // re-fetching -- same reasoning/pattern as pointCloudLayer's cachedPosBuf/
@@ -3966,6 +4047,7 @@ const edgeLinesLayer = {
     this.uIntensity = gl.getUniformLocation(program, "u_intensity");
     this.uEqualize = gl.getUniformLocation(program, "u_equalize");
     this.uEqualizeTex = gl.getUniformLocation(program, "u_equalizeTex");
+    this.uFieldRange = gl.getUniformLocation(program, "u_fieldRange");
     this.equalizeTexture = null;   // GL objects don't survive a context loss -- rebuilt lazily in render()
 
     // 4-vertex unit quad template: (t, side) per corner. t in {0,1} selects
@@ -4072,6 +4154,7 @@ const edgeLinesLayer = {
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, this.equalizeTexture);
         gl.uniform1i(this.uEqualizeTex, 0);
+        gl.uniform1f(this.uFieldRange, equalizeField.range);
       }
     }
 
