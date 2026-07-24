@@ -23,14 +23,30 @@ DEV_HTML = REPO_ROOT / "web" / "dev.html"
 SITE_HTML = REPO_ROOT / "docs" / "index.html"
 
 # Exact config currently deployed (read out of the last docs/index.html
-# generation). apiBase is deliberately left unset -- see the config
-# block's own comment below.
+# generation).
 DATA_BASE = "https://pub-3627024db5924826912107ea4f16e739.r2.dev"
+# R31: the public degree-of-separation backend for Connect/coauthor-ray
+# lookups. None = omit apiBase entirely, which leaves dev.html falling back to
+# its localhost:8000 default (the pre-R31 behavior: the public page probes a
+# backend nobody is running, and the features stay gracefully disabled). Set
+# this to the deployed https:// origin to turn Connect on for public visitors
+# -- see README's "Public path backend" section. No trailing slash: dev.html
+# builds URLs as `${API_BASE}/api/path`.
+API_BASE = None
 
 BARE_SCRIPT_TAG = "<script>"
 
 
-def build_config_block(data_base: str) -> str:
+def build_config_block(data_base: str, api_base: str | None = None) -> str:
+    if api_base:
+        return (
+            "<script>\n"
+            "window.MAPADEMIC_CONFIG = {\n"
+            f'  dataBase: "{data_base}",\n'
+            f'  apiBase: "{api_base}"\n'
+            "};\n"
+            "</script>\n"
+        )
     return (
         "<script>\n"
         "window.MAPADEMIC_CONFIG = {\n"
@@ -42,7 +58,7 @@ def build_config_block(data_base: str) -> str:
     )
 
 
-def inject_config(html: str, data_base: str = DATA_BASE) -> str:
+def inject_config(html: str, data_base: str = DATA_BASE, api_base: str | None = API_BASE) -> str:
     """Insert the MAPADEMIC_CONFIG script tag before the first bare <script>
     tag (a <script> tag with no attributes -- dev.html's own inline code,
     as opposed to the maplibre-gl CDN <script src="..."> above it).
@@ -51,11 +67,15 @@ def inject_config(html: str, data_base: str = DATA_BASE) -> str:
     to unit test.
     """
     idx = html.index(BARE_SCRIPT_TAG)
-    return html[:idx] + build_config_block(data_base) + html[idx:]
+    return html[:idx] + build_config_block(data_base, api_base) + html[idx:]
 
 
-def build(dev_html_path: Path = DEV_HTML, data_base: str = DATA_BASE) -> str:
-    return inject_config(dev_html_path.read_text(), data_base)
+def build(
+    dev_html_path: Path = DEV_HTML,
+    data_base: str = DATA_BASE,
+    api_base: str | None = API_BASE,
+) -> str:
+    return inject_config(dev_html_path.read_text(), data_base, api_base)
 
 
 def main() -> int:
