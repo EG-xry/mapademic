@@ -60,6 +60,10 @@
     #search-status:empty { display: none; }
     #search-status { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
                        border-radius: 6px; padding: 4px 10px; margin-top: 6px; }
+    /* R31: the ray status pill carries a "Fit" action -- see fitActiveRays. */
+    #search-status .fit-rays { background: none; border: none; color: #7fae8e;
+                       font: 12px system-ui; cursor: pointer; padding: 0 0 0 6px; }
+    #search-status .fit-rays:hover { text-decoration: underline; }
     #search-dropdown .row { padding: 6px 10px; cursor: pointer; display: flex;
                              justify-content: space-between; gap: 8px; color: #ddd; }
     #search-dropdown .row:hover, #search-dropdown .row.active { background: #ffffff1a; }
@@ -118,6 +122,10 @@
                                border: 1px solid #333; border-radius: 6px;
                                padding: 6px 10px; font: 12px system-ui; cursor: pointer; }
     .connect-actions button:hover { border-color: #7fae8e; }
+    /* R31: startup demo caption -- same pill language, one step louder since
+       it is the first thing a visitor reads. */
+    #connect-status .demo-note { color: #ddd; }
+    #connect-status .demo-note b { color: #7fae8e; font-weight: 600; }
     #connect-status { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
                        border-radius: 6px; padding: 4px 10px; min-height: 14px; }
     .path-node { display: flex; flex-direction: column; align-items: center;
@@ -224,7 +232,7 @@
     #help-body a { color: #7fae8e; }
     #help-body kbd { background: #222; border: 1px solid #444; border-radius: 3px;
                        padding: 1px 5px; font: 11px monospace; }
-    #path-hops { display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow-y: auto; }
+    #path-hops { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; }
     #path-hops .hop { display: flex; gap: 6px; align-items: center; padding: 4px 8px;
                         background: #0b0b0bd9; border-radius: 4px; cursor: pointer;
                         color: #ddd; font: 12px system-ui; border: 1px solid transparent; }
@@ -232,7 +240,11 @@
     #path-hops .hop .hop-i { color: #888; flex: none; width: 18px; text-align: right; }
     /* R19: hop-list community swatch, same shape as the legend's .sw. */
     #path-hops .hop .hop-sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
-    #path-hops .hop .hop-name { flex: 1; }
+    #path-hops .hop .hop-name { flex: 1; display: flex; flex-direction: column; gap: 1px;
+                        min-width: 0; }
+    /* R31: paper title under the name -- clipped to one line, full text on hover. */
+    #path-hops .hop .hop-via { color: #888; font-size: 10px; white-space: nowrap;
+                        overflow: hidden; text-overflow: ellipsis; }
     #path-hops .hop .hop-ghost { color: #888; font-size: 10px; flex: none; }
   </style>
 </head>
@@ -483,6 +495,19 @@ const DATA_BASE = CFG.dataBase || "";        // e.g. "https://pub-xxx.r2.dev" wh
 const IDS_BIN_URL = DATA_BASE + "/data/vector_experiment/ids.bin";   // R30: range-fetched, never downloaded whole (see cloudHoverFallback)
 // degree-of-separation backend (Task 7). Render URL goes here when deployed.
 const API_BASE = CFG.apiBase || "http://localhost:8000";
+// R31: whether a real backend origin was configured (build_site.py's apiBase)
+// or we're on dev.html's localhost fallback. Only the message copy branches on
+// this -- every code path still probes/uses API_BASE identically.
+const API_BASE_CONFIGURED = Boolean(CFG.apiBase);
+// R31: one wording for "the path/coauthor backend didn't answer", phrased for
+// whoever is actually looking. On a deployed page that's a visitor who can do
+// nothing about it (state the outage); locally it's whoever forgot to start
+// uvicorn.
+function backendOfflineMessage(what) {
+  return API_BASE_CONFIGURED
+    ? `${what} is temporarily unavailable - the connection service isn't responding.`
+    : `${what} needs the degree-of-separation backend on :8000 (uvicorn backend.app:app --port 8000).`;
+}
 
 // ---- Task 2 (night-polish): shareable URL state ----
 // Custom hash codec: "#<zoom>/<lat>/<lng>" (2/5/5 decimals), plus optional
@@ -1459,7 +1484,7 @@ async function resolvePathCoords(nodes) {
     return hit ? { xw: hit[0], yw: hit[1] } : null;
   });
   return nodes.map((n, i) => {
-    if (hits[i]) return { ...hits[i], ghost: false, name: n.name, id: n.id };
+    if (hits[i]) return { ...hits[i], ghost: false, name: n.name, id: n.id, label: n.label };
     let prevIdx = -1;
     for (let j = i - 1; j >= 0; j--) if (hits[j]) { prevIdx = j; break; }
     let nextIdx = -1;
@@ -1469,7 +1494,7 @@ async function resolvePathCoords(nodes) {
       const t = (i - prevIdx) / (nextIdx - prevIdx);
       return { xw: prev.xw + (next.xw - prev.xw) * t,
                yw: prev.yw + (next.yw - prev.yw) * t,
-               ghost: true, name: n.name, id: n.id };
+               ghost: true, name: n.name, id: n.id, label: n.label };
     }
     return null;
   });
@@ -1501,7 +1526,20 @@ function renderHopList(points, hopColors) {
     const sw = document.createElement("span");
     sw.className = "hop-sw"; sw.style.background = hopColors[i];
     const name = document.createElement("span");
-    name.className = "hop-name"; name.textContent = p.name;
+    name.className = "hop-name";
+    const who = document.createElement("span");
+    who.textContent = p.name;
+    name.appendChild(who);
+    // R31: the paper that links this hop to the next one. The last hop has no
+    // outgoing edge, and a ghost's label describes an edge whose other end may
+    // have been skipped -- both simply render without a subtitle.
+    if (p.label && i < points.length - 1) {
+      const via = document.createElement("span");
+      via.className = "hop-via";
+      via.textContent = p.label;
+      via.title = p.label;
+      name.appendChild(via);
+    }
     row.append(idx, sw, name);
     if (p.ghost) {
       const ghost = document.createElement("span");
@@ -1544,9 +1582,12 @@ async function renderPath(pathSteps, hops, idA, idB) {
   const gen = pathGen;               // stale once clearPath / a newer Go bumps it
   // /api/path with edges=coauthor should only ever return author ids, but
   // filter defensively in case a work-type node (id starting "W") interleaves.
+  // R31: `label` is the paper joining this step to the next one (the backend
+  // sends it alongside connection_to_next); carried through so the hop list can
+  // show the evidence for each hop rather than just the two names.
   const nodes = pathSteps
     .filter(s => !String(s.author_id).startsWith("W"))
-    .map(s => ({ id: s.author_id, name: s.author_name }));
+    .map(s => ({ id: s.author_id, name: s.author_name, label: s.label }));
   if (nodes.length === 0) { setPathStatus("no author path"); return; }
 
   const resolved = await resolvePathCoords(nodes);
@@ -1668,10 +1709,14 @@ function drawResolvedPath(points, hopColors, hops, idA, idB, { writeUrl = true }
 const DEMO_PATH = {
   idA: "A5108093963", idB: "A5067184382", hops: 4,
   points: [
-    { id: "A5108093963", name: "Geoffrey E. Hinton",    xw: 0.568363, yw: 0.553862, ghost: false },
-    { id: "A5044141636", name: "Terrence J. Sejnowski", xw: 0.513473, yw: 0.550736, ghost: false },
-    { id: "A5072968010", name: "Fred H. Gage",          xw: 0.356876, yw: 0.663661, ghost: false },
-    { id: "A5082310752", name: "G Yeo",                 xw: 0.449272, yw: 0.756635, ghost: false },
+    { id: "A5108093963", name: "Geoffrey E. Hinton",    xw: 0.568363, yw: 0.553862, ghost: false,
+      label: "A Learning Algorithm for Boltzmann Machines*" },
+    { id: "A5044141636", name: "Terrence J. Sejnowski", xw: 0.513473, yw: 0.550736, ghost: false,
+      label: "Running enhances neurogenesis, learning, and long-term potentiation in mice" },
+    { id: "A5072968010", name: "Fred H. Gage",          xw: 0.356876, yw: 0.663661, ghost: false,
+      label: "A Model for Neural Development and Treatment of Rett Syndrome Using Human Induced Pluripotent Stem Cells" },
+    { id: "A5082310752", name: "G Yeo",                 xw: 0.449272, yw: 0.756635, ghost: false,
+      label: "Programmable RNA Tracking in Live Cells with CRISPR/Cas9" },
     { id: "A5067184382", name: "Jennifer A. Doudna",    xw: 0.503588, yw: 0.732482, ghost: false },
   ],
   hopColors: ["#de465a", "#de465a", "#6be95e", "#e2dc5f", "#e2dc5f"],
@@ -1684,6 +1729,18 @@ const DEMO_PATH = {
 function showDemoPath() {
   pathGen++;
   drawResolvedPath(DEMO_PATH.points, DEMO_PATH.hopColors, DEMO_PATH.hops, DEMO_PATH.idA, DEMO_PATH.idB, { writeUrl: false });
+  // R31: the drawn path lives inside the Connect panel, so a visitor who never
+  // clicks "Connect" sees five labelled dots with no explanation of what they
+  // are. Open the panel and replace the bare "4 hops" with a caption naming the
+  // endpoints and inviting a real search. drawResolvedPath's own setPathStatus
+  // runs first, so this overwrites it -- and any later Go/Clear overwrites this
+  // in turn through the ordinary setPathStatus path (textContent), no
+  // special-casing needed to tear the markup down.
+  connectPanel.classList.add("open");
+  connectToggle.classList.add("active");
+  connectStatus.innerHTML =
+    '<span class="demo-note">Example: <b>Geoffrey Hinton</b> to <b>Jennifer Doudna</b> in ' +
+    DEMO_PATH.hops + ' co-authorship hops. Search any two researchers above.</span>';
 }
 
 connectGo.addEventListener("click", () => {
@@ -1724,7 +1781,7 @@ connectGo.addEventListener("click", () => {
     if (pathEventSource !== es) return;
     es.close();
     pathEventSource = null;
-    setPathStatus("path backend unreachable - is the degree-of-separation server running on :8000?");
+    setPathStatus(backendOfflineMessage("Connect"));
   });
 });
 
@@ -1837,7 +1894,7 @@ async function fetchCoauthorsBrowser(bareId) {
 
   const promise = (async () => {
     const base = `https://api.openalex.org/works?filter=author.id:${encodeURIComponent(bareId)}` +
-      `&per-page=200&select=authorships,cited_by_count&mailto=mapademic@example.com`;
+      `&per-page=200&select=authorships,cited_by_count&mailto=ericgao432@gmail.com`;
     const page1 = await fetchOpenAlexWorksPage(base);
     let works = page1.results || [];
     if (page1.meta && page1.meta.count > 200) {
@@ -1944,7 +2001,7 @@ async function drawCoauthorRays(bareId, xw, yw) {
     if (rayEventSource === es) rayEventSource = null;
     es.close();
     if (gen !== searchRayGen) return;
-    let msg = "coauthor backend offline";
+    let msg = backendOfflineMessage("Coauthors");
     try { msg = JSON.parse(ev.data).message || msg; } catch { /* ignore malformed frame */ }
     setSearchStatus(msg);
   });
@@ -1958,7 +2015,7 @@ async function drawCoauthorRays(bareId, xw, yw) {
     es.close();
     rayEventSource = null;
     if (gen !== searchRayGen) return;
-    setSearchStatus("coauthor backend offline");
+    setSearchStatus(backendOfflineMessage("Coauthors"));
   });
 }
 
@@ -2044,7 +2101,32 @@ async function finishCoauthorRays(bareId, xw, yw, gen, coauthors) {
   overlayLabelAdd("ray", rayOverlayIds);
   drawLabels();          // hide these authors' regular labels immediately
 
+  // R31: rays routinely run off-viewport -- the caller just flew to the author
+  // at z10.5, and coauthors sit anywhere on the map. Auto-fitting here would
+  // throw that arrival away on every search, so the overview is offered as an
+  // action on the pill instead of forced.
   setSearchStatus(`${endpoints.length} coauthors shown (${offMap} off-map)`);
+  if (endpoints.length) {
+    const fitBtn = document.createElement("button");
+    fitBtn.type = "button";
+    fitBtn.className = "fit-rays";
+    fitBtn.textContent = "Fit";
+    fitBtn.title = "Zoom out to show every drawn coauthor";
+    fitBtn.addEventListener("click", fitActiveRays);
+    searchStatusEl.appendChild(fitBtn);
+  }
+}
+
+// R31: frame the origin plus every drawn ray endpoint. Reads the same
+// activeRays snapshot repositionActiveOverlays uses, so it re-projects through
+// the live toLngLat and stays correct at any spacing/equalize/wide setting.
+function fitActiveRays() {
+  if (!activeRays) return;
+  const { originXw, originYw, endpoints } = activeRays;
+  const origin = toLngLat(originXw, originYw);
+  const bounds = new maplibregl.LngLatBounds(origin, origin);
+  endpoints.forEach(p => bounds.extend(toLngLat(p.xw, p.yw)));
+  map.fitBounds(bounds, { padding: 60, maxZoom: 11 });
 }
 
 // R20: re-projects every currently-drawn ephemeral overlay (search
@@ -5320,12 +5402,30 @@ function closeInfoCard() {
 
 async function fetchAuthorDetails(bareId) {
   if (!infoCardCache.has(bareId)) {
-    infoCardCache.set(bareId, fetch(`https://api.openalex.org/people/${bareId}?select=display_name,works_count,cited_by_count,summary_stats,last_known_institutions,topics`)
+    infoCardCache.set(bareId, fetch(`https://api.openalex.org/people/${bareId}?select=display_name,works_count,cited_by_count,summary_stats,last_known_institutions,affiliations,topics`)
       .then(r => r.ok ? r.json() : null)
       .catch(() => null));
     if (infoCardCache.size > 50) infoCardCache.delete(infoCardCache.keys().next().value);
   }
   return infoCardCache.get(bareId);
+}
+
+// R31: OpenAlex leaves last_known_institutions null for plenty of authors --
+// including very prominent ones (Hinton) -- while still carrying a full
+// `affiliations` list with years. Fall back to the affiliation with the latest
+// year so the card stops reading "unknown" for the people most likely clicked.
+// Ties and missing years sort last; returns null when there's nothing usable.
+function mostRecentAffiliation(data) {
+  const affs = (data && data.affiliations) || [];
+  let best = null, bestYear = -Infinity;
+  for (const a of affs) {
+    const name = a && a.institution && a.institution.display_name;
+    if (!name) continue;
+    const year = Math.max(-Infinity, ...((a.years || []).filter(y => typeof y === "number")));
+    if (year > bestYear) { bestYear = year; best = name; }
+    else if (best === null) { best = name; }
+  }
+  return best;
 }
 
 // hit entry shape: [name, id, xw, yw, cited, community] (hitTest reads z9
@@ -5353,7 +5453,7 @@ function openInfoCard(hit) {
     if (gen !== infoCardGen) return;   // card closed, or replaced, since this fetch started
     if (!data) { addInfoRow("Details", "couldn't load details"); return; }
     const inst = data.last_known_institutions && data.last_known_institutions[0];
-    addInfoRow("Institution", inst ? inst.display_name : "unknown");
+    addInfoRow("Institution", (inst && inst.display_name) || mostRecentAffiliation(data) || "unknown");
     addInfoRow("Works", (data.works_count || 0).toLocaleString());
     const hIndex = data.summary_stats ? data.summary_stats.h_index : null;
     addInfoRow("h-index", hIndex != null ? hIndex : "-");
