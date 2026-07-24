@@ -179,22 +179,27 @@ off.
 Connect and the coauthor rays call the degree-of-separation FastAPI service
 (`/api/path`, `/api/graph/expand`, `/health`) from
 [academic-degree-of-separation](https://github.com/riptideiv/academic-degree-of-separation).
-With no backend configured the viewer probes `localhost:8000`, so the public
-page keeps Connect disabled and rays fall back to querying OpenAlex directly
-from the browser.
+The deployed page points at that project's own Render instance
+(`https://academic-degree-of-separation.onrender.com`, the same backend behind
+[xingruic.net/tools/researchers](https://www.xingruic.net/tools/researchers)),
+configured through `API_BASE` in `scripts/build_site.py`.
 
-To turn Connect on for public visitors:
+**Visitors need no account, key, or setup of any kind.** The OpenAlex API key
+is a server-side environment variable on the backend and is entirely optional
+there too - without it the service falls back to unauthenticated OpenAlex
+requests, which are rate-limited per IP but perfectly functional. Nothing is
+ever asked of the person using the map.
 
-1. Deploy that repository on Render - it ships a `render.yaml` (one web
-   service, `uvicorn backend.app:app`). Set `OPENALEX_KEY` in the service
-   environment. Its CORS policy already allows any origin, so no change is
-   needed there.
-2. Note the service URL, then confirm
-   `curl https://<service>.onrender.com/health` returns `{"status":"ok",...}`.
-3. Set `API_BASE` in `scripts/build_site.py` to that origin (no trailing
-   slash).
-4. Regenerate and commit the deployed page:
-   `.venv/bin/python scripts/build_site.py`, then commit `docs/index.html`.
+Locally, `web/dev.html` has no `API_BASE` configured and so probes
+`localhost:8000` instead; run the companion backend (above) to exercise
+Connect during development. When no backend answers at all, the map degrades
+gracefully: Connect reports it is unavailable, and coauthor rays fall back to
+querying OpenAlex directly from the browser.
+
+To repoint the deployed page at a different backend, set `API_BASE` in
+`scripts/build_site.py` (no trailing slash), regenerate with
+`.venv/bin/python scripts/build_site.py`, and commit `docs/index.html`. Any
+replacement needs `access-control-allow-origin` to permit the Pages origin.
 
 Render's free tier sleeps an idle service, so the first Connect after a nap
 waits out a cold start before the stream begins.

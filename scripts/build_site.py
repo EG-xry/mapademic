@@ -26,13 +26,15 @@ SITE_HTML = REPO_ROOT / "docs" / "index.html"
 # generation).
 DATA_BASE = "https://pub-3627024db5924826912107ea4f16e739.r2.dev"
 # R31: the public degree-of-separation backend for Connect/coauthor-ray
-# lookups. None = omit apiBase entirely, which leaves dev.html falling back to
-# its localhost:8000 default (the pre-R31 behavior: the public page probes a
-# backend nobody is running, and the features stay gracefully disabled). Set
-# this to the deployed https:// origin to turn Connect on for public visitors
-# -- see README's "Public path backend" section. No trailing slash: dev.html
-# builds URLs as `${API_BASE}/api/path`.
-API_BASE = None
+# lookups -- the companion project's own Render deploy, the same instance
+# powering xingruic.net/tools/researchers. Verified 2026-07-24: /health,
+# /api/path and /api/graph/expand all answer, and CORS is
+# access-control-allow-origin: * so a GitHub Pages origin is fine. Visitors
+# need no key of any kind; the backend's OpenAlex key is server-side and
+# optional. Set to None to omit apiBase entirely, which sends dev.html back to
+# its localhost:8000 default (Connect off for public visitors). No trailing
+# slash: dev.html builds URLs as `${API_BASE}/api/path`.
+API_BASE = "https://academic-degree-of-separation.onrender.com"
 
 BARE_SCRIPT_TAG = "<script>"
 

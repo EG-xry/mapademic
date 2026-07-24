@@ -8,7 +8,10 @@ def test_inject_config_inserts_before_first_bare_script_tag():
         "const HIT_ZOOM = 10;\n"
         "</script>\n"
     )
-    out = inject_config(html, data_base="https://example.test")
+    # api_base is pinned explicitly rather than left to the module default:
+    # this test is about WHERE the block lands, so it must not change meaning
+    # when a deployed API_BASE is configured.
+    out = inject_config(html, data_base="https://example.test", api_base=None)
 
     block = build_config_block("https://example.test")
     assert block in out
