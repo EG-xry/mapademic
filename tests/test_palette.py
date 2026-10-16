@@ -41,14 +41,23 @@ def hue_dist(a, b):
 
 def test_big_community_hue_follows_centroid_angle():
     import colorsys
-    # centroid due +x of map center -> theta 0 -> hue within the 8 deg wobble of 0/360
+    from pipeline.palette import HUE_OFFSET
+    # centroid due +x of map center -> theta 0 -> hue HUE_OFFSET, within the 8 deg wobble
     r, g, b = community_rgb(7, 500000, 0.9, 0.5)
     h, l, s = colorsys.rgb_to_hls(r, g, b)
-    assert hue_dist(h * 360.0, 0.0) <= 8.0 + 1e-6
-    # centroid due +y -> theta pi/2 -> hue near 90
+    assert hue_dist(h * 360.0, HUE_OFFSET % 360) <= 8.0 + 1e-6
+    # centroid due +y -> theta pi/2 -> hue 90 further round
     r2, g2, b2 = community_rgb(8, 500000, 0.5, 0.9)
     h2, l2, s2 = colorsys.rgb_to_hls(r2, g2, b2)
-    assert hue_dist(h2 * 360.0, 90.0) <= 8.0 + 1e-6
+    assert hue_dist(h2 * 360.0, (90.0 + HUE_OFFSET) % 360) <= 8.0 + 1e-6
+
+
+def test_hue_offset_rotates_the_wheel():
+    import colorsys
+    r, g, b = community_rgb(7, 500000, 0.9, 0.5, hue_offset=0.0)
+    assert hue_dist(colorsys.rgb_to_hls(r, g, b)[0] * 360.0, 0.0) <= 8.0 + 1e-6
+    r, g, b = community_rgb(7, 500000, 0.9, 0.5, hue_offset=120.0)
+    assert hue_dist(colorsys.rgb_to_hls(r, g, b)[0] * 360.0, 120.0) <= 8.0 + 1e-6
 
 
 def test_big_community_deterministic():

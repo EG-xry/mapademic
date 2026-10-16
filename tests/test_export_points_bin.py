@@ -147,3 +147,57 @@ def test_sample_flag_limits_and_keeps_top(tmp_path):
     assert meta["count"] == 5
     assert (out / "positions.bin").stat().st_size == 5 * 4
     assert (out / "attrs.bin").stat().st_size == 5 * 4
+
+
+def test_size_byte_is_the_shared_log_rule(tmp_path):
+    # attrs.bin's s byte must be pipeline.sizing's t, which the viewer's
+    # shader reads with the same formula as the raster discs
+    from pipeline.sizing import size_byte
+    web = tmp_path / "web.parquet"
+    write_web(web, [("A0", 0.1, 0.1, 1, 358, False), ("A1", 0.2, 0.2, 1, 18_090, False)])
+    out = tmp_path / "vector_experiment"
+    meta = export_points(str(web), out)
+    attrs = _load_attrs(out, meta["count"])
+    assert attrs[1, 3] == size_byte(358)      # median author, ~54
+    assert attrs[0, 3] == size_byte(18_090)   # 99th percentile, ~180
+    assert meta["size"].startswith("pipeline.sizing")
+
+
+def test_community_bins_hold_every_member_of_each_legend_community(tmp_path):
+    import duckdb
+    web = tmp_path / "web.parquet"
+    duckdb.sql(
+        "COPY (SELECT 'A' || range::VARCHAR id, 'n' display_name, 0.25 xw, 0.5 yw, 1 community,"
+        " CAST(-1 AS SMALLINT) sub, 20 works_count, CAST(range AS INTEGER) cited_by_count,"
+        " 'i' institution, 'Medicine' field, FALSE is_ring FROM range(1200)"
+        " UNION ALL SELECT 'B' || range::VARCHAR, 'n', 0.75, 0.5, 2, CAST(-1 AS SMALLINT), 20, 5,"
+        " 'i', 'Medicine', FALSE FROM range(30))"
+        f" TO '{web}' (FORMAT PARQUET)")
+    out = tmp_path / "vx"
+    meta = export_points(str(web), out)
+    assert meta["communities"]["counts"] == {"1": 1200}           # 30-member community is below the legend
+    raw = np.fromfile(out / "communities" / "1.bin", dtype=np.uint8)
+    assert raw.size == 1200 * 8
+    pos = raw[:1200 * 4].view("<u2").reshape(-1, 2)
+    assert (pos[:, 0] == round(0.25 * QUANT)).all()
+    attrs = raw[1200 * 4:].reshape(-1, 4)
+    assert attrs[0, 3] >= attrs[-1, 3]                             # cited-desc, like positions.bin
+
+
+def test_dust_goes_to_its_own_file_not_the_cloud(tmp_path):
+    import duckdb
+    web = tmp_path / "web.parquet"
+    duckdb.sql(
+        "COPY (SELECT 'A' || range::VARCHAR id, 'n' display_name, 0.25 xw, 0.5 yw, 1 community,"
+        " CAST(-1 AS SMALLINT) sub, 20 works_count, CAST(range AS INTEGER) cited_by_count,"
+        " 'i' institution, 'Medicine' field, FALSE is_ring, FALSE is_dust FROM range(1200)"
+        " UNION ALL SELECT 'D' || range::VARCHAR, 'n', 0.9, 0.9, 7, CAST(-1 AS SMALLINT), 3, 0,"
+        " NULL, 'Medicine', range < 10, TRUE FROM range(25))"
+        f" TO '{web}' (FORMAT PARQUET)")
+    out = tmp_path / "vx"
+    meta = export_points(str(web), out)
+    assert meta["count"] == 1200 and meta["dust"]["count"] == 25
+    raw = np.fromfile(out / "dust.bin", dtype=np.uint8)
+    assert raw.size == 25 * 8
+    pos = raw[:25 * 4].view("<u2").reshape(-1, 2)
+    assert (pos[:, 0] == round(0.9 * QUANT)).all()

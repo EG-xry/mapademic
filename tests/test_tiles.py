@@ -5,9 +5,10 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from pipeline.palette import load_community_stats
-from pipeline.tiles import (EDGE_MAXZ, MAXZ, PIX, TILE, aggregate_maxz,
-                            load_level9, load_splats, reduce_level,
+from pipeline.palette import group_key, load_community_stats
+from pipeline import sizing
+from pipeline.tiles import (EDGE_MAXZ, MAXZ, PIX, TILE, aggregate_maxz, legend_inputs,
+                            load_level9, load_markers, reduce_level,
                             render_zoom, write_legend)
 
 # MAXZ and PIX are imported from pipeline.tiles; values follow whatever
@@ -47,12 +48,12 @@ def test_aggregate_dominant_and_counts(tiny_web, tmp_path):
     con = duckdb.connect()
     aggregate_maxz(tiny_web, out, con)
     rows = duckdb.sql(
-        f"SELECT px, py, cnt, community FROM '{out}' ORDER BY px"
+        f"SELECT px, py, cnt, gkey FROM '{out}' ORDER BY px"
     ).fetchall()
     assert len(rows) == 2                      # two occupied pixels
     dense = rows[0]
     assert dense[2] == 3                       # a+b+c share one pixel
-    assert dense[3] == 1                       # dominant community wins
+    assert dense[3] == group_key(1, -1)        # dominant community wins
     assert rows[1][2] == 1
 
 
@@ -66,13 +67,13 @@ def test_aggregate_schema_has_no_field(tmp_path):
     out = tmp_path / "px.parquet"
     aggregate_maxz(str(web), str(out), duckdb.connect())
     cols = [r[0] for r in duckdb.sql(f"DESCRIBE SELECT * FROM '{out}'").fetchall()]
-    assert cols == ["px", "py", "cnt", "community"]
+    assert cols == ["px", "py", "cnt", "gkey"]
 
 
 def test_pyramid_counts_conserved(tiny_web, tmp_path):
     out = str(tmp_path / "pixels_z9.parquet")
     aggregate_maxz(tiny_web, out, duckdb.connect())
-    pal = {1: (1.0, 0.0, 0.0), 2: (0.0, 1.0, 0.0), 3: (0.0, 0.0, 1.0)}
+    pal = {group_key(1, -1): (1.0, 0.0, 0.0), group_key(2, -1): (0.0, 1.0, 0.0), group_key(3, -1): (0.0, 0.0, 1.0)}
     level = load_level9(out, pal)
     total = level["cnt"].sum()
     for _ in range(MAXZ):                      # 9 reductions -> zoom 0
@@ -96,7 +97,7 @@ def test_reduce_level_empty_returns_empty():
 def test_render_writes_expected_tiles_and_is_idempotent(tiny_web, tmp_path):
     pixels = str(tmp_path / "pixels_z9.parquet")
     aggregate_maxz(tiny_web, pixels, duckdb.connect())
-    pal = {1: (0.2, 0.8, 0.4), 2: (0.9, 0.1, 0.1), 3: (0.1, 0.1, 0.9)}
+    pal = {group_key(1, -1): (0.2, 0.8, 0.4), group_key(2, -1): (0.9, 0.1, 0.1), group_key(3, -1): (0.1, 0.1, 0.9)}
     level = load_level9(pixels, pal)
     for _ in range(MAXZ - 1):                  # reduce to zoom 1 (2x2 tiles)
         level = reduce_level(level)
@@ -112,7 +113,7 @@ def test_render_writes_expected_tiles_and_is_idempotent(tiny_web, tmp_path):
     # max-count pixel -> rank 1.0 -> brightness == BRIGHT_CEIL, so its RGB equals
     # the palette color scaled by the ceiling. Mirror the render's float32 path.
     from pipeline.tiles import BRIGHT_CEIL
-    base = np.array(pal[1], dtype=np.float32)
+    base = np.array(pal[group_key(1, -1)], dtype=np.float32)
     expected = tuple(
         (np.clip(base * np.float32(BRIGHT_CEIL), 0, 1) * 255).astype(np.uint8)
     )
@@ -151,7 +152,7 @@ def test_render_bloom_lights_up_neighbors(tmp_path):
 def test_styled_pixels_deterministic(tiny_web, tmp_path):
     pixels = str(tmp_path / "pixels_z9.parquet")
     aggregate_maxz(tiny_web, pixels, duckdb.connect())
-    pal = {1: (1.0, 0.0, 0.0), 2: (0.0, 1.0, 0.0), 3: (0.0, 0.0, 1.0)}
+    pal = {group_key(1, -1): (1.0, 0.0, 0.0), group_key(2, -1): (0.0, 1.0, 0.0), group_key(3, -1): (0.0, 0.0, 1.0)}
     level = load_level9(pixels, pal)
     for _ in range(MAXZ - 1):
         level = reduce_level(level)
@@ -163,95 +164,75 @@ def test_styled_pixels_deterministic(tiny_web, tmp_path):
     assert np.array_equal(ia, ib)              # golden-by-self: bytes-level stability
 
 
-def test_splats_only_above_threshold(tmp_path):
-    con = duckdb.connect()
+def write_cited(path, rows):
+    """rows: (id, xw, yw, cited, is_ring)"""
+    vals = ", ".join(f"('{i}', 'n', {x}, {y}, 1, 20, {c}, 'i', 'Medicine', {str(r).upper()})"
+                     for i, x, y, c, r in rows)
+    duckdb.sql(f"COPY (SELECT * FROM (VALUES {vals}) t(id, display_name, xw, yw, community,"
+               f" works_count, cited_by_count, institution, field, is_ring))"
+               f" TO '{path}' (FORMAT PARQUET)")
+
+
+def test_markers_keep_only_authors_whose_disc_outgrows_their_pixel(tmp_path):
     web = tmp_path / "web.parquet"
-    duckdb.sql(
-        "COPY (SELECT * FROM (VALUES"
-        " ('BIG', 'n', 0.5, 0.5, 1, 20, 100000, 'i', 'Medicine', FALSE),"
-        " ('SML', 'n', 0.25, 0.25, 1, 20, 100, 'i', 'Medicine', FALSE))"
-        " t(id, display_name, xw, yw, community, works_count, cited_by_count,"
-        " institution, field, is_ring))"
-        f" TO '{web}' (FORMAT PARQUET)")
-    pal = {1: (1.0, 0.0, 0.0)}
-    s = load_splats(con, str(web), pal)
-    assert len(s["px"]) == 1                      # only BIG (SML is below the 5k floor)
-    assert s["px"][0] == PIX // 2 and s["py"][0] == PIX // 2
-    assert s["rad0"][0] == 2                      # 100k cited -> tier (60_000, 2)
+    write_cited(web, [("TOP", 0.5, 0.5, 300_000, False), ("MID", 0.25, 0.25, 2_000, False),
+                      ("LOW", 0.75, 0.75, 3, False), ("RING", 0.1, 0.1, 300_000, True)])
+    m = load_markers(duckdb.connect(), str(web), {1: (1.0, 0.0, 0.0)})
+    assert sorted(m["t"].round(3).tolist()) == sorted(
+        sizing.size_t([300_000, 2_000]).round(3).tolist())   # LOW too small, RING excluded
+    assert m["xw"].dtype == np.float64                          # sub-pixel centres for anti-aliasing
 
 
-def test_render_zoom_draws_splat_disc(tmp_path):
-    level = {"px": np.array([128]), "py": np.array([128]),
-             "cnt": np.array([1]), "rgb": np.array([[0.1, 0.1, 0.1]], np.float32)}
-    splats = {"px": np.array([128 + 3]), "py": np.array([128]),
-              "rgb": np.array([[0.0, 1.0, 0.0]], np.float32),
-              "rad0": np.array([2])}
-    render_zoom(level, MAXZ, tmp_path, bloom=False, splats=splats)
-    # MAXZ: level px are already zoom-MAXZ pixel coords; tile 0/0 holds px<256.
-    # XYZ y-flip means tile row (yu=0) is written as ty = ntiles - 1.
-    ntiles = 1 << MAXZ
-    img = np.asarray(Image.open(tmp_path / str(MAXZ) / "0" / f"{ntiles - 1}.png"))
-    ys, xs = np.nonzero(img[:, :, 1] > 200)       # bright green disc pixels
-    assert len(ys) >= 5                           # radius-2 disc, not 1 pixel
+def one_marker(t, xw=128.5 / PIX, yw=128.5 / PIX):
+    return {"xw": np.array([xw]), "yw": np.array([yw]), "t": np.array([t]),
+            "rgb": np.array([[0.0, 1.0, 0.0]], np.float32)}
 
 
-def test_splat_tier_radii_resolved_at_load(tmp_path):
-    con = duckdb.connect()
-    web = tmp_path / "web.parquet"
-    duckdb.sql(
-        "COPY (SELECT * FROM (VALUES"
-        " ('T1', 'n', 0.5, 0.5, 1, 20, 6000, 'i', 'Medicine', FALSE),"
-        " ('T3', 'n', 0.25, 0.25, 1, 20, 250000, 'i', 'Medicine', FALSE))"
-        " t(id, display_name, xw, yw, community, works_count, cited_by_count,"
-        " institution, field, is_ring))"
-        f" TO '{web}' (FORMAT PARQUET)")
-    pal = {1: (1.0, 0.0, 0.0)}
-    s = load_splats(con, str(web), pal)
-    rad_by_px = dict(zip(s["px"].tolist(), s["rad0"].tolist()))
-    assert rad_by_px[PIX // 2] == 1                # 6k cited -> tier (5_000, 1)
-    assert rad_by_px[PIX // 4] == 3                # 250k cited -> tier (200_000, 3)
+def dim_level(px=128, py=128):
+    return {"px": np.array([px]), "py": np.array([py]), "cnt": np.array([1]),
+            "rgb": np.array([[0.1, 0.1, 0.1]], np.float32)}
 
 
-def test_6k_splat_visible_at_z10_not_z9(tmp_path):
-    # tier (5_000, 1): rad0 == 1. At z10 (shift 0) radius stays 1; at z9
-    # (shift 1) radius drops to 0 -> no splat drawn at all.
-    level = {"px": np.array([128]), "py": np.array([128]),
-             "cnt": np.array([1]), "rgb": np.array([[0.1, 0.1, 0.1]], np.float32)}
-    splats = {"px": np.array([128]), "py": np.array([128]),
-              "rgb": np.array([[0.0, 1.0, 0.0]], np.float32),
-              "rad0": np.array([1])}
-    out10 = tmp_path / "z10"
-    render_zoom(level, MAXZ, out10, bloom=False, splats=splats)
-    ntiles10 = 1 << MAXZ
-    img10 = np.asarray(Image.open(out10 / str(MAXZ) / "0" / f"{ntiles10 - 1}.png"))
-    assert (img10[:, :, 1] > 200).sum() == 5       # radius-1 disc == 5 px
-
-    out9 = tmp_path / "z9"
-    render_zoom(level, MAXZ - 1, out9, bloom=False, splats=splats)
-    ntiles9 = 1 << (MAXZ - 1)
-    img9 = np.asarray(Image.open(out9 / str(MAXZ - 1) / "0" / f"{ntiles9 - 1}.png"))
-    assert (img9[:, :, 1] > 200).sum() == 0        # no splat at z9
+def lit(out, z, x=0, yu=0, thresh=100):
+    ntiles = 1 << z
+    img = np.asarray(Image.open(out / str(z) / str(x) / f"{ntiles - 1 - yu}.png"))
+    return int((img[:, :, 1] > thresh).sum())
 
 
-def test_250k_splat_shrinks_from_r3_to_r2_at_z9(tmp_path):
-    # tier (200_000, 3): rad0 == 3. At z10 radius stays 3 (29 px disc); at
-    # z9 radius drops by one to 2 (13 px disc), still visible.
-    level = {"px": np.array([128]), "py": np.array([128]),
-             "cnt": np.array([1]), "rgb": np.array([[0.1, 0.1, 0.1]], np.float32)}
-    splats = {"px": np.array([128]), "py": np.array([128]),
-              "rgb": np.array([[0.0, 1.0, 0.0]], np.float32),
-              "rad0": np.array([3])}
-    out10 = tmp_path / "z10"
-    render_zoom(level, MAXZ, out10, bloom=False, splats=splats)
-    ntiles10 = 1 << MAXZ
-    img10 = np.asarray(Image.open(out10 / str(MAXZ) / "0" / f"{ntiles10 - 1}.png"))
-    assert (img10[:, :, 1] > 200).sum() == 29      # radius-3 disc == 29 px
+def test_top_cited_author_is_a_disc_of_the_max_radius_at_z10(tmp_path):
+    render_zoom(dim_level(), MAXZ, tmp_path, bloom=False, markers=one_marker(1.0))
+    r = sizing.radius_px(MAXZ, 1.0)                     # 4.5 px
+    assert abs(lit(tmp_path, MAXZ) - np.pi * r * r) < 0.25 * np.pi * r * r
 
-    out9 = tmp_path / "z9"
-    render_zoom(level, MAXZ - 1, out9, bloom=False, splats=splats)
-    ntiles9 = 1 << (MAXZ - 1)
-    img9 = np.asarray(Image.open(out9 / str(MAXZ - 1) / "0" / f"{ntiles9 - 1}.png"))
-    assert (img9[:, :, 1] > 200).sum() == 13       # radius-2 disc == 13 px
+
+def test_disc_area_grows_with_citations(tmp_path):
+    areas = []
+    for t in (0.3, 0.6, 1.0):
+        out = tmp_path / str(t)
+        render_zoom(dim_level(), MAXZ, out, bloom=False, markers=one_marker(t))
+        areas.append(lit(out, MAXZ, thresh=20))
+    assert areas[0] < areas[1] < areas[2]
+
+
+def test_disc_shrinks_one_zoom_out_and_vanishes_below_disc_zoom(tmp_path):
+    m = one_marker(1.0, xw=100.5 / PIX, yw=100.5 / PIX)   # inside tile 0/0 at z8, z9 and z10
+    sizes = {}
+    for z in (MAXZ, MAXZ - 1, sizing.DISC_MIN_ZOOM - 1):
+        shift = MAXZ - z
+        level = dim_level(px=int(m["xw"][0] * PIX) >> shift, py=int(m["yw"][0] * PIX) >> shift)
+        out = tmp_path / f"z{z}"
+        render_zoom(level, z, out, bloom=False, markers=m)
+        sizes[z] = lit(out, z)
+    assert sizes[MAXZ - 1] < sizes[MAXZ]
+    assert sizes[sizing.DISC_MIN_ZOOM - 1] == 0          # density picture only
+
+
+def test_disc_on_a_tile_edge_is_finished_in_the_neighbouring_tile(tmp_path):
+    # centre 1.5 px left of the tile 0/1 border; the neighbour has no
+    # occupied pixel of its own and must still be rendered with the overhang
+    m = one_marker(1.0, xw=(TILE - 1.5) / PIX, yw=128.5 / PIX)
+    render_zoom(dim_level(px=TILE - 2), MAXZ, tmp_path, bloom=False, markers=m)
+    assert lit(tmp_path, MAXZ, x=0) > 0 and lit(tmp_path, MAXZ, x=1) > 0
 
 
 def test_legend_json(tmp_path):
@@ -268,7 +249,7 @@ def test_legend_json(tmp_path):
     assert stats == [(1, "Medicine", 1500, 0.5, 0.5)]   # 5-tuple: adds centroid
     write_legend(stats, str(out), str(regions), min_members=1000)
     entries = json.loads(out.read_text())
-    assert entries == [{"community": 1, "name": "Cardiology",
+    assert entries == [{"community": 1, "name": "Cardiology", "kind": "field",
                         "field": "Medicine", "members": 1500,
                         "color": entries[0]["color"]}]
     assert entries[0]["color"].startswith("#") and len(entries[0]["color"]) == 7
@@ -378,3 +359,61 @@ def test_regular_edges_share_single_glow_ceiling(tmp_path):
     # combined brightness never exceeds the single ceiling on any channel
     line = img[(TILE - 1) - 10, 10:111].astype(int)
     assert (line <= np.array(expected)[None, :]).all()
+
+
+def test_sub_groups_colour_their_own_pixels(tmp_path):
+    # one community, two sub-groups on different pixels -> two colour keys
+    web = tmp_path / "web.parquet"
+    duckdb.sql(
+        "COPY (SELECT 'A' || range::VARCHAR id, 'n' display_name,"
+        " CASE WHEN range < 5 THEN 0.25 ELSE 0.75 END xw, 0.5 yw, 1 community,"
+        " CAST(CASE WHEN range < 5 THEN 0 ELSE 1 END AS SMALLINT) sub,"
+        " 20 works_count, 10 cited_by_count, 'i' institution, 'Medicine' field, FALSE is_ring"
+        " FROM range(8))"
+        f" TO '{web}' (FORMAT PARQUET)")
+    out = tmp_path / "px.parquet"
+    aggregate_maxz(str(web), str(out), duckdb.connect())
+    keys = {r[0] for r in duckdb.sql(f"SELECT gkey FROM '{out}'").fetchall()}
+    assert keys == {group_key(1, 0), group_key(1, 1)}
+
+
+def test_legend_lists_sub_groups_and_leaves_faded_communities_out(tmp_path):
+    web = tmp_path / "web.parquet"
+    # community 1: 1500 members in two sub-groups; community 2: 1200 near-empty records
+    duckdb.sql(
+        "COPY (SELECT 'A' || range::VARCHAR id, 'n' display_name, 0.4 xw, 0.5 yw, 1 community,"
+        " CAST(CASE WHEN range < 1000 THEN 0 ELSE 1 END AS SMALLINT) sub, 20 works_count,"
+        " 300 cited_by_count, 'i' institution, 'Medicine' field, FALSE is_ring FROM range(1500)"
+        " UNION ALL SELECT 'B' || range::VARCHAR, 'n', 0.8, 0.5, 2, CAST(-1 AS SMALLINT), 3, 0,"
+        " NULL, 'Social Sciences', FALSE FROM range(1200))"
+        f" TO '{web}' (FORMAT PARQUET)")
+    regions = tmp_path / "regions.json"
+    regions.write_text(json.dumps([
+        {"community": 1, "name": "Medicine (Italy)", "kind": "national"},
+        {"level": 2, "community": 1, "sub": 0, "name": "Cardiology", "xw": 0.4, "yw": 0.5},
+        {"level": 2, "community": 1, "sub": 1, "name": "Oncology", "xw": 0.41, "yw": 0.5}]))
+    con = duckdb.connect()
+    stats = load_community_stats(con, str(web))
+    pal, faded, subs = legend_inputs(con, str(web), stats)
+    assert faded == {2} and subs == {1: [(0, 1000), (1, 500)]}
+    out = tmp_path / "legend.json"
+    write_legend(stats, str(out), str(regions), palette=pal, faded=faded, subs=subs)
+    entries = json.loads(out.read_text())
+    assert [e["community"] for e in entries] == [1]
+    e = entries[0]
+    assert e["kind"] == "national" and e["name"] == "Medicine (Italy)"
+    assert [(x["sub"], x["name"], x["members"]) for x in e["subs"]] == [(0, "Cardiology", 1000), (1, "Oncology", 500)]
+    assert e["subs"][0]["color"] == e["color"]          # largest sub-group keeps the community colour
+    assert e["subs"][1]["color"] != e["color"]
+
+
+def test_dust_is_left_out_of_the_tiles(tmp_path):
+    web = tmp_path / "web.parquet"
+    duckdb.sql(
+        "COPY (SELECT 'A' || range::VARCHAR id, 'n' display_name,"
+        " CASE WHEN range < 5 THEN 0.25 ELSE 0.75 END xw, 0.5 yw, 1 community, CAST(-1 AS SMALLINT) sub,"
+        " 20 works_count, 10 cited_by_count, 'i' institution, 'Medicine' field, FALSE is_ring,"
+        " range >= 5 AS is_dust FROM range(8))"
+        f" TO '{web}' (FORMAT PARQUET)")
+    out = tmp_path / "px.parquet"
+    assert aggregate_maxz(str(web), str(out), duckdb.connect()) == 1    # only the non-dust pixel

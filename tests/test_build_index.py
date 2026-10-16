@@ -2,6 +2,7 @@ import json
 from collections import Counter
 
 import duckdb
+import pytest
 
 import pipeline.build_index as build_index
 from pipeline.build_index import (
@@ -58,6 +59,14 @@ def test_normalize():
     assert normalize("李明") == "李明"          # non-latin kept verbatim (lowercased)
 
 
+def test_normalize_strips_every_mark_like_the_viewer():
+    # web/dev.html strips /\p{M}/u. U+034F (grapheme joiner) and Thai vowel
+    # signs are marks with combining class 0, which unicodedata.combining()
+    # misses: 268 indexed names became unsearchable by full name that way.
+    assert normalize("Osmar R. Zai\u034f\u0308ane") == "osmar r zaiane"
+    assert normalize("\u0e2a\u0e31\u0e19") == "\u0e2a\u0e19"      # U+0E31: Mn, class 0
+
+
 def test_label_tiles_ranked_and_capped(tmp_path):
     web = tmp_path / "w.parquet"
     rows = [(f"A{i}", f"Name{i}", 0.25, 0.25, 1000 - i) for i in range(60)]
@@ -69,7 +78,7 @@ def test_label_tiles_ranked_and_capped(tmp_path):
     z6 = json.loads((out / "labels/6/16/47.json").read_text())  # 0.25 -> tile 16, y-flip of 16 at z6 = 47
     assert len(z6["l"]) == 50                       # capped at z6
     assert z6["l"][0][0] == "Name0"                 # highest cited first
-    assert len(z6["l"][0]) == 6                      # [display_name, id, xw, yw, cited, community]
+    assert len(z6["l"][0]) == 7                      # [display_name, id, xw, yw, cited, community, sub]
     assert z6["l"][0][5] == 1                        # community round-trips (write_web hardcodes 1)
     z9 = json.loads((out / "labels/9/128/383.json").read_text())
     assert len(z9["l"]) == 60                       # cap 200 not hit
@@ -548,7 +557,7 @@ def test_top_authors_community_field_present_as_int(tmp_path):
     out = tmp_path / "top_authors.json"
     build_top_authors(str(web), out)
     entries = json.loads(out.read_text())
-    assert entries[0] == ["Alpha", "A1", 0.111111, 0.222222, 50, 7]
+    assert entries[0] == ["Alpha", "A1", 0.111111, 0.222222, 50, 7, -1]
     assert isinstance(entries[0][5], int)
 
 
@@ -588,3 +597,48 @@ def test_top_authors_top_n_parameter_respected(tmp_path):
     entries = json.loads(out.read_text())
     assert len(entries) == 5
     assert [e[1] for e in entries] == ["A0", "A1", "A2", "A3", "A4"]  # top 5 by cited
+
+
+def test_demo_path_takes_positions_from_this_release(tmp_path):
+    # the startup example used to carry July 2026 coordinates baked into
+    # web/dev.html; it must follow whatever layout the index is built from
+    from pipeline.build_index import DEMO_PATH, build_demo_path
+    ids = [pid for pid, _ in DEMO_PATH["points"]]
+    web = tmp_path / "coords_web.parquet"
+    vals = ", ".join(f"('https://openalex.org/{pid}', 'Name {k}', {0.1 * (k + 1)}, {0.2 + 0.1 * k}, {k}, FALSE)"
+                     for k, pid in enumerate(ids))
+    duckdb.sql(f"COPY (SELECT * FROM (VALUES {vals}) t(id, display_name, xw, yw, community, is_ring))"
+               f" TO '{web}' (FORMAT PARQUET)")
+    out = tmp_path / "demo_path.json"
+    assert build_demo_path(str(web), str(out)) is True
+    demo = json.loads(out.read_text())
+    assert [p["id"] for p in demo["points"]] == ids
+    assert demo["points"][1]["xw"] == pytest.approx(0.2) and demo["points"][1]["community"] == 1
+    assert demo["hops"] == len(ids) - 1 and demo["idA"] == ids[0] and demo["idB"] == ids[-1]
+
+
+def test_demo_path_is_dropped_when_an_author_left_the_map(tmp_path):
+    from pipeline.build_index import build_demo_path
+    web = tmp_path / "coords_web.parquet"
+    duckdb.sql(f"COPY (SELECT 'https://openalex.org/A1' AS id, 'x' AS display_name, 0.5 AS xw,"
+               f" 0.5 AS yw, 1 AS community, FALSE AS is_ring) TO '{web}' (FORMAT PARQUET)")
+    out = tmp_path / "demo_path.json"
+    out.write_text("{}")                       # stale file from an earlier build
+    assert build_demo_path(str(web), str(out)) is False
+    assert not out.exists()
+
+
+def test_id_shards_carry_the_path_graph_number(tmp_path):
+    import duckdb
+    import numpy as np
+    web = tmp_path / "web.parquet"
+    duckdb.sql("COPY (SELECT * FROM (VALUES ('https://openalex.org/A5000000010', 0.1, 0.2),"
+               " ('https://openalex.org/A5000000020', 0.3, 0.4)) t(id, xw, yw))"
+               f" TO '{web}' (FORMAT PARQUET)")
+    paths = tmp_path / "paths"; paths.mkdir()
+    np.array([20, 10], dtype="<u4").tofile(paths / "ids-abc.bin")     # A..20 is author 0, A..10 is author 1
+    (paths / "manifest.json").write_text(json.dumps({"files": {"ids": "ids-abc.bin"}}))
+    build_id_shards(str(web), tmp_path / "index", paths)
+    shard = json.loads((tmp_path / "index" / "ids" / "10.json").read_text())
+    assert shard == {"https://openalex.org/A5000000010": [0.1, 0.2, 1]}
+    assert json.loads((tmp_path / "index" / "ids" / "20.json").read_text())["https://openalex.org/A5000000020"][2] == 0

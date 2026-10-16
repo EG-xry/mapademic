@@ -1,8 +1,10 @@
 """Label/hit tiles (zooms 6-9) and prefix search shards. Zero backend.
 
-Label tile entry shape: [display_name, id, xw, yw, cited, community]
-(community as int). Backward-compat: consumers must index fields
-positionally 0..4 as before; field 5 (community) is additive.
+Label tile entry shape: [display_name, id, xw, yw, cited, community, sub]
+(community and sub as int; sub is the sub-group of a split community,
+pipeline/subcommunities.py, else -1). Backward-compat: consumers must index
+fields positionally 0..4 as before; fields 5 (community) and 6 (sub) are
+additive. Community shards carry [display_name, id, xw, yw, cited, sub].
 
 Search shard fallback order (viewer): try prefix shards from
 min(len(normalized concatenated name), 5) chars down to 2 chars, then the
@@ -39,7 +41,9 @@ CATCHALL_BUCKETS = 128                          # codepoint-modulus for the `_` 
 
 def normalize(name: str) -> str:
     s = unicodedata.normalize("NFKD", name)
-    s = "".join(c for c in s if not unicodedata.combining(c)).lower()
+    # every mark (category M*), matching the viewer's /\p{M}/u: combining()
+    # misses class-0 marks such as U+034F and Thai vowel signs
+    s = "".join(c for c in s if not unicodedata.category(c).startswith("M")).lower()
     s = "".join(c if (c.isalnum() or c == " ") else " " for c in s)
     return " ".join(s.split())
 
@@ -50,15 +54,17 @@ def build_label_tiles(web: str, out_dir: Path) -> int:
         shutil.rmtree(labels_dir)
     con = duckdb.connect()
     apply_resource_limits(con)
+    sub = _sub_sql(con, web)
     written = 0
     for z, cap in LABEL_ZOOMS.items():
         ntiles = 1 << z
         rows = con.execute(
             f"""
-            SELECT tx, ty_up, display_name, id, xw, yw, cited_by_count, community FROM (
+            SELECT tx, ty_up, display_name, id, xw, yw, cited_by_count, community, sub FROM (
                 SELECT least({ntiles - 1}, CAST(floor(CAST(xw AS DOUBLE) * {ntiles}) AS INT)) AS tx,
                        least({ntiles - 1}, CAST(floor(CAST(yw AS DOUBLE) * {ntiles}) AS INT)) AS ty_up,
                        display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count, community,
+                       {sub} AS sub,
                        row_number() OVER (
                            PARTITION BY least({ntiles - 1}, CAST(floor(CAST(xw AS DOUBLE) * {ntiles}) AS INT)),
                                         least({ntiles - 1}, CAST(floor(CAST(yw AS DOUBLE) * {ntiles}) AS INT))
@@ -70,9 +76,9 @@ def build_label_tiles(web: str, out_dir: Path) -> int:
             """
         ).fetchall()
         tiles = defaultdict(list)
-        for tx, ty_up, name, aid, xw, yw, cited, community in rows:
+        for tx, ty_up, name, aid, xw, yw, cited, community, sg in rows:
             tiles[(tx, ty_up)].append(
-                [name, aid, round(xw, 6), round(yw, 6), int(cited), int(community)]
+                [name, aid, round(xw, 6), round(yw, 6), int(cited), int(community), int(sg)]
             )
         for (tx, ty_up), entries in tiles.items():
             ty = (ntiles - 1) - ty_up               # XYZ y-flip
@@ -192,12 +198,32 @@ def build_search_shards(web: str, out_dir: Path) -> int:
     return len(rows)
 
 
-def build_id_shards(web: str, out_dir: Path) -> int:
+PATH_ID_BASE = 5_000_000_000   # scripts/export_paths_bin.ID_BASE
+
+
+def _path_numbers(paths_dir: Path | None) -> dict[int, int]:
+    """OpenAlex numeric id -> the author's number in the browser path graph
+    (scripts/export_paths_bin.py's paths/ids.bin), or {} when absent."""
+    meta = paths_dir / "manifest.json" if paths_dir else None
+    if not meta or not meta.exists():
+        return {}
+    f = paths_dir / json.loads(meta.read_text()).get("files", {}).get("ids", "ids.bin")
+    if not f.exists():
+        return {}
+    ids = np.fromfile(f, dtype="<u4").astype(np.int64) + PATH_ID_BASE
+    return dict(zip(ids.tolist(), range(len(ids))))
+
+
+def build_id_shards(web: str, out_dir: Path, paths_dir: Path | None = None) -> int:
+    """ids/<bucket>.json: {id: [xw, yw]} plus, when the browser path graph
+    exists, a third value: the author's number there, where Connect starts
+    its search."""
     ids_dir = out_dir / "ids"
     if ids_dir.exists():
         shutil.rmtree(ids_dir)
     con = duckdb.connect()
     apply_resource_limits(con)
+    numbers = _path_numbers(paths_dir)
     buckets = defaultdict(dict)
     rows = con.execute(
         f"""SELECT id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw
@@ -206,7 +232,11 @@ def build_id_shards(web: str, out_dir: Path) -> int:
     for aid, xw, yw in rows:
         digits = "".join(filter(str.isdigit, aid))
         bucket = int(digits) % 1000 if digits else 0
-        buckets[bucket][aid] = [round(xw, 6), round(yw, 6)]
+        entry = [round(xw, 6), round(yw, 6)]
+        node = numbers.get(int(digits)) if digits else None
+        if node is not None:
+            entry.append(node)
+        buckets[bucket][aid] = entry
     ids_dir.mkdir(parents=True, exist_ok=True)
     total = 0
     for bucket, entries in buckets.items():
@@ -407,6 +437,13 @@ def build_community_boundaries(web: str, out_path: str, grid: int = 512, min_cel
     return len(polylines)
 
 
+def _sub_sql(con, web: str) -> str:
+    """Each row's sub-group (-1 when unsplit, or for coords_web files written
+    before sub-groups existed)."""
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{web}')").fetchall()}
+    return "coalesce(sub, -1)" if "sub" in cols else "-1"
+
+
 def build_community_shards(web: str, out_dir: Path, top_n: int = 20000, min_members: int = 1000) -> int:
     """Per-community top-N-by-citations roster, for communities with enough
     members to also appear in the legend (see palette.load_community_stats)."""
@@ -423,9 +460,9 @@ def build_community_shards(web: str, out_dir: Path, top_n: int = 20000, min_memb
     ids_sql = ", ".join(str(c) for c in qualifying)
     rows = con.execute(
         f"""
-        SELECT community, display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count
+        SELECT community, display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count, sub
         FROM (
-            SELECT community, display_name, id, xw, yw, cited_by_count,
+            SELECT community, display_name, id, xw, yw, cited_by_count, {_sub_sql(con, web)} AS sub,
                    row_number() OVER (PARTITION BY community ORDER BY cited_by_count DESC, id) AS rn
             FROM read_parquet('{web}')
             WHERE NOT is_ring AND community IN ({ids_sql})
@@ -434,11 +471,58 @@ def build_community_shards(web: str, out_dir: Path, top_n: int = 20000, min_memb
         """
     ).fetchall()
     shards = defaultdict(list)
-    for community, name, aid, xw, yw, cited in rows:
-        shards[community].append([name, aid, round(xw, 6), round(yw, 6), int(cited)])
+    for community, name, aid, xw, yw, cited, sg in rows:
+        shards[community].append([name, aid, round(xw, 6), round(yw, 6), int(cited), int(sg)])
     for community, entries in shards.items():
         _write_json_atomic(communities_dir / f"{community}.json", entries)
     return len(shards)
+
+
+# The public map's startup example: a real 4-hop coauthor chain from Geoffrey
+# Hinton to Jennifer Doudna (picked in R29 because it is clean coauthorships
+# end to end, unlike longer pairs that crossed author-disambiguation merges).
+# Positions and communities come from each release's own layout: they used to
+# be baked into web/dev.html with July 2026 coordinates, and drifted off the
+# map once the 2026-09-23 layout moved everyone.
+DEMO_PATH = {
+    "caption": ["Geoffrey Hinton", "Jennifer Doudna"],
+    "points": [
+        ("A5108093963", "A Learning Algorithm for Boltzmann Machines*"),
+        ("A5044141636", "Running enhances neurogenesis, learning, and long-term potentiation in mice"),
+        ("A5072968010", "A Model for Neural Development and Treatment of Rett Syndrome Using "
+                        "Human Induced Pluripotent Stem Cells"),
+        ("A5082310752", "Programmable RNA Tracking in Live Cells with CRISPR/Cas9"),
+        ("A5067184382", None),
+    ],
+}
+
+
+def build_demo_path(web: str, out_path: str, demo: dict = DEMO_PATH) -> bool:
+    """Write the startup example path with this release's positions; returns
+    False (and removes any stale file) if an author is missing or is dust."""
+    ids = [pid for pid, _ in demo["points"]]
+    con = duckdb.connect()
+    found = {row[0].rsplit("/", 1)[-1]: row for row in con.execute(
+        f"""SELECT id, display_name, CAST(xw AS DOUBLE), CAST(yw AS DOUBLE), community,
+                   {_sub_sql(con, web)}
+            FROM read_parquet('{web}')
+            WHERE NOT is_ring AND id IN ({", ".join(f"'https://openalex.org/{i}'" for i in ids)})"""
+    ).fetchall()}
+    out = Path(out_path)
+    if any(i not in found for i in ids):
+        out.unlink(missing_ok=True)
+        return False
+    points = []
+    for pid, label in demo["points"]:
+        _, name, xw, yw, community, sub = found[pid]
+        point = {"id": pid, "name": name, "xw": round(xw, 6), "yw": round(yw, 6),
+                 "community": int(community), "sub": int(sub)}
+        if label:
+            point["label"] = label
+        points.append(point)
+    _write_json_atomic(out, {"idA": ids[0], "idB": ids[-1], "hops": len(ids) - 1,
+                             "caption": demo["caption"], "points": points})
+    return True
 
 
 TOP_AUTHORS_CAP = 50_000   # global top-N-by-citations roster size for the mid-zoom vector overlay
@@ -454,7 +538,8 @@ def build_top_authors(web: str, out_path: str, top_n: int = None) -> int:
     apply_resource_limits(con)
     rows = con.execute(
         f"""
-        SELECT display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count, community
+        SELECT display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count, community,
+               {_sub_sql(con, web)} AS sub
         FROM read_parquet('{web}')
         WHERE NOT is_ring
         ORDER BY cited_by_count DESC, id
@@ -462,8 +547,8 @@ def build_top_authors(web: str, out_path: str, top_n: int = None) -> int:
         """
     ).fetchall()
     entries = [
-        [name, aid, round(xw, 6), round(yw, 6), int(cited), int(community)]
-        for name, aid, xw, yw, cited, community in rows
+        [name, aid, round(xw, 6), round(yw, 6), int(cited), int(community), int(sg)]
+        for name, aid, xw, yw, cited, community, sg in rows
     ]
     _write_json_atomic(Path(out_path), entries)
     return len(entries)
@@ -479,11 +564,13 @@ def run(args) -> int:
     out = Path(args.out) if args.out else data_dir() / "index"
     t = build_label_tiles(web, out)
     s = build_search_shards(web, out)
-    i = build_id_shards(web, out)
+    i = build_id_shards(web, out, data_dir() / "paths")
     b = build_community_boundaries(web, str(out / "boundaries.json"))
     m = build_community_shards(web, out)
     ta = build_top_authors(web, str(out / "top_authors.json"))
     ta_xl = build_top_authors(web, str(out / "top_authors_xl.json"), top_n=300_000)
+    demo = build_demo_path(web, str(out / "demo_path.json"))
     print(f"{t:,} label tiles, {s:,} searchable names, {i:,} id-shard entries, "
-          f"{b:,} boundary polylines, {m:,} community shards, {ta:,} top authors, {ta_xl:,} top authors xl -> {out}")
+          f"{b:,} boundary polylines, {m:,} community shards, {ta:,} top authors, {ta_xl:,} top authors xl, "
+          f"demo path {'written' if demo else 'skipped (author missing)'} -> {out}")
     return 0

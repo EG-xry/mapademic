@@ -60,23 +60,108 @@ def field_community_rgb(field: str | None, community: int) -> tuple[float, float
     return colorsys.hls_to_rgb(hue / 360.0, light, sat)
 
 
-def community_rgb(community: int, members: int, cx: float, cy: float,
-                  min_members: int = 1000) -> tuple[float, float, float]:
-    """Community base RGB in [0,1]; deterministic. Big communities take a hue
-    from their centroid's polar angle around the map center (0.5, 0.5), so
-    spatially neighboring communities land on neighboring hues; the tail is
-    dim grey dust."""
+# Rotation of the hue wheel, in degrees. A community's hue is its centroid's
+# angle around the map centre plus this. 255 chosen 2026-10-10 for the
+# 2026-09-23 layout: with 0, the 338k-member community sitting almost on the
+# centre (and a 533k one beside it) came out red/magenta and clashed with the
+# yellow, blue and purple lobes around them; scoring every 5-degree rotation
+# by the red carried by big, central communities, 255-260 leaves none, and
+# red moves out to the lobes at the top of the map.
+HUE_OFFSET = 255.0
+
+
+def community_hls(community: int, members: int, cx: float, cy: float,
+                  min_members: int = 1000, hue_offset: float = HUE_OFFSET,
+                  faded: bool = False) -> tuple[float, float, float]:
+    """(hue degrees, lightness, saturation) of a community; see community_rgb."""
     h = splitmix64(int(community))
     j1 = ((h & 0xFFFF) / 0xFFFF) * 2 - 1
     j2 = (((h >> 16) & 0xFFFF) / 0xFFFF) * 2 - 1
     j3 = (((h >> 32) & 0xFFFF) / 0xFFFF) * 2 - 1
-    if members < min_members:
-        return colorsys.hls_to_rgb(0.0, 0.30 + 0.06 * j1, 0.03)
+    if members < min_members or faded:
+        return 0.0, 0.30 + 0.06 * j1, 0.03
     theta = math.atan2(cy - 0.5, cx - 0.5)
-    hue = (math.degrees(theta) + 8.0 * j1) % 360.0
-    sat = 0.70 + 0.08 * j2
-    light = 0.58 + 0.08 * j3
+    hue = (math.degrees(theta) + hue_offset + 8.0 * j1) % 360.0
+    return hue, 0.58 + 0.08 * j3, 0.70 + 0.08 * j2
+
+
+def community_rgb(community: int, members: int, cx: float, cy: float,
+                  min_members: int = 1000, hue_offset: float = HUE_OFFSET,
+                  faded: bool = False) -> tuple[float, float, float]:
+    """Community base RGB in [0,1]; deterministic. Big communities take a hue
+    from their centroid's polar angle around the map center (0.5, 0.5), so
+    spatially neighboring communities land on neighboring hues; the tail and
+    near-empty (`faded`, see sparse_communities) communities are dim grey dust."""
+    hue, light, sat = community_hls(community, members, cx, cy, min_members, hue_offset, faded)
     return colorsys.hls_to_rgb(hue / 360.0, light, sat)
+
+
+# Sub-group shades (pipeline/subcommunities.py): each sub-group of a split
+# community is a shade of the community's colour, so the overall palette is
+# unchanged (Eric, 2026-10-11) while neighbouring sub-areas stay tellable
+# apart. Sub-group 0 (the largest) keeps the community's own colour; others
+# step through low-discrepancy offsets within +-SHADE_HUE degrees of hue and
+# +-SHADE_LIGHT of lightness.
+SHADE_HUE = 14.0
+SHADE_LIGHT = 0.08
+SUB_SLOTS = 64          # group key = community * SUB_SLOTS + sub + 1 (sub -1 = unsplit)
+
+
+def shade_hls(hue: float, light: float, sat: float, sub: int) -> tuple[float, float, float]:
+    if sub <= 0 or sat < 0.1:                       # largest sub-group, or grey dust
+        return hue, light, sat
+    u = 2 * ((0.5 + sub * 0.6180339887) % 1.0) - 1
+    v = 2 * ((0.5 + sub * 0.7548776662) % 1.0) - 1
+    return (hue + SHADE_HUE * u) % 360.0, min(0.78, max(0.40, light + SHADE_LIGHT * v)), sat
+
+
+def group_key(community: int, sub: int) -> int:
+    return int(community) * SUB_SLOTS + int(sub) + 1
+
+
+def group_key_sql(community: str = "community", sub: str = "sub") -> str:
+    return f"(CAST({community} AS BIGINT) * {SUB_SLOTS} + coalesce({sub}, -1) + 1)"
+
+
+def not_dust_sql(con, path: str, prefix: str = "") -> str:
+    """SQL predicate keeping coloured authors: coords_web's is_dust (outer
+    ring, small and near-empty communities) when present, else is_ring."""
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{path}')").fetchall()}
+    if "is_dust" in cols:
+        return f"NOT {prefix}is_dust"
+    return f"NOT {prefix}is_ring" if "is_ring" in cols else "TRUE"
+
+
+def group_key_expr(con, path: str, prefix: str = "") -> str:
+    """SQL for a row's colour key in `path` (coords_web); files written before
+    sub-groups existed have no `sub` column. `prefix` qualifies the columns,
+    e.g. "p0." inside a join."""
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{path}')").fetchall()}
+    return group_key_sql(f"{prefix}community", f"{prefix}sub" if "sub" in cols else "NULL")
+
+
+# Near-empty ("sparse") communities fade to dust like the outer ring (Eric,
+# 2026-10-11): most members list no institution and are barely cited. In the
+# 2026-09-23 release these are Japanese/Chinese/Persian-language records
+# (~322k authors) whose topic is OpenAlex's fallback "Legal and Regulatory
+# Analysis"; they are real records but carry no field or citation signal.
+SPARSE_NO_INSTITUTION = 0.75   # share of members without an institution
+SPARSE_MEDIAN_CITED = 10       # and median citations at or below this
+
+
+def sparse_communities(con, path: str, min_members: int = 1000) -> set[int]:
+    """Communities of at least min_members that are near-empty records.
+    `path` is coords.parquet or coords_web.parquet (both carry community,
+    institution and cited_by_count)."""
+    rows = con.execute(
+        f"""SELECT community FROM read_parquet('{path}')
+            WHERE community IS NOT NULL
+            GROUP BY community
+            HAVING count(*) >= {int(min_members)}
+               AND avg((institution IS NULL)::INTEGER) >= {SPARSE_NO_INSTITUTION}
+               AND median(cited_by_count) <= {SPARSE_MEDIAN_CITED}"""
+    ).fetchall()
+    return {int(c) for (c,) in rows}
 
 
 def load_community_stats(con, web_path: str) -> list[tuple[int, str | None, int, float, float]]:
@@ -106,7 +191,36 @@ def load_community_stats(con, web_path: str) -> list[tuple[int, str | None, int,
 def build_community_palette(con, web_path: str,
                             min_members: int = 1000) -> dict[int, tuple]:
     stats = load_community_stats(con, web_path)
-    return {c: community_rgb(c, n, cx, cy, min_members) for c, f, n, cx, cy in stats}
+    faded = sparse_communities(con, web_path, min_members)
+    return {c: community_rgb(c, n, cx, cy, min_members, faded=c in faded)
+            for c, f, n, cx, cy in stats}
+
+
+def build_group_palette(con, web_path: str, min_members: int = 1000,
+                        stats=None) -> dict[int, tuple]:
+    """group_key(community, sub) -> RGB in [0,1] for every community and every
+    sub-group present in coords_web (needs its `sub` column)."""
+    stats = stats if stats is not None else load_community_stats(con, web_path)
+    faded = sparse_communities(con, web_path, min_members)
+    hls = {c: community_hls(c, n, cx, cy, min_members, faded=c in faded)
+           for c, f, n, cx, cy in stats}
+    pal = {group_key(c, -1): colorsys.hls_to_rgb(h / 360.0, l, s) for c, (h, l, s) in hls.items()}
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{web_path}')").fetchall()}
+    pairs = con.execute(f"""SELECT DISTINCT community, sub FROM read_parquet('{web_path}')
+                            WHERE sub >= 0""").fetchall() if "sub" in cols else []
+    for c, sub in pairs:
+        h, l, s = shade_hls(*hls[int(c)], int(sub))
+        pal[group_key(c, sub)] = colorsys.hls_to_rgb(h / 360.0, l, s)
+    return pal
+
+
+def group_rgb_u8(pal: dict[int, tuple], keys, default=(0.35, 0.35, 0.35)):
+    """Vectorised palette lookup: group keys -> (n, 3) uint8."""
+    import numpy as np
+    keys = np.asarray(keys, dtype=np.int64)
+    uniq, inv = np.unique(keys, return_inverse=True)
+    lut = np.array([pal.get(int(k), default) for k in uniq], dtype=np.float64).reshape(-1, 3)
+    return np.round(lut * 255).clip(0, 255).astype(np.uint8)[inv.reshape(-1)]
 
 
 def add_parser(parser) -> None:  # not a CLI stage; keeps import-shape uniform

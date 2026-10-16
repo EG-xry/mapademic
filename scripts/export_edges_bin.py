@@ -19,9 +19,10 @@ color LUT (same min_members=1000 rule as the legend and the point cloud):
 each endpoint gets its own community color, or the shared tail grey if its
 community is below threshold.
 
-If the exported pair exceeds 300MB combined, a capped companion pair
-(edges_pos_top.bin/edges_attr_top.bin) holding the top 3,000,000 edges by
-weight is also written, since the export is already ordered heaviest-first.
+Strongest-first tier files (edges_{pos,attr}_1m.bin, _3m.bin) are written
+as literal prefixes of the full pair, since the export is already ordered
+heaviest-first; web/dev.html's EDGE_TIERS fetches the smallest tier covering
+its Line count slider (1M is the default first download).
 """
 import argparse
 import json
@@ -32,16 +33,18 @@ import duckdb
 import numpy as np
 
 from pipeline.config import apply_resource_limits, data_dir
-from scripts.export_points_bin import SIZE_SCALE, _build_color_lut
+from pipeline.palette import group_key_expr, group_rgb_u8
+from scripts.export_points_bin import GREY_RGB, SIZE_SCALE, _color_palette
 
 QUANT = 65535        # xw,yw uint16 quantization scale (round(v * QUANT))
 MIN_WEIGHT = 2        # repeat-collaboration threshold
 WEIGHT_CAP = 20        # weight clamp before scaling to uint8
-TOP_CAP_BYTES = 300 * 1024 * 1024   # combined-size trigger for capped companion
-TOP_CAP_EDGES = 3_000_000            # size of the capped companion pair
+# name -> edge count; names are the file suffixes web/dev.html's EDGE_TIERS fetch
+TIERS = {"1m": 1_000_000, "3m": 3_000_000}
 
 
-def export_edges(edges_path: str, web_path: str, out_dir: Path, sample: int | None = None) -> dict:
+def export_edges(edges_path: str, web_path: str, out_dir: Path, sample: int | None = None,
+                 tiers: dict[str, int] | None = None) -> dict:
     """Core export: builds edges_pos.bin, edges_attr.bin, meta.json under out_dir.
 
     Deterministic ordering: weight DESC, src, dst. --sample takes the
@@ -52,20 +55,21 @@ def export_edges(edges_path: str, web_path: str, out_dir: Path, sample: int | No
     con = duckdb.connect()
     apply_resource_limits(con)
 
-    lut = _build_color_lut(con, web_path)
+    pal = _color_palette(con, web_path)
+    gkey = group_key_expr(con, web_path)
 
     limit_clause = f"LIMIT {int(sample)}" if sample else ""
     cols = con.execute(
         f"""SELECT e.weight AS weight,
                    CAST(p0.xw AS DOUBLE) AS xw0, CAST(p0.yw AS DOUBLE) AS yw0,
                    CAST(p1.xw AS DOUBLE) AS xw1, CAST(p1.yw AS DOUBLE) AS yw1,
-                   p0.community AS community0, p1.community AS community1,
+                   p0.gkey AS gkey0, p1.gkey AS gkey1,
                    p0.cited_by_count AS cited0, p1.cited_by_count AS cited1
             FROM read_parquet('{edges_path}') e
-            JOIN (SELECT id, xw, yw, community, cited_by_count
+            JOIN (SELECT id, xw, yw, {gkey} AS gkey, cited_by_count
                   FROM read_parquet('{web_path}') WHERE NOT is_ring) p0
               ON p0.id = e.src
-            JOIN (SELECT id, xw, yw, community, cited_by_count
+            JOIN (SELECT id, xw, yw, {gkey} AS gkey, cited_by_count
                   FROM read_parquet('{web_path}') WHERE NOT is_ring) p1
               ON p1.id = e.dst
             WHERE e.weight >= {MIN_WEIGHT}
@@ -84,10 +88,8 @@ def export_edges(edges_path: str, web_path: str, out_dir: Path, sample: int | No
     positions[:, 2] = quant(cols["xw1"])
     positions[:, 3] = quant(cols["yw1"])
 
-    community0 = np.clip(cols["community0"].astype(np.int64), 0, lut.shape[0] - 1)
-    community1 = np.clip(cols["community1"].astype(np.int64), 0, lut.shape[0] - 1)
-    rgb0 = lut[community0]  # (n, 3) uint8
-    rgb1 = lut[community1]  # (n, 3) uint8
+    rgb0 = group_rgb_u8(pal, cols["gkey0"], default=GREY_RGB)  # (n, 3) uint8
+    rgb1 = group_rgb_u8(pal, cols["gkey1"], default=GREY_RGB)
 
     weight = cols["weight"].astype(np.float64)
     w = np.clip(np.round(np.clip(weight, 0, WEIGHT_CAP) / WEIGHT_CAP * 255), 0, 255).astype(np.uint8)
@@ -115,21 +117,15 @@ def export_edges(edges_path: str, web_path: str, out_dir: Path, sample: int | No
         "edges_attr.bin": "uint8 r0,g0,b0,r1,g1,b1,w,s per edge (8 bytes/edge)",
     }
 
-    total_bytes = pos_path.stat().st_size + attr_path.stat().st_size
-    capped = total_bytes > TOP_CAP_BYTES and n > TOP_CAP_EDGES
-    if capped:
-        top_pos_path = out_dir / "edges_pos_top.bin"
-        top_attr_path = out_dir / "edges_attr_top.bin"
-        positions[:TOP_CAP_EDGES].tofile(top_pos_path)
-        attrs[:TOP_CAP_EDGES].tofile(top_attr_path)
-        files["pos_top"] = "edges_pos_top.bin"
-        files["attr_top"] = "edges_attr_top.bin"
-        layout["edges_pos_top.bin"] = (
-            f"top {TOP_CAP_EDGES:,} edges by weight, same layout as edges_pos.bin (viewer default)"
-        )
-        layout["edges_attr_top.bin"] = (
-            f"top {TOP_CAP_EDGES:,} edges by weight, same layout as edges_attr.bin (viewer default)"
-        )
+    subsets = {}
+    for name, size in (TIERS if tiers is None else tiers).items():
+        k = min(n, size)
+        positions[:k].tofile(out_dir / f"edges_pos_{name}.bin")
+        attrs[:k].tofile(out_dir / f"edges_attr_{name}.bin")
+        files[f"pos_{name}"] = f"edges_pos_{name}.bin"
+        files[f"attr_{name}"] = f"edges_attr_{name}.bin"
+        subsets[name] = int(k)
+    subsets["full"] = int(n)
 
     meta = {
         "count": int(n),
@@ -143,14 +139,8 @@ def export_edges(edges_path: str, web_path: str, out_dir: Path, sample: int | No
             f"WHERE e.weight >= {MIN_WEIGHT} (repeat-collaboration set, no length filter) "
             "AND NOT is_ring on both endpoints (dust edges excluded)"
         ),
+        "subsets": subsets,
     }
-    if capped:
-        meta["top_cap_edges"] = TOP_CAP_EDGES
-        meta["top_cap_note"] = (
-            "combined edges_pos.bin+edges_attr.bin exceeded 300MB; "
-            f"capped companion pair holds the top {TOP_CAP_EDGES:,} edges by weight "
-            "(viewer defaults to this pair)"
-        )
     (out_dir / "edges_meta.json").write_text(json.dumps(meta, indent=2))
     return meta
 
@@ -178,13 +168,7 @@ def main() -> int:
         f"{meta['count']:,} edges -> {out} in {elapsed:.1f}s "
         f"(edges_pos.bin {pos_size:,}B, edges_attr.bin {attr_size:,}B)"
     )
-    if "pos_top" in meta["files"]:
-        top_pos_size = (out / "edges_pos_top.bin").stat().st_size
-        top_attr_size = (out / "edges_attr_top.bin").stat().st_size
-        msg += (
-            f"; capped top {meta['top_cap_edges']:,} -> edges_pos_top.bin {top_pos_size:,}B, "
-            f"edges_attr_top.bin {top_attr_size:,}B"
-        )
+    msg += "; tiers " + ", ".join(f"{k} {v:,}" for k, v in meta["subsets"].items())
     print(msg)
     return 0
 

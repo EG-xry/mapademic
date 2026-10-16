@@ -1,131 +1,344 @@
-"""Auto-name the largest communities from their members' dominant topics."""
+"""Name the map's regions (communities) and their sub-areas (sub-groups).
+
+Level 1, a community: its field(s), then the country when the country is a
+reason for the cluster, e.g. "Medicine (Italy)" but "Computer Science &
+Engineering" for an international field (Eric, 2026-10-10). Coauthorship
+clusters split by country because clinical research is organised nationally:
+in 2026-09-23, 81 to 93 percent of Italian, French, Spanish, Dutch, Polish
+and Russian medical researchers sit in their own country's cluster, but
+only 5 to 9 percent of their physicists. China and Japan form whole national science systems. Kind
+"national" or "field" sections the legend.
+
+Level 2, a sub-group of a split community (pipeline/subcommunities.py): the
+OpenAlex subfields over-represented in it relative to its community, then a
+country when one other than the community's own dominates it, e.g.
+"Cardiology & Surgery" or "Medicine (UK)" inside the US-led medicine region.
+
+The old names were the single most distinctive OpenAlex topic (of ~4,500),
+typically held by about 1 percent of a community, so "Battery Materials" labelled China
+and "Legal and Regulatory Analysis" labelled Japan. Near-empty communities
+(palette.sparse_communities) fade to dust and get no name. regions.json is
+data: hand-edit freely.
+"""
 import glob as globmod
 import json
+import math
 import os
 from pathlib import Path
 
 import duckdb
 
+from pipeline import config
 from pipeline.config import apply_resource_limits, data_dir
+from pipeline.palette import sparse_communities
 
-DEFAULT_AUTHORS = "/Volumes/Untitled/mapademic/snapshot/authors/*/*.parquet"
+# OpenAlex's topic classifier gives non-English records (Japanese, Chinese,
+# Korean, Russian, Persian titles) this topic wholesale; it says nothing
+# about their field, so those authors are left out of field and subfield
+# shares.
+FALLBACK_TOPIC = "Legal and Regulatory Analysis"
 
-# distinctive-topic candidates kept per community for greedy unique naming
-CANDIDATES_PER_COMMUNITY = 5
+# level 1: field part
+MULTI_BELOW = 0.28      # top field under this share -> "Multidisciplinary"
+EXTRA_FIELD = 0.15      # further fields need this share ...
+EXTRA_FIELD_REL = 0.4   # ... and this fraction of the top field's share (max 3 fields)
+# level 1: country part, from members with a known institution country
+COUNTRY_SHARE, COUNTRY_LIFT = 0.12, 4.0         # a country qualifies at >= 12% and 4x its map share,
+SMALL_SHARE, SMALL_LIFT = 0.07, 10.0            # or >= 7% and 10x (language areas: Spain + Mexico)
+COUNTRY_TOTAL = 0.45                            # qualifying countries (max 3) must hold 45% together
+# level 2
+SUB_LIFT = 2.0          # subfield over-represented at least 2x vs its community ...
+SUB_SHARE = 0.05        # ... with 5% of the sub-group, or
+SUB_SHARE_RARE, SUB_LIFT_RARE = 0.02, 8.0       # 2% at 8x (dentistry is split over 3 subfields)
+SUB_MIN_COUNT = 20
+SUB_COUNTRY_FIRST, SUB_COUNTRY_NEXT = 0.12, 0.08
+LABEL_PX = 60           # a sub-area's label shows once its spread is this many pixels
+
+FIELD_LABELS = {
+    "Biochemistry, Genetics and Molecular Biology": "Molecular Biology",
+    "Arts and Humanities": "Humanities", "Physics and Astronomy": "Physics & Astronomy",
+    "Agricultural and Biological Sciences": "Biology & Agriculture",
+    "Earth and Planetary Sciences": "Earth Sciences",
+    "Business, Management and Accounting": "Business",
+    "Economics, Econometrics and Finance": "Economics",
+    "Immunology and Microbiology": "Immunology & Microbiology",
+    "Veterinary": "Veterinary Science", "Pharmacology, Toxicology and Pharmaceutics": "Pharmacology",
+}
+SUBFIELD_LABELS = {
+    "Cellular and Molecular Neuroscience": "Neuroscience",
+    "Public Health, Environmental and Occupational Health": "Public Health",
+    "Cardiology and Cardiovascular Medicine": "Cardiology",
+    "Pulmonary and Respiratory Medicine": "Respiratory Medicine",
+    "Pediatrics, Perinatology and Child Health": "Pediatrics",
+    "Radiology, Nuclear Medicine and Imaging": "Radiology",
+    "Obstetrics and Gynecology": "Obstetrics & Gynecology",
+    "Orthopedics and Sports Medicine": "Orthopedics", "Psychiatry and Mental health": "Psychiatry",
+    "Endocrinology, Diabetes and Metabolism": "Endocrinology",
+    "Pathology and Forensic Medicine": "Pathology", "General Health Professions": "Health Professions",
+    "Health, Toxicology and Mutagenesis": "Toxicology", "Animal Science and Zoology": "Animal Science",
+    "Agronomy and Crop Science": "Agronomy", "Industrial and Manufacturing Engineering": "Manufacturing",
+    "Electrical and Electronic Engineering": "Electrical Engineering",
+    "Developmental and Educational Psychology": "Developmental Psychology",
+    "Political Science and International Relations": "Political Science",
+    "Computer Vision and Pattern Recognition": "Computer Vision",
+    "Computer Networks and Communications": "Computer Networks",
+    "Artificial Intelligence": "AI", "Ecology, Evolution, Behavior and Systematics": "Ecology & Evolution",
+    "Nutrition and Dietetics": "Nutrition", "Management, Monitoring, Policy and Law": "Environmental Policy",
+    "Renewable Energy, Sustainability and the Environment": "Renewable Energy",
+    "Atomic and Molecular Physics, and Optics": "Optics",
+    "Nuclear and High Energy Physics": "High Energy Physics",
+    "Astronomy and Astrophysics": "Astronomy", "Condensed Matter Physics": "Condensed Matter",
+    "Materials Chemistry": "Materials Chemistry", "Electronic, Optical and Magnetic Materials": "Electronic Materials",
+    "Surfaces, Coatings and Films": "Surfaces & Coatings", "Mechanics of Materials": "Materials Mechanics",
+    "Statistics, Probability and Uncertainty": "Statistics",
+    "Earth-Surface Processes": "Earth Surface", "Global and Planetary Change": "Climate Change",
+    "Economics and Econometrics": "Economics", "Sociology and Political Science": "Sociology",
+    "Language and Linguistics": "Linguistics", "Literature and Literary Theory": "Literature",
+    "Library and Information Sciences": "Information Science",
+    "Molecular Biology": "Molecular Biology", "Infectious Diseases": "Infectious Diseases",
+    "Organizational Behavior and Human Resource Management": "Organizational Behavior",
+    "Strategy and Management": "Management", "Civil and Structural Engineering": "Civil Engineering",
+    "Control and Systems Engineering": "Control Engineering", "Statistics and Probability": "Statistics",
+    "Linguistics and Language": "Linguistics", "Safety, Risk, Reliability and Quality": "Safety & Reliability",
+    "Building and Construction": "Construction", "Polymers and Plastics": "Polymers",
+    "General Social Sciences": "Social Sciences", "Religious studies": "Religious Studies",
+    "Ocean Engineering": "Ocean Engineering", "Aerospace Engineering": "Aerospace Engineering",
+    "Fluid Flow and Transfer Processes": "Fluid Dynamics", "Process Chemistry and Technology": "Process Chemistry",
+    "Physical and Theoretical Chemistry": "Physical Chemistry", "Spectroscopy": "Spectroscopy",
+    "Computational Theory and Mathematics": "Theory of Computation",
+    "Hardware and Architecture": "Computer Hardware", "Human-Computer Interaction": "HCI",
+    "Information Systems and Management": "Information Systems", "Media Technology": "Media",
+    "Geography, Planning and Development": "Geography & Planning", "Waste Management and Disposal": "Waste Management",
+    "Water Science and Technology": "Water Science", "Environmental Chemistry": "Environmental Chemistry",
+    "Food Science": "Food Science", "Horticulture": "Horticulture", "Insect Science": "Entomology",
+    "Aquatic Science": "Aquatic Science", "Forestry": "Forestry", "Soil Science": "Soil Science",
+    "Plant Science": "Plant Science", "Cancer Research": "Cancer Research", "Hepatology": "Hepatology",
+    "Physical Therapy, Sports Therapy and Rehabilitation": "Rehabilitation",
+    "Otorhinolaryngology": "ENT", "Emergency Medicine": "Emergency Medicine",
+    "Critical Care and Intensive Care Medicine": "Intensive Care", "Anesthesiology and Pain Medicine": "Anesthesiology",
+    "Reproductive Medicine": "Reproductive Medicine", "Health Information Management": "Health Informatics",
+    "Biomedical Engineering": "Biomedical Engineering", "Clinical Biochemistry": "Clinical Biochemistry",
+    "Experimental and Cognitive Psychology": "Experimental Psychology",
+    "Social Psychology": "Social Psychology", "Applied Psychology": "Applied Psychology",
+    "Visual Arts and Performing Arts": "Arts", "Philosophy": "Philosophy", "Archeology": "Archaeology",
+    "Classics": "Classics", "Conservation": "Conservation", "Museology": "Museum Studies",
+}
+COUNTRY_NAMES = {
+    "US": "US", "GB": "UK", "CN": "China", "JP": "Japan", "KR": "South Korea", "TW": "Taiwan",
+    "HK": "Hong Kong", "SG": "Singapore", "IN": "India", "PK": "Pakistan", "BD": "Bangladesh",
+    "MY": "Malaysia", "ID": "Indonesia", "TH": "Thailand", "VN": "Vietnam", "PH": "Philippines",
+    "IR": "Iran", "IQ": "Iraq", "SA": "Saudi Arabia", "AE": "UAE", "QA": "Qatar", "JO": "Jordan",
+    "IL": "Israel", "TR": "Turkey", "EG": "Egypt", "MA": "Morocco", "DZ": "Algeria", "TN": "Tunisia",
+    "NG": "Nigeria", "GH": "Ghana", "KE": "Kenya", "ET": "Ethiopia", "ZA": "South Africa",
+    "FR": "France", "BE": "Belgium", "NL": "Netherlands", "LU": "Luxembourg", "DE": "Germany",
+    "AT": "Austria", "CH": "Switzerland", "IT": "Italy", "ES": "Spain", "PT": "Portugal",
+    "IE": "Ireland", "DK": "Denmark", "SE": "Sweden", "NO": "Norway", "FI": "Finland",
+    "IS": "Iceland", "EE": "Estonia", "LV": "Latvia", "LT": "Lithuania", "PL": "Poland",
+    "CZ": "Czechia", "SK": "Slovakia", "HU": "Hungary", "RO": "Romania", "BG": "Bulgaria",
+    "GR": "Greece", "CY": "Cyprus", "SI": "Slovenia", "HR": "Croatia", "RS": "Serbia",
+    "BA": "Bosnia", "MK": "North Macedonia", "ME": "Montenegro", "AL": "Albania", "UA": "Ukraine",
+    "BY": "Belarus", "RU": "Russia", "KZ": "Kazakhstan", "GE": "Georgia", "AM": "Armenia",
+    "AZ": "Azerbaijan", "CA": "Canada", "MX": "Mexico", "CU": "Cuba", "CO": "Colombia",
+    "VE": "Venezuela", "EC": "Ecuador", "PE": "Peru", "CL": "Chile", "AR": "Argentina",
+    "UY": "Uruguay", "BR": "Brazil", "AU": "Australia", "NZ": "New Zealand",
+}
 
 
-def _assign_unique_names(comm_rows, candidates):
-    """Greedy: in community size-rank order (biggest first), each community
-    takes its highest-scoring candidate topic not already claimed by a bigger
-    community. If all candidates are taken, fall back to a rank-suffixed name so
-    every kept region gets a distinct label. Deterministic given ordered input."""
-    taken: set = set()
-    names: dict = {}
-    for community, _members, _xw, _yw, _spread, rank in comm_rows:
-        chosen = None
-        for topic in candidates.get(community, []):
-            if topic not in taken:
-                chosen = topic
-                break
-        if chosen is None:
-            base = (candidates.get(community) or ["Unnamed"])[0] or "Unnamed"
-            suffix = rank
-            chosen = f"{base} ({suffix})"
-            while chosen in taken:               # base+rank is already unique per
-                suffix += 1                      # community; loop only guards the
-                chosen = f"{base} ({suffix})"    # astronomically-unlikely collision
-        taken.add(chosen)
-        names[community] = chosen
-    return names
+def _lab(name: str, table: dict) -> str:
+    if table is SUBFIELD_LABELS and name.startswith("General ") and name not in table:
+        return _lab(name[len("General "):], FIELD_LABELS)   # OpenAlex's per-field catch-all subfield
+    return table.get(name, name)
+
+
+def field_label(fields: list[tuple[str, float]]) -> str:
+    """[(field, share)] by share desc -> "A", "A & B", "A, B & C" or "Multidisciplinary"."""
+    if not fields:
+        return "Unclassified"
+    top, s1 = fields[0]
+    if s1 < MULTI_BELOW:
+        return "Multidisciplinary"
+    parts = [_lab(top, FIELD_LABELS)] + [_lab(f, FIELD_LABELS) for f, s in fields[1:3]
+                                         if s >= EXTRA_FIELD and s >= EXTRA_FIELD_REL * s1]
+    if len(parts) == 1:
+        return parts[0]
+    flat = [w for p in parts for w in p.split(" & ")]        # "Biology & Agriculture" joins the list
+    return ", ".join(flat[:-1]) + " & " + flat[-1]
+
+
+def country_label(countries: list[tuple[str, float, float]]) -> str | None:
+    """[(code, share, lift)] by share desc -> "Japan", "Spain, Mexico, Argentina" or None."""
+    picked, total = [], 0.0
+    for cc, s, lift in countries:
+        if len(picked) < 3 and ((s >= COUNTRY_SHARE and lift >= COUNTRY_LIFT)
+                                or (s >= SMALL_SHARE and lift >= SMALL_LIFT)):
+            picked.append(cc); total += s
+    return ", ".join(_lab(c, COUNTRY_NAMES) for c in picked) if picked and total >= COUNTRY_TOTAL else None
+
+
+def sub_label(subfields: list[tuple[str, float, float]], countries: list[tuple[str, float]],
+              parent_country: str | None, parent_field: str, topic: str | None) -> str:
+    """Level-2 name. subfields: [(subfield, share, lift vs community)] best first."""
+    picked = [_lab(sf, SUBFIELD_LABELS) for sf, s, lift in subfields
+              if lift >= SUB_LIFT and (s >= SUB_SHARE or (s >= SUB_SHARE_RARE and lift >= SUB_LIFT_RARE))][:2]
+    country = None
+    if countries and countries[0][0] != parent_country:
+        chosen, total = [], 0.0
+        for cc, s in countries:
+            if len(chosen) < 3 and cc != parent_country and s >= (SUB_COUNTRY_NEXT if chosen else SUB_COUNTRY_FIRST):
+                chosen.append(cc); total += s
+        if total >= COUNTRY_TOTAL:
+            country = ", ".join(_lab(c, COUNTRY_NAMES) for c in chosen)
+    picked = list(dict.fromkeys(picked))            # "Linguistics" twice after shortening
+    if picked:
+        # "Obstetrics & Gynecology, Pediatrics" rather than a run of ampersands
+        base = (", " if any(" & " in p for p in picked) else " & ").join(picked)
+    elif country:
+        base = parent_field
+    else:
+        base = topic or parent_field
+    return f"{base} ({country})" if country else base
+
+
+def _unique(name: str, taken: set, extras: list[str], rank: int) -> str:
+    for cand in [name] + [f"{name}: {t}" for t in extras]:
+        if cand not in taken:
+            return cand
+    k = rank
+    while f"{name} ({k})" in taken:
+        k += 1
+    return f"{name} ({k})"
+
+
+def _need(pattern: str, what: str, how: str) -> str:
+    if not globmod.glob(pattern):
+        raise SystemExit(f"{what} not found at {pattern!r} - {how}")
+    return pattern
 
 
 def build_regions(webcoords_path: str, authors_glob: str, out_path: str,
-                  top_n: int = 300, keep: int = 120) -> int:
-    if not globmod.glob(authors_glob):
-        raise SystemExit(
-            f"authors snapshot not found at {authors_glob!r} - plug in the "
-            "external drive or pass --authors <glob>"
-        )
+                  institutions_glob: str, topics_glob: str,
+                  top_n: int = 300, keep: int = 120, fade_min: int = 1000) -> int:
+    _need(authors_glob, "authors snapshot",
+          "run `python -m pipeline authors` (or `download`), or pass --authors <glob>")
+    _need(institutions_glob, "institutions table",
+          "run `python -m pipeline download --entities institutions topics`")
+    _need(topics_glob, "topics table",
+          "run `python -m pipeline download --entities institutions topics`")
     con = duckdb.connect()
     apply_resource_limits(con)
-    # top_n communities by size define the distinctiveness scope; rank them and
-    # keep the biggest `keep` for output.
-    con.execute(
-        f"""
-        CREATE TEMP TABLE comms AS
-        WITH top_comms AS (
-            SELECT community, count(*) AS members,
-                   avg(xw) AS xw, avg(yw) AS yw,
-                   sqrt(var_pop(xw) + var_pop(yw)) AS spread
-            FROM read_parquet('{webcoords_path}')
-            GROUP BY community
-            ORDER BY members DESC, community
-            LIMIT {int(top_n)}
-        )
-        SELECT community, members, xw, yw, spread,
-               row_number() OVER (ORDER BY members DESC, community) AS rank
-        FROM top_comms
-        """
-    )
-    # per-community distinctive-topic ranking over the top_n scope
-    con.execute(
-        f"""
-        CREATE TEMP TABLE best AS
-        WITH member_topics AS (
-            SELECT w.community, a.topics[1].display_name AS topic
-            FROM read_parquet('{webcoords_path}') w
-            JOIN read_parquet('{authors_glob}') a ON a.id = w.id
-            JOIN comms c ON c.community = w.community
-            WHERE a.topics[1].display_name IS NOT NULL
-        ),
-        topic_global AS (
-            SELECT topic, count(*) AS g FROM member_topics GROUP BY topic
-        ),
-        scored AS (
-            SELECT mt.community, mt.topic, count(*) AS c,
-                   count(*) * ln((SELECT count(*) FROM member_topics) * 1.0
-                                 / tg.g) AS score
-            FROM member_topics mt JOIN topic_global tg ON tg.topic = mt.topic
-            GROUP BY mt.community, mt.topic, tg.g
-        )
-        SELECT community, topic,
-               row_number() OVER (PARTITION BY community
-                                  ORDER BY score DESC, c DESC, topic) AS rn
-        FROM scored
-        """
-    )
-    comm_rows = con.execute(
-        f"SELECT community, members, xw, yw, spread, rank FROM comms "
-        f"WHERE rank <= {int(keep)} ORDER BY rank"
-    ).fetchall()
-    cand_rows = con.execute(
-        f"""SELECT c.rank, b.community, b.topic
-            FROM best b JOIN comms c ON c.community = b.community
-            WHERE c.rank <= {int(keep)}
-              AND b.rn <= {int(CANDIDATES_PER_COMMUNITY)}
-            ORDER BY c.rank, b.rn"""
-    ).fetchall()
-    candidates: dict = {}
-    for _rank, community, topic in cand_rows:
-        candidates.setdefault(community, []).append(topic)
-    names = _assign_unique_names(comm_rows, candidates)
-    regions = []
-    for community, members, xw, yw, spread, rank in comm_rows:
-        regions.append({
-            "name": names[community], "xw": xw, "yw": yw,
-            "spread": spread, "members": members, "rank": rank,
-            "community": community,
-            "zmin": 2 if rank <= 30 else 4,
-            "zmax": 4 if rank <= 30 else 6,
-        })
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{webcoords_path}')").fetchall()}
+    sub_col = "coalesce(w.sub, -1)" if "sub" in cols else "-1"
+    ring = "WHERE NOT w.is_ring" if "is_ring" in cols else ""
+    con.execute(f"""CREATE TEMP TABLE ic AS SELECT display_name, mode(country_code) AS cc
+                    FROM read_parquet('{institutions_glob}') WHERE country_code IS NOT NULL GROUP BY 1""")
+    con.execute(f"""CREATE TEMP TABLE tp AS SELECT display_name, mode(subfield.display_name) AS subfield
+                    FROM read_parquet('{topics_glob}') GROUP BY 1""")
+    con.execute(f"""CREATE TEMP TABLE m AS
+        SELECT w.community, {sub_col} AS sub, CAST(w.xw AS DOUBLE) AS xw, CAST(w.yw AS DOUBLE) AS yw,
+               ic.cc, t.topic,
+               CASE WHEN t.topic = '{FALLBACK_TOPIC}' THEN NULL ELSE w.field END AS field,
+               CASE WHEN t.topic = '{FALLBACK_TOPIC}' THEN NULL ELSE tp.subfield END AS subfield
+        FROM read_parquet('{webcoords_path}') w
+        LEFT JOIN ic ON ic.display_name = w.institution
+        LEFT JOIN (SELECT id, topics[1].display_name AS topic FROM read_parquet('{authors_glob}')) t
+               ON t.id = w.id
+        LEFT JOIN tp ON tp.display_name = t.topic
+        {ring}""")
+    faded = sparse_communities(con, webcoords_path, min_members=fade_min)
+    comms = con.execute(f"""
+        SELECT community, count(*) AS members, avg(xw), avg(yw), sqrt(var_pop(xw) + var_pop(yw))
+        FROM m GROUP BY community ORDER BY members DESC, community LIMIT {int(top_n)}""").fetchall()
+    ranked = [(int(c), int(n), x, y, s or 0.0, r + 1) for r, (c, n, x, y, s) in enumerate(comms)]
+    named = [row for row in ranked if row[5] <= keep and row[0] not in faded]
+    ids = ",".join(str(r[0]) for r in named) or "NULL"
+
+    def shares(col: str, by: str, extra: str = "") -> dict:
+        out: dict = {}
+        for *key, v, k in con.execute(
+                f"""SELECT {by}, {col}, count(*) FROM m WHERE {col} IS NOT NULL AND community IN ({ids}) {extra}
+                    GROUP BY ALL ORDER BY count(*) DESC, {col}""").fetchall():
+            out.setdefault(tuple(key), []).append((v, k))
+        return {key: [(v, k / sum(c for _, c in vals)) for v, k in vals] for key, vals in out.items()}
+
+    world = dict(con.execute("SELECT cc, count(*) * 1.0 / sum(count(*)) OVER () FROM m "
+                             "WHERE cc IS NOT NULL GROUP BY 1").fetchall())
+    fields, countries = shares("field", "community"), shares("cc", "community")
+    topics = shares("topic", "community", f"AND topic <> '{FALLBACK_TOPIC}'")
+    regions, taken, top_country, label_of = [], set(), {}, {}
+    for c, n, x, y, spread, rank in named:
+        cl = [(cc, s, s / world.get(cc, 1e-9)) for cc, s in countries.get((c,), [])]
+        fl = field_label(fields.get((c,), []))
+        country = country_label(cl)
+        top_country[c] = cl[0][0] if cl else None
+        label_of[c] = fl
+        name = _unique(f"{fl} ({country})" if country else fl, taken,
+                       [t for t, _ in topics.get((c,), [])[:3]], rank)
+        taken.add(name)
+        regions.append({"name": name, "kind": "national" if country else "field",
+                        "xw": x, "yw": y, "spread": spread, "members": n, "rank": rank,
+                        "community": c, "zmin": 2 if rank <= 30 else 4, "zmax": 4 if rank <= 30 else 6})
+    if "sub" in cols:
+        regions += _sub_regions(con, ids, label_of, top_country, {r["community"]: r["rank"] for r in regions})
     tmp = str(out_path) + ".tmp"
-    Path(tmp).write_text(json.dumps(regions, indent=1))
+    Path(tmp).write_text(json.dumps(regions, indent=1, ensure_ascii=False))
     os.replace(tmp, out_path)
     return len(regions)
 
 
+def _sub_regions(con, ids: str, label_of: dict, top_country: dict, rank_of: dict) -> list[dict]:
+    subs = con.execute(f"""
+        SELECT community, sub, count(*), median(xw), median(yw), sqrt(var_pop(xw) + var_pop(yw))
+        FROM m WHERE sub >= 0 AND community IN ({ids}) GROUP BY 1, 2 ORDER BY 1, 2""").fetchall()
+    if not subs:
+        return []
+    sf = con.execute(f"""
+        WITH s AS (SELECT community, sub, subfield, count(*) c FROM m
+                   WHERE sub >= 0 AND subfield IS NOT NULL AND community IN ({ids}) GROUP BY 1, 2, 3),
+             st AS (SELECT community, sub, sum(c) n FROM s GROUP BY 1, 2),
+             p AS (SELECT community, subfield, sum(c) c FROM s GROUP BY 1, 2),
+             pt AS (SELECT community, sum(c) n FROM p GROUP BY 1)
+        SELECT s.community, s.sub, s.subfield, s.c * 1.0 / st.n AS share,
+               (s.c * 1.0 / st.n) / (p.c * 1.0 / pt.n) AS lift, s.c
+        FROM s JOIN st USING (community, sub) JOIN p USING (community, subfield) JOIN pt USING (community)
+        WHERE s.c >= {SUB_MIN_COUNT}
+        ORDER BY s.community, s.sub, s.c * ln(1 + (s.c * 1.0 / st.n) / (p.c * 1.0 / pt.n)) DESC, s.subfield""").fetchall()
+    subfields: dict = {}
+    for c, s, name, share, lift, _ in sf:
+        subfields.setdefault((c, s), []).append((name, share, lift))
+    cc_rows = con.execute(f"""
+        SELECT community, sub, cc, count(*) * 1.0 / sum(count(*)) OVER (PARTITION BY community, sub)
+        FROM m WHERE sub >= 0 AND cc IS NOT NULL AND community IN ({ids})
+        GROUP BY 1, 2, 3 ORDER BY 1, 2, 4 DESC, 3""").fetchall()
+    ccs: dict = {}
+    for c, s, cc, share in cc_rows:
+        ccs.setdefault((c, s), []).append((cc, share))
+    top_topic = dict(((c, s), t) for c, s, t in con.execute(f"""
+        SELECT community, sub, arg_max(topic, k) FROM (
+            SELECT community, sub, topic, count(*) k FROM m
+            WHERE sub >= 0 AND topic IS NOT NULL AND topic <> '{FALLBACK_TOPIC}' AND community IN ({ids})
+            GROUP BY 1, 2, 3) GROUP BY 1, 2""").fetchall())
+    out, taken = [], {}
+    for c, s, n, x, y, spread in subs:
+        name = sub_label(subfields.get((c, s), []), ccs.get((c, s), []), top_country.get(c),
+                         label_of.get(c, ""), top_topic.get((c, s)))
+        seen = taken.setdefault(c, set())
+        if name in seen:
+            name = _unique(name, seen, [t for t in [top_topic.get((c, s))] if t], s + 1)
+        seen.add(name)
+        zmin = min(8.0, max(3.5, math.log2(LABEL_PX / (512 * max(spread or 0.0, 1e-6)))))
+        out.append({"level": 2, "community": int(c), "sub": int(s), "name": name,
+                    "xw": x, "yw": y, "spread": spread or 0.0, "members": int(n),
+                    "rank": rank_of.get(c), "zmin": round(zmin, 2)})
+    return out
+
+
 def add_parser(parser) -> None:
-    parser.add_argument("--authors", default=DEFAULT_AUTHORS)
+    parser.add_argument("--authors", default=None,
+                        help="authors glob (default: the `authors` extract, else the snapshot mirror)")
+    parser.add_argument("--institutions", default=None,
+                        help="institutions glob (default: <data>/snapshot/institutions/*/*.parquet)")
+    parser.add_argument("--topics", default=None,
+                        help="topics glob (default: <data>/snapshot/topics/*/*.parquet)")
     parser.add_argument("--web", default=None)
     parser.add_argument("--out", default=None)
     parser.add_argument("--top-n", type=int, default=300)
@@ -135,6 +348,11 @@ def add_parser(parser) -> None:
 def run(args) -> int:
     web = args.web or str(data_dir() / "coords_web.parquet")
     out = args.out or str(data_dir() / "regions.json")
-    n = build_regions(web, args.authors, out, top_n=args.top_n, keep=args.keep)
-    print(f"{n} regions named -> {out} (hand-edit freely; it is data)")
+    authors = args.authors or config.authors_glob()
+    snap = data_dir() / "snapshot"
+    n = build_regions(web, authors, out,
+                      args.institutions or str(snap / "institutions" / "*" / "*.parquet"),
+                      args.topics or str(snap / "topics" / "*" / "*.parquet"),
+                      top_n=args.top_n, keep=args.keep)
+    print(f"{n} regions and sub-areas named -> {out} (hand-edit freely; it is data)")
     return 0

@@ -217,3 +217,23 @@ def test_sample_flag_limits_and_keeps_top(tmp_path):
     assert meta["count"] == 5
     assert (out / "edges_pos.bin").stat().st_size == 5 * 8
     assert (out / "edges_attr.bin").stat().st_size == 5 * 8
+
+
+def test_tier_files_are_strongest_first_prefixes(tmp_path):
+    # web/dev.html's EDGE_TIERS fetch edges_{pos,attr}_1m.bin / _3m.bin by
+    # fixed name; they must be literal prefixes of the full pair
+    web = tmp_path / "web.parquet"
+    edges = tmp_path / "edges.parquet"
+    write_web(web, [(f"A{i}", i / 30, 0.5, 1, 10, False) for i in range(21)])
+    write_edges(edges, [(f"A{i}", f"A{i + 1}", i + 2) for i in range(20)])
+    out = tmp_path / "vector_experiment"
+    meta = export_edges(str(edges), str(web), out, tiers={"1m": 4, "3m": 50})
+    full_pos = (out / "edges_pos.bin").read_bytes()
+    full_attr = (out / "edges_attr.bin").read_bytes()
+    assert (out / "edges_pos_1m.bin").read_bytes() == full_pos[:4 * 8]
+    assert (out / "edges_attr_1m.bin").read_bytes() == full_attr[:4 * 8]
+    # a tier larger than the export holds every edge
+    assert (out / "edges_pos_3m.bin").read_bytes() == full_pos
+    assert meta["subsets"] == {"1m": 4, "3m": 20, "full": 20}
+    assert json.loads((out / "edges_meta.json").read_text())["subsets"] == meta["subsets"]
+    assert not list(out.glob("*_top.bin"))

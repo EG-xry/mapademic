@@ -1,7 +1,7 @@
 """Binary author-id export for the full-point-cloud hover fallback (R30).
 
 Standalone experiment script, mirrors export_points_bin.py exactly in source
-table, WHERE NOT is_ring filter, and cited_by_count DESC, id ordering, so row
+table, dust filter (palette.not_dust_sql), and cited_by_count DESC, id ordering, so row
 i here lines up with row i of positions.bin / attrs.bin. Writes a single flat
 little-endian uint64 array under data/vector_experiment/ids.bin -- the
 numeric part of each row's OpenAlex author id (the "A" + digits after
@@ -21,6 +21,7 @@ import duckdb
 import numpy as np
 
 from pipeline.config import apply_resource_limits, data_dir
+from pipeline.palette import not_dust_sql
 
 # Matches both the real data's full "https://openalex.org/A<digits>" ids and
 # bare "A<digits>" ids (used by tests), by taking the trailing A<digits> run.
@@ -51,7 +52,7 @@ def export_ids(web_path: str, out_dir: Path, sample: int | None = None) -> dict:
     rows = con.execute(
         f"""SELECT id
             FROM read_parquet('{web_path}')
-            WHERE NOT is_ring
+            WHERE {not_dust_sql(con, web_path)}
             ORDER BY cited_by_count DESC, id
             {limit_clause}"""
     ).fetchnumpy()["id"]
