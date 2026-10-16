@@ -15,11 +15,13 @@ by [riptideiv](https://github.com/riptideiv); see
 
 ![The whole map, without the dust of loosely connected authors: coauthorship communities colored by their position around the map center, each packed into sub-areas, brightness by author density](docs/map.jpg)
 
-![Connect in the deep-learning neighbourhood: Oriol Vinyals to Alex Krizhevsky through Geoffrey Hinton, each step labelled with a paper the two wrote together](docs/connect.jpg)
+![Connect across economics: Somik Lall to Amy Dittmar through Raghuram Rajan and Henri Servaes, in a straight line from development economics to corporate finance, each step labelled with a paper the two wrote together](docs/connect.jpg)
 
-*Connect in the deep-learning neighbourhood: Oriol Vinyals → Geoffrey Hinton
-("Distilling the Knowledge in a Neural Network") → Alex Krizhevsky ("ImageNet
-classification with deep convolutional neural networks").*
+*Connect across economics: Somik Lall → Raghuram Rajan → Henri Servaes → Amy
+Dittmar. Each researcher sits among their own coauthors, so the path walks
+from the development economists (near Acemoglu, Sen and Stiglitz) to the
+corporate-finance researchers (near Fama, Stulz and Harvey), one shared paper
+per step.*
 
 ## Features
 
