@@ -341,9 +341,11 @@
         <p>Built from the OpenAlex snapshot of 2026-09-23 (CC0): 8.4M
           authors and 366M coauthor links. Source code and method:
           <a href="https://github.com/EG-xry/mapademic" target="_blank" rel="noopener">mapademic on GitHub</a>.
-          Earlier versions of Connect ran on the
+          Connect and the coauthor rays come from
           <a href="https://github.com/riptideiv/academic-degree-of-separation" target="_blank" rel="noopener">academic-degree-of-separation</a>
-          backend.</p>
+          by <a href="https://github.com/riptideiv" target="_blank" rel="noopener">riptideiv</a>,
+          whose backend powered them until October 2026; the search now runs
+          in your browser.</p>
       </section>
       <section>
         <h3>Keyboard shortcuts</h3>
@@ -1666,40 +1668,56 @@ function decodePathList(u8, from, to, node) {
   }
   return Int32Array.from(out);
 }
-// Calls visit(u, list) for each of nodes (distinct) as its list arrives,
-// cached ones first, and stops reading once visit returns true; returns
-// whether it did. Reads already under way finish into the cache.
+// Calls visit(u, list) for each of nodes (distinct) in ascending author
+// number -- whatever order the reads arrive in, so a search gives the same
+// path every time -- and stops reading once visit returns true; returns
+// whether it did. Reads go out in the same order (numbers ascend with byte
+// position), so waiting for the next one in line costs little. Reads already
+// under way when it stops finish into the cache.
 async function eachPathList(meta, nodes, visit) {
-  let stopped = false;
+  const order = Int32Array.from(nodes).sort();
+  const ready = new Map();
   const need = [];
-  for (const u of nodes) {
+  for (const u of order) {
     const list = pathListCache.get(u);
-    if (!list) need.push(u);
-    else if (visit(u, list)) return true;
+    if (list) ready.set(u, list); else need.push(u);
   }
+  let k = 0, stopped = false;
+  const advance = () => {                 // visit every list available, in order
+    while (!stopped && k < order.length && ready.has(order[k])) {
+      const u = order[k++];
+      if (visit(u, ready.get(u))) stopped = true;
+    }
+    return stopped;
+  };
   if (need.length) {
     const spans = (await pathSpans(meta, need)).sort((x, y) => x.start - y.start);
     const chunkOf = byte => meta.chunks.find(c => byte >= c.byte_start && byte < c.byte_start + c.bytes);
     const groups = [];
     for (const s of spans) {
-      if (s.end === s.start) { pathListCache.set(s.u, new Int32Array(0)); continue; }
+      if (s.end === s.start) { const none = new Int32Array(0); pathListCache.set(s.u, none); ready.set(s.u, none); continue; }
       const c = chunkOf(s.start), g = groups[groups.length - 1];
       if (g && g.chunk === c && s.start - g.end <= PATH_RANGE_GAP) { g.end = Math.max(g.end, s.end); g.spans.push(s); }
       else groups.push({ chunk: c, start: s.start, end: s.end, spans: [s] });
     }
-    let stop;
-    const stopping = new Promise(r => { stop = r; });
-    const reads = pooled(groups.map(g => async () => {
-      if (stopped) return;
-      const u8 = await fetchRange(`${PATHS_BASE}/${g.chunk.file}`, g.start - g.chunk.byte_start, g.end - g.chunk.byte_start);
-      for (const s of g.spans) {
-        const list = decodePathList(u8, s.start - g.start, s.end - g.start, s.u);
-        pathListCache.set(s.u, list);
-        pathListCacheLinks += list.length;
-        if (!stopped && visit(s.u, list)) { stopped = true; stop(); }
-      }
-    }));
-    await Promise.race([reads, stopping]);
+    if (!advance()) {
+      let stop;
+      const stopping = new Promise(r => { stop = r; });
+      const reads = pooled(groups.map(g => async () => {
+        if (stopped) return;
+        const u8 = await fetchRange(`${PATHS_BASE}/${g.chunk.file}`, g.start - g.chunk.byte_start, g.end - g.chunk.byte_start);
+        for (const s of g.spans) {
+          const list = decodePathList(u8, s.start - g.start, s.end - g.start, s.u);
+          pathListCache.set(s.u, list);
+          pathListCacheLinks += list.length;
+          ready.set(s.u, list);
+        }
+        if (advance()) stop();
+      }));
+      await Promise.race([reads, stopping]);
+    }
+  } else {
+    advance();
   }
   if (pathListCacheLinks > 4_000_000) { pathListCache.clear(); pathListCacheLinks = 0; }
   return stopped;
@@ -2706,6 +2724,16 @@ async function drawLabels() {
   const entries = lists.filter(Boolean).flatMap(t => t.l);
   entries.sort((a, b) => b[4] - a[4]);          // by citations desc
   const placed = [];                            // screen-space rects
+  // overlay name tags (path hops, the search highlight, coauthor-ray ends)
+  // claim their space first, so no regular label is drawn over them, and
+  // the side panels theirs, so none shows through the gaps between controls
+  const box = map.getContainer().getBoundingClientRect();
+  const claim = el => {
+    const r = el.getBoundingClientRect();
+    if (r.width) placed.push({ x: r.left - box.left + r.width / 2, y: r.top - box.top + r.height / 2, w: r.width + 8, h: r.height + 4 });
+  };
+  map.getContainer().querySelectorAll(".path-label, .coauthor-label").forEach(claim);
+  document.querySelectorAll("#search, #legend").forEach(claim);
   const baseCap = z >= 10 ? 150 : 60;
   const cap = Math.round(baseCap * displaySettings.labelDensity);
   for (const [name, id, xw, yw, cited] of entries) {
