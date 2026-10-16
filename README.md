@@ -6,11 +6,20 @@ is served as a static site: raster tiles plus JSON indexes, rendered in the
 browser by a vanilla-JS MapLibre viewer (`web/dev.html`). No backend is
 required for anything, including Connect, the shortest coauthor path between
 two researchers, which the browser searches with range reads of the
-release's coauthor graph.
+release's coauthor graph. Connect began as an integration of
+[academic-degree-of-separation](https://github.com/riptideiv/academic-degree-of-separation)
+by [riptideiv](https://github.com/riptideiv); see
+[Acknowledgements](#acknowledgements).
 
 **Live map: [mapademic.app](https://mapademic.app)**
 
-![The full map at zoom 4: communities colored by their position around the map center, brightness by author density](docs/map.jpg)
+![The whole map, without the dust of loosely connected authors: coauthorship communities colored by their position around the map center, each packed into sub-areas, brightness by author density](docs/map.jpg)
+
+![Connect in the deep-learning neighbourhood: Oriol Vinyals to Alex Krizhevsky through Geoffrey Hinton, each step labelled with a paper the two wrote together](docs/connect.jpg)
+
+*Connect in the deep-learning neighbourhood: Oriol Vinyals → Geoffrey Hinton
+("Distilling the Knowledge in a Neural Network") → Alex Krizhevsky ("ImageNet
+classification with deep convolutional neural networks").*
 
 ## Features
 
@@ -255,7 +264,8 @@ coauthor list is stored as varint gaps (about 2 bytes per link), split into
 files under Cloudflare's 512MB cacheable-object limit. The viewer's
 bidirectional breadth-first search reads only the lists it expands with HTTP
 Range requests (`cache: "no-store"`, since Chrome serializes requests for one
-URL through its HTTP cache), stops the meeting step at the first meeting, and
+URL through its HTTP cache), visits lists in author order so a pair always
+gets the same path, stops the meeting step at the first meeting, and
 labels each hop with a shared paper from OpenAlex. A one-time 12MB index of
 list lengths spares it every offset read; hard pairs (authors with one or two
 coauthors, 7-11 steps apart) take about 1-4s. On 40 random pairs it matched
@@ -313,6 +323,21 @@ its own probes `localhost:8000`.
 
 Everything under `data/` is a pipeline checkpoint or output and is
 git-ignored; nothing large is committed to this repository.
+
+## Acknowledgements
+
+Connect and the coauthor rays come from
+[academic-degree-of-separation](https://github.com/riptideiv/academic-degree-of-separation)
+by [riptideiv](https://github.com/riptideiv), a "six degrees of separation"
+tool for academics (live at
+[xingruic.net/tools/researchers](https://www.xingruic.net/tools/researchers)).
+Its backend served both features on this map from July to October 2026: the
+shortest coauthor path between two researchers with the paper behind each
+step (`/api/path`), and an author's coauthors (`/api/graph/expand`). The idea,
+the streamed search, and the result format the viewer still renders are that
+project's. The current in-browser search (`scripts/export_paths_bin.py`,
+`web/dev.html`) reimplements it over this map's own coauthor graph so the
+site needs no server.
 
 ## License and attribution
 
