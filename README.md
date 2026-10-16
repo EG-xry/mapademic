@@ -1,31 +1,33 @@
 # mapademic
 
-A zoomable map of 8,587,906 researchers: OpenAlex authors with 15 or more
+A zoomable map of 8,396,458 researchers: OpenAlex authors with 15 or more
 works, positioned by coauthorship and colored by detected community. The map
 is served as a static site: raster tiles plus JSON indexes, rendered in the
 browser by a vanilla-JS MapLibre viewer (`web/dev.html`). No backend is
-required for panning, zooming, or search; live path-finding between two
-researchers is provided by a companion project,
-[academic-degree-of-separation](https://github.com/riptideiv/academic-degree-of-separation).
+required for anything, including Connect, the shortest coauthor path between
+two researchers, which the browser searches with range reads of the
+release's coauthor graph.
 
-**Live map: [eg-xry.github.io/mapademic](https://eg-xry.github.io/mapademic/)**
+**Live map: [mapademic.app](https://mapademic.app)**
 
 ![The full map at zoom 4: communities colored by their position around the map center, brightness by author density](docs/map.jpg)
 
 ## Features
 
 - Continuous zoom z0-11, with native pre-rendered tiles through z10.
-- Author search across all 8.59M names, served from prefix-sharded JSON
+- Author search across all 8.40M names, served from prefix-sharded JSON
   indexed by first and last name token.
 - Hover and click for author details, enriched live from the OpenAlex API.
 - Coauthor rays for a searched author, and a shortest-path overlay between
-  two authors via the companion backend.
+  two authors that prefers routes avoiding likely name mix-ups in OpenAlex.
 - Shareable URLs that encode view, active search, and active path.
 - Display settings: brightness, contrast, saturation, label density, author
   label modes (normal / faint / hover-only), point rendering modes (raster,
-  vector, or both), and citation-size contrast.
-- Community legend with an isolate mode, and named regions overlaid on the
-  map.
+  vector, or both), and a switch for the faint dust of loosely connected
+  authors.
+- Community legend with an isolate mode and per-group sub-areas, and
+  two-level names (field, then country where it explains the cluster)
+  overlaid on the map.
 
 ## Methodology
 
@@ -37,6 +39,13 @@ Coauthor edges are built from works with 50 or fewer authors (a single
 paper with thousands of authors would otherwise contribute millions of
 clique edges), weighted by repeat collaboration with fractional credit per
 work. 379,431,851 edges are produced this way.
+
+The live map is built from the 2026-09-23 release. From that release on, the
+pipeline counts only scholarly works (OpenAlex "xpac" deposits, datasets
+and similar bulk records had given one "author" 1.9M works and one pair an
+edge weight of 447,612) and drops author records that are not people.
+Rebuilt that way, the 2026-09-23 release yields 8,396,458 authors and
+366,027,181 edges, the heaviest weighing 10,317.
 
 ### Layout
 
@@ -70,8 +79,13 @@ Dominant community and log-density brightness are computed per pixel at
 zoom 10 (a 262144 x 262144 virtual grid), then reduced by pyramid
 downsampling through zoom 0 and written as PNG tiles. Coauthor edges with
 weight 2 or higher and bounded length are baked into tiles at zoom 8-9.
-Citation "splats" (bright markers for highly-cited authors) are baked at
-zoom 9-10 in three size tiers.
+From zoom 8 up, each author is also drawn as an anti-aliased disc sized by
+citations on a log scale (`pipeline/sizing.py`): t = log(1 + c/100) /
+log(1 + 150000/100), and a radius of 2^(z-10) px plus 3.5·t·2^((z-10)/2) px,
+so at zoom 10 discs run from 1 px (uncited) to 4.5 px (150k+ citations). The
+viewer's deep-zoom points continue the same formula, so the hand-off from
+raster to points does not change sizes. The curve was chosen over plain log
+and square-root scaling from side-by-side renders of real regions.
 
 ### Validation
 
@@ -94,11 +108,13 @@ width.
   .venv/bin/pip install -e '.[dev]'
   ```
 
-  `duckdb`, `numpy`, and `pillow` (declared in `pyproject.toml`) are
-  installed as dependencies this way; the `dev` extra additionally provides
-  `pytest` for the test suite.
-- Roughly 30GB of free disk for pipeline artifacts, written under
-  `MAPADEMIC_DATA` (default `./data`, git-ignored).
+  `duckdb`, `numpy`, `pillow`, and `pyarrow` (declared in `pyproject.toml`)
+  are installed as dependencies this way; the `dev` extra additionally
+  provides `pytest` for the test suite.
+- Roughly 40GB of free disk per OpenAlex release for pipeline artifacts,
+  written under `MAPADEMIC_DATA` (default `./data`, git-ignored), plus
+  scratch space for DuckDB spills during `filter` and `edges`.
+- The AWS CLI, only if mirroring whole snapshot entities with `download`.
 - For the layout stage only: a machine with CUDA and RAPIDS cuGraph
   (`cudf`, `cugraph`) available. This is run through the Slurm scripts in
   `slurm/` or on any A100 machine directly; `slurm/setup_gpu_env.sh`
@@ -106,52 +122,165 @@ width.
   `slurm/layout-expanse.sbatch` are cluster-specific submission wrappers
   around `slurm/run_layout.py`.
 
-Two environment variables tune resource use on shared hosts, read by every
-DuckDB-backed stage: `MAPADEMIC_THREADS` caps the thread count, and
-`MAPADEMIC_MEMORY_LIMIT` caps memory (e.g. `24GB`).
+Environment variables read by every DuckDB-backed stage: `MAPADEMIC_THREADS`
+caps the thread count, `MAPADEMIC_MEMORY_LIMIT` caps memory (e.g. `24GB`),
+and `MAPADEMIC_TMP` moves DuckDB's spill files (default: a `.duckdb_tmp`
+directory next to each stage's output). Point `MAPADEMIC_TMP` at the
+internal disk when `MAPADEMIC_DATA` is on a slow external drive.
+
+### Releases
+
+OpenAlex publishes a complete snapshot quarterly (second Wednesday of
+January, April, July, and October) and writes `manifest.json` last, naming
+every file of the release with its byte size and row count. Keep one
+`MAPADEMIC_DATA` directory per release:
+
+```
+export MAPADEMIC_DATA=data/2026-09-23
+```
+
+The first stage that touches S3 pins the release: it stamps its output
+directory with a `RELEASE` file, and every later extract verifies its row
+counts against that release's manifest. A directory holding another release
+is refused rather than silently mixed.
 
 ### Stages
 
 Each stage is a subcommand of `python -m pipeline`; output is checkpointed
-under `MAPADEMIC_DATA` (default `./data`), so a stage can be re-run without
-redoing upstream work. The order below is required; several stages depend
-on files written by earlier ones. All paths below assume the default;
-`MAPADEMIC_DATA` can be exported before the first stage to relocate
-everything, in which case the same directory should also be passed as
-`--data` to `slurm/run_layout.py`, which has its own required flag and does
-not read the environment variable.
+under `MAPADEMIC_DATA`, so a stage can be re-run without redoing upstream
+work. The order below is required; several stages depend on files written
+by earlier ones. `slurm/run_layout.py` has its own required `--data` flag
+and does not read the environment variable; pass it the same directory.
 
 ```
-python -m pipeline download                          # data/snapshot/authors/  (~53GB, S3 sync)
-python -m pipeline extract                            # data/works_authorships/*.parquet
-python -m pipeline filter --min-works 15               # data/nodes.parquet     (8.59M authors)
-python -m pipeline edges                               # data/edges.parquet     (379M edges, ~7.5GB)
-python -m pipeline prep                                # data/graph/*_int32.parquet (GPU-ready)
+python -m pipeline authors                  # authors_extract/  (~4.6GB fetched of 59GB)
+python -m pipeline extract                  # works_authorships/ (~45GB fetched of 707GB)
+python -m pipeline filter --min-works 15    # nodes.parquet
+python -m pipeline edges                    # edges.parquet
+python -m pipeline prep                     # graph/*_int32.parquet (GPU-ready)
 ```
+
+`authors` and `extract` read only the columns the map uses, straight from
+the public S3 bucket, and write one checkpoint per source file, so an
+interrupted run resumes where it stopped; `--jobs` sets how many files are
+fetched at once. Each file's row count is checked against the manifest.
+
+`filter` and `edges` count only scholarly works: OpenAlex's "xpac"
+expansion records, paratext, and deposit types such as datasets and
+software are excluded (see `pipeline/works.py`). `--all-works` on either
+stage disables that filter, and `filter --count-from snapshot` thresholds
+the snapshot's own `works_count` as builds before 2026-09 did. `filter` also
+drops author records that are not people: placeholder names ("et al.",
+"Anonymous", ":unav", ...) and uncited records with 1,000 or more works
+(archives, newspapers, government offices); `--keep-placeholders` keeps
+them.
+
+`edges` streams each work's author list, generates coauthor pairs in
+memory-sized buckets, and writes only the aggregated edges; for the
+2026-09-23 release it needs about 13GB of RAM and two minutes on a laptop
+(`--buckets` trades speed for memory).
+
+`download` instead mirrors whole entities with `aws s3 sync` and verifies
+the mirror against the manifest (`--deep` also decodes every row, which is
+the only check that catches damaged pages on unreliable media). The
+pipeline does not need it: `filter` and `regions` read the `authors`
+extract when present and fall back to a `download` mirror.
 
 The layout stage runs separately, on GPU hardware, and writes
-`data/coords.parquet`:
+`coords.parquet`:
 
 ```
-python slurm/run_layout.py --data data --iters 1000
+python slurm/run_layout.py --data "$MAPADEMIC_DATA" --iters 1000
 ```
 
-With `data/coords.parquet` in place, the remaining stages run on CPU again.
+Its checkpoints (`layout_ckpt/`) are stamped with the graph they belong to,
+and a run refuses to resume checkpoints left by a different graph.
+
+For a new release, start from the previous map instead of random positions:
+
+```
+python -m pipeline warmstart --prev data/coords.parquet   # graph/init_pos.parquet
+ITERS=300 CHUNK=50 LAYOUT_ARGS=--managed-memory bash slurm/remote_layout.sh "$MAPADEMIC_DATA"
+```
+
+`warmstart` keeps every carried-over author at its previous position and
+places new ones at the weighted mean of their coauthors, so 300 iterations
+settle what changed (about 30% of a cold 1000-iteration run) and fields keep
+their familiar places. `remote_layout.sh` uploads the graph, submits
+`slurm/layout-expanse.sbatch`, resubmits only on a wall-clock timeout, and
+fetches `coords.parquet`. On Expanse's 32GB V100s the full graph needs
+`--managed-memory` (spills into host RAM; about 2.6 s per iteration for the
+2026-09-23 release).
+
+With `coords.parquet` in place, the remaining stages run on CPU again;
+`MAPADEMIC_DATA=<release> bash scripts/build_map.sh` runs all of them below,
+plus the three browser binaries, in the required order.
 `edgepx` must run after `webcoords` and before `tiles --edges`, since it
-reads both `coords_web.parquet` and `edges.parquet`:
+reads both `coords_web.parquet` and `edges.parquet`. `regions` names the
+map from the OpenAlex institutions and topics tables (about 100 MB), so
+mirror them once per release first:
 
 ```
-python -m pipeline webcoords --spread 1.6                          # data/coords_web.parquet
-python -m pipeline edgepx                                          # data/edges_px.parquet
-python -m pipeline tiles --zooms 0-10 --edges data/edges_px.parquet  # data/tiles/  (~4.7GB)
-python -m pipeline regions --authors "data/snapshot/authors/*/*.parquet"  # data/regions.json
-python -m pipeline index                                           # data/index/  (~3.5GB: label tiles, search shards, legend, community rosters)
+python -m pipeline download --entities institutions topics   # snapshot/{institutions,topics}
+python -m pipeline subcommunities                       # subcommunities.parquet: sub-groups of each big community (~15 min)
+python -m pipeline webcoords                            # coords_web.parquet (spread 1.6; each sub-group gets its own area)
+python -m pipeline edgepx                               # edges_px.parquet
+python -m pipeline regions                              # regions.json: region + sub-area names (tiles names the legend from it)
+python -m pipeline tiles --zooms 0-10 --edges "$MAPADEMIC_DATA/edges_px.parquet"  # tiles/ (~4.7GB)
+python -m pipeline index                                # index/ (~3.5GB: label tiles, search shards, legend, community rosters)
 ```
 
-`regions` needs the authors snapshot from `download` to name communities by
-topic; its `--authors` default is a path specific to the original run and
-should be overridden as shown, pointing at wherever `download` wrote the
-snapshot.
+The viewer's WebGL layers read flat binaries from `vector_experiment/`,
+written by three scripts:
+
+```
+python -m scripts.export_points_bin       # positions.bin, attrs.bin, meta.json   (point cloud)
+python -m scripts.export_ids_bin          # ids.bin                               (cloud hover)
+python -m scripts.export_edges_bin        # edges_{pos,attr}[_1m,_3m].bin, edges_meta.json (connection lines)
+```
+
+### Connect (coauthor paths) runs in the browser
+
+Connect needs no server. `scripts/build_map.sh` writes the release's whole
+coauthor graph in a compact, range-readable form:
+
+```
+python -m pipeline pathgraph          # <release>/pathgraph/: CSR arrays (~3.2GB, ~30s; local only)
+python -m scripts.export_paths_bin    # <release>/paths/: compressed per-author lists for the browser (~1.5GB, ~9 min)
+python -m pipeline index              # id shards carry each author's number in paths/
+```
+
+Authors are renumbered along a Z-order curve of their map position and each
+coauthor list is stored as varint gaps (about 2 bytes per link), split into
+files under Cloudflare's 512MB cacheable-object limit. The viewer's
+bidirectional breadth-first search reads only the lists it expands with HTTP
+Range requests (`cache: "no-store"`, since Chrome serializes requests for one
+URL through its HTTP cache), stops the meeting step at the first meeting, and
+labels each hop with a shared paper from OpenAlex. A one-time 12MB index of
+list lengths spares it every offset read; hard pairs (authors with one or two
+coauthors, 7-11 steps apart) take about 1-4s. On 40 random pairs it matched
+the Python search (`pathserver/search.py`) in length, with and without
+flagged links. `pathserver/server.py` serves the same search over HTTP, if a
+backend is ever wanted again.
+
+OpenAlex sometimes merges namesakes into one author record, and shortest
+paths are drawn to such records because they bridge fields. Links that look
+like one (`pipeline/identity.py`: a common "initial + surname" whose other
+end lies in a region holding under 5% of the record's coauthorship) are
+flagged, about 4.5% of all links. When the shortest path uses one, Connect
+searches again without flagged links and takes that route if it is at most
+one step longer (in tests it always was), and otherwise marks the step.
+
+### Publishing data (free tier)
+
+`MAPADEMIC_DATA=<release> bash scripts/upload_r2.sh` uploads a release to the
+R2 bucket under `<release>/data/`, inside R2's free tier: JSON stored
+gzip-compressed (browsers decompress it), unused line tiers skipped, a hard
+stop above 9.5GB (2026-09-23: 6.93GB, ~515k files), size-only comparisons so
+re-runs upload only what is missing, and a week-long Cache-Control so
+Cloudflare answers repeat reads. It needs an rclone remote named `r2`. Point
+`DATA_BASE` in `scripts/build_site.py` at the release, rebuild `docs/`, and
+delete the previous release's objects once the site has moved.
 
 ### Preview
 
@@ -160,49 +289,25 @@ bash scripts/preview.sh
 ```
 
 The viewer is then available at `http://localhost:8123/web/dev.html`.
+Everything works without any other service; for Connect, serve the data with
+`python -m scripts.serve <dir> --port <port>` instead, since
+`python -m http.server` ignores Range headers and would download whole graph
+files.
 
-Search, hover, click, labels, and the community legend work without any
-other service running. Coauthor rays and the shortest-path overlay require
-the companion backend on `localhost:8000`, run from within the
-`academic-degree-of-separation` repository:
+### Optional path backend (older data)
 
-```
-uvicorn backend.app:app --port 8000
-```
+Releases without `data/paths/` fall back to a backend, as the site did
+before Connect moved into the browser. The deployed page sets no backend
+(`API_BASE = None` in `scripts/build_site.py`) and never contacts one;
+coauthor rays read OpenAlex directly.
 
-The map degrades gracefully when that backend is unreachable: it is probed
-before path features are enabled, and those features are otherwise left
-off.
-
-### Public path backend (Connect)
-
-Connect and the coauthor rays call the degree-of-separation FastAPI service
-(`/api/path`, `/api/graph/expand`, `/health`) from
-[academic-degree-of-separation](https://github.com/riptideiv/academic-degree-of-separation).
-The deployed page points at that project's own Render instance
-(`https://academic-degree-of-separation.onrender.com`, the same backend behind
-[xingruic.net/tools/researchers](https://www.xingruic.net/tools/researchers)),
-configured through `API_BASE` in `scripts/build_site.py`.
-
-**Visitors need no account, key, or setup of any kind.** The OpenAlex API key
-is a server-side environment variable on the backend and is entirely optional
-there too - without it the service falls back to unauthenticated OpenAlex
-requests, which are rate-limited per IP but perfectly functional. Nothing is
-ever asked of the person using the map.
-
-Locally, `web/dev.html` has no `API_BASE` configured and so probes
-`localhost:8000` instead; run the companion backend (above) to exercise
-Connect during development. When no backend answers at all, the map degrades
-gracefully: Connect reports it is unavailable, and coauthor rays fall back to
-querying OpenAlex directly from the browser.
-
-To repoint the deployed page at a different backend, set `API_BASE` in
-`scripts/build_site.py` (no trailing slash), regenerate with
-`.venv/bin/python scripts/build_site.py`, and commit `docs/index.html`. Any
-replacement needs `access-control-allow-origin` to permit the Pages origin.
-
-Render's free tier sleeps an idle service, so the first Connect after a nap
-waits out a cold start before the stream begins.
+That backend is the degree-of-separation FastAPI service (`/api/path`,
+`/api/graph/expand`, `/health`) from
+[academic-degree-of-separation](https://github.com/riptideiv/academic-degree-of-separation),
+or `pathserver/server.py`. Set `API_BASE` in `scripts/build_site.py` (no
+trailing slash) and regenerate `docs/index.html` to use one; it needs
+`access-control-allow-origin` to permit the Pages origin. `web/dev.html` on
+its own probes `localhost:8000`.
 
 ## Data
 

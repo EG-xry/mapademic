@@ -22,9 +22,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEV_HTML = REPO_ROOT / "web" / "dev.html"
 SITE_HTML = REPO_ROOT / "docs" / "index.html"
 
-# Exact config currently deployed (read out of the last docs/index.html
-# generation).
-DATA_BASE = "https://pub-3627024db5924826912107ea4f16e739.r2.dev"
+# The R2 bucket behind its custom domain (connected 2026-10-10). The bucket's
+# r2.dev development URL is HTTP/1.1-only with no edge cache: every zoom step
+# queued ~40 tile requests six at a time. Through the zone, requests go over
+# HTTP/2 and repeat tiles are Cloudflare cache hits; in an A/B run of the same
+# page the worst zoom step went from 1,566 ms to 638 ms.
+DATA_BASE = "https://data.mapademic.app/2026-09-23"   # R35c: one prefix per release in the bucket (scripts/upload_r2.sh)
 # R31: the public degree-of-separation backend for Connect/coauthor-ray
 # lookups -- the companion project's own Render deploy, the same instance
 # powering xingruic.net/tools/researchers. Verified 2026-07-24: /health,
@@ -34,7 +37,11 @@ DATA_BASE = "https://pub-3627024db5924826912107ea4f16e739.r2.dev"
 # optional. Set to None to omit apiBase entirely, which sends dev.html back to
 # its localhost:8000 default (Connect off for public visitors). No trailing
 # slash: dev.html builds URLs as `${API_BASE}/api/path`.
-API_BASE = "https://academic-degree-of-separation.onrender.com"
+# R35c (2026-10-11): None. Connect now searches the release's own coauthor
+# graph in the visitor's browser (data/paths/ on the data host, see
+# scripts/export_paths_bin.py), and coauthor rays read OpenAlex directly, so
+# the public site needs no backend -- and no host to pay for or keep awake.
+API_BASE = None
 
 BARE_SCRIPT_TAG = "<script>"
 
@@ -53,8 +60,8 @@ def build_config_block(data_base: str, api_base: str | None = None) -> str:
         "<script>\n"
         "window.MAPADEMIC_CONFIG = {\n"
         f'  dataBase: "{data_base}"\n'
-        "  // apiBase intentionally unset: path/ray features probe localhost:8000 and\n"
-        "  // stay gracefully disabled for public visitors without a running backend.\n"
+        "  // apiBase intentionally unset: Connect searches data/paths in the browser\n"
+        "  // and coauthor rays read OpenAlex directly, so no backend is needed.\n"
         "};\n"
         "</script>\n"
     )
