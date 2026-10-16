@@ -1,14 +1,15 @@
 """extract -> filter -> edges over one coherent fixture, as the real run composes them."""
 import duckdb
+import pyarrow.fs as pafs
 
 from pipeline.build_edges import build_edges
-from pipeline.extract_works import connect, extract_partition, partitions
+from pipeline.extract_works import extract_file
 from pipeline.filter_authors import filter_authors
 from tests.conftest import write_works_partition
 
-HINTON = "https://openalex.org/A_hinton"
-COLLAB = "https://openalex.org/A_collab"
-ONEHIT = "https://openalex.org/A_onehit"
+HINTON = "https://openalex.org/A100"
+COLLAB = "https://openalex.org/A200"
+ONEHIT = "https://openalex.org/A300"
 
 EMPTY_INST = "CAST([] AS STRUCT(display_name VARCHAR)[])"
 EMPTY_TOPICS = "CAST([] AS STRUCT(display_name VARCHAR, field STRUCT(display_name VARCHAR))[])"
@@ -34,15 +35,16 @@ def test_extract_filter_edges(tmp_path):
     works_src = tmp_path / "works"
     write_works_partition(
         works_src / "updated_date=2026-01-01",
-        [("W1", 3, [HINTON, COLLAB, ONEHIT])],
+        [("https://openalex.org/W1", 3, [HINTON, COLLAB, ONEHIT]),
+         ("https://openalex.org/W2", 2, [HINTON, COLLAB], {"is_xpac": True})],
     )
 
     # extract
     extracts = tmp_path / "works_authorships"
-    extracts.mkdir()
-    con = connect(str(works_src))
-    for part in partitions(con, str(works_src)):
-        extract_partition(con, str(works_src), part, extracts)
+    con = duckdb.connect()
+    for src in sorted(works_src.glob("*/*.parquet")):
+        extract_file(con, pafs.LocalFileSystem(), str(src),
+                     extracts / src.parent.name / src.name)
 
     # filter
     nodes_out = tmp_path / "nodes.parquet"
@@ -53,7 +55,7 @@ def test_extract_filter_edges(tmp_path):
 
     # edges
     edges_out = tmp_path / "edges.parquet"
-    n = build_edges(str(extracts / "*.parquet"), str(nodes_out), str(edges_out))
+    n = build_edges(str(extracts / "*" / "*.parquet"), str(nodes_out), str(edges_out))
     assert n == 1
 
     src, dst, weight = duckdb.sql(f"SELECT * FROM '{edges_out}'").fetchone()

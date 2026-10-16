@@ -9,3 +9,5 @@ mapademic-smoke-*.log
 .tmp/
 mapademic-layout-*.log
 minitest-*.log
+.lavish/
+.wrangler/

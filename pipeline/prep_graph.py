@@ -3,7 +3,7 @@ from pathlib import Path
 
 import duckdb
 
-from pipeline.config import apply_resource_limits, data_dir
+from pipeline.config import apply_resource_limits, data_dir, spill_dir
 
 
 def prep_graph(
@@ -12,7 +12,7 @@ def prep_graph(
     out_dir.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
     apply_resource_limits(con)
-    con.execute(f"SET temp_directory='{out_dir / '.duckdb_tmp'}'")
+    con.execute(f"SET temp_directory='{spill_dir(out_dir)}'")
     con.execute("SET preserve_insertion_order=false")
     con.execute(
         f"""
