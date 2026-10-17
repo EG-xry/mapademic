@@ -31,6 +31,8 @@ per step.*
 - Hover and click for author details, enriched live from the OpenAlex API.
 - Coauthor rays for a searched author, and a shortest-path overlay between
   two authors that prefers routes avoiding likely name mix-ups in OpenAlex.
+- Institution-to-researcher connections using a bounded pool of researchers
+  with an OpenAlex last-known affiliation, searched over the same map graph.
 - Shareable URLs that encode view, active search, and active path.
 - Display settings: brightness, contrast, saturation, label density, author
   label modes (normal / faint / hover-only), point rendering modes (raster,
@@ -344,6 +346,42 @@ its own probes `localhost:8000`.
 
 Everything under `data/` is a pipeline checkpoint or output and is
 git-ignored; nothing large is committed to this repository.
+
+## Connect from an institution
+
+In **Connect**, change **From** to **Institution**, search and select the
+institution, choose a destination researcher, and press **Go**. The result
+starts with a real affiliated researcher and follows the existing coauthor
+path overlay, including shared-paper titles and possible name-mix-up warnings.
+If the destination is itself in the candidate pool, a zero-hop result shows
+that researcher. Share links preserve the institution and destination IDs.
+
+This is a bounded discovery feature, not an exhaustive institutional network:
+OpenAlex supplies up to 50 most-cited researchers with 15+ works and a
+matching `last_known_institutions.id`. The viewer checks every last-known
+institution on each returned profile, then intersects the pool with the
+published map's path index. A multi-source bidirectional BFS finds a shortest
+path among those mapped candidates; as in author-to-author Connect, a route
+avoiding flagged name merges may be preferred if it is at most one step longer.
+The 14-hop and 8-million-link search limits still apply. Empty results do not
+prove that the institution has no connection to the researcher.
+
+[Last-known affiliations](https://help.openalex.org/data/authors/#last_known_institutions)
+come from publication records and are not verified current appointments. Live
+membership can also differ from the map snapshot, and the map omits low-output
+researchers and edges from papers with more than 50 authors. The interface
+states the candidate limit and shows which researcher supplied the affiliation.
+
+No backend or new map export is needed. Institution API calls use the existing
+JSON request helper, so the optional BYOK integration can authenticate them.
+At most eight ID-shard downloads run concurrently; successful candidate lists
+are cached for this session, failed requests can be retried, and editing either
+endpoint or pressing Clear invalidates any running search. Older map releases
+without browser paths keep author-to-author backend support but cannot run an
+institution search.
+
+Run frontend regression tests with Node.js 18+:
+`node --test tests/test_institution_connect.cjs`.
 
 ## Acknowledgements
 
