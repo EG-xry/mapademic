@@ -171,7 +171,8 @@
     #display-gear:hover { border-color: #7fae8e; }
     #display-panel { position: fixed; right: 10px; bottom: 82px; background: #0b0b0bd9;
                       color: #ddd; font: 12px system-ui; border-radius: 6px;
-                      width: 230px; z-index: 9; display: none; }
+                      width: 230px; max-height: calc(100dvh - 100px); overflow-y: auto;
+                      z-index: 9; display: none; }
     #display-panel.open { display: block; }
     #display-panel .dp-body { padding: 4px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
     #display-panel .dp-row { display: flex; flex-direction: column; gap: 2px; }
@@ -190,6 +191,14 @@
     #display-reset { background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
                       border-radius: 6px; padding: 6px 10px; font: 12px system-ui; cursor: pointer; }
     #display-reset:hover { border-color: #7fae8e; }
+    #openalex-key-form { border-top: 1px solid #333; padding-top: 8px;
+                         display: flex; flex-direction: column; gap: 6px; }
+    #openalex-key { box-sizing: border-box; width: 100%; background: #111;
+                    color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 6px; }
+    #openalex-key-form button { background: #111; color: #ddd; border: 1px solid #555;
+                               border-radius: 4px; padding: 5px 8px; cursor: pointer; }
+    #openalex-key-form p { margin: 0; line-height: 1.4; }
+    #openalex-key-form a { color: #9dc9ad; }
     /* ---- R15b: experimental full point-cloud toggle ---- */
     /* Status pill, same visual language as #search-status/#connect-status. */
     #dp-all-points-status:empty { display: none; }
@@ -333,7 +342,8 @@
             citations; click it for full details.</li>
           <li>Share copies a link to the exact view.</li>
           <li>The gear opens display settings, including connection lines
-            between frequent coauthors.</li>
+            between frequent coauthors, and an optional OpenAlex API key
+            for live lookups.</li>
         </ul>
       </section>
       <section>
@@ -450,6 +460,17 @@
       <div class="dp-row-head"><span>Line count</span><span class="n">1,000,000</span></div>
     </div>
     <button id="display-reset" type="button">Reset</button>
+    <form id="openalex-key-form">
+      <label for="openalex-key">OpenAlex API key (optional)</label>
+      <input id="openalex-key" type="password" maxlength="512" autocomplete="off"
+             spellcheck="false" autocapitalize="none" aria-describedby="openalex-key-help openalex-key-status"
+             placeholder="Paste your API key">
+      <div><button type="submit">Use key</button> <button id="openalex-key-clear" type="button">Clear key</button></div>
+      <p id="openalex-key-help">Bring your own key for researcher details, coauthors and paper titles.
+        Kept in this tab until you clear it or close the tab; sent directly to OpenAlex.
+        <a href="https://openalex.org/settings/api" target="_blank" rel="noopener noreferrer">Get a free key</a>.</p>
+      <p id="openalex-key-status" role="status" aria-live="polite"></p>
+    </form>
   </div>
 </div>
 <div id="info-card" role="region" aria-label="Author info">
@@ -473,6 +494,70 @@ window.MAPADEMIC_CONFIG = {
 };
 </script>
 <script>
+// ---- OpenAlex BYOK: tab-scoped credentials, independent of display settings ----
+const OPENALEX_KEY_STORAGE = "mapademic.openalex-key";
+const openAlexKeyForm = document.getElementById("openalex-key-form");
+const openAlexKeyInput = document.getElementById("openalex-key");
+const openAlexKeyStatus = document.getElementById("openalex-key-status");
+let openAlexKey = "";
+function validOpenAlexKey(key) {
+  return key.length > 0 && key.length <= 512 && /^[\x21-\x7e]+$/.test(key);
+}
+try {
+  const stored = sessionStorage.getItem(OPENALEX_KEY_STORAGE);
+  if (stored && validOpenAlexKey(stored)) openAlexKey = stored;
+} catch { /* Storage can be disabled; the key still works in memory. */ }
+openAlexKeyStatus.textContent = openAlexKey ? "Using your key for this tab." : "Using OpenAlex without a key.";
+openAlexKeyForm.addEventListener("submit", ev => {
+  ev.preventDefault();
+  const key = openAlexKeyInput.value.trim();
+  if (!validOpenAlexKey(key)) {
+    openAlexKeyStatus.textContent = "Enter a key of up to 512 characters, without spaces.";
+    return;
+  }
+  openAlexKey = key;
+  openAlexKeyInput.value = "";
+  let saved = true;
+  try { sessionStorage.setItem(OPENALEX_KEY_STORAGE, key); } catch { saved = false; }
+  openAlexKeyStatus.textContent = saved
+    ? "Key set for this tab. Retry your lookup to use it."
+    : "Key set until reload (tab storage unavailable). Retry your lookup to use it.";
+});
+document.getElementById("openalex-key-clear").addEventListener("click", () => {
+  openAlexKey = "";
+  openAlexKeyInput.value = "";
+  try {
+    sessionStorage.removeItem(OPENALEX_KEY_STORAGE);
+    openAlexKeyStatus.textContent = "Key cleared. Using OpenAlex without a key.";
+  } catch {
+    openAlexKeyStatus.textContent = "Key cleared for this page; tab storage unavailable.";
+  }
+});
+// The one gateway for live OpenAlex requests. Never put a key in a URL,
+// the share hash, displaySettings, a data-host request, or a backend request.
+async function fetchOpenAlex(url) {
+  const target = new URL(url);
+  if (target.origin !== "https://api.openalex.org" || target.username || target.password) {
+    throw new Error("OpenAlex requests must use https://api.openalex.org");
+  }
+  const key = openAlexKey;
+  const response = await fetch(target.href, {
+    headers: key ? { Authorization: `Bearer ${key}` } : {},
+    credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer"
+  });
+  // Do not cache authentication failures as missing people/papers, or silently
+  // charge an anonymous request after a rejected personal key.
+  if (response.status === 401 || response.status === 403 || response.status === 429) {
+    const message = response.status === 429
+      ? "OpenAlex rate limit reached. Try again later or check your key's usage."
+      : key ? "OpenAlex rejected the key. Replace or clear it in the gear menu."
+        : "OpenAlex needs an API key for this request. Add one in the gear menu.";
+    if (key === openAlexKey) openAlexKeyStatus.textContent = message;
+    throw new Error(message);
+  }
+  return response;
+}
+// ---- End OpenAlex BYOK ----
 const HIT_ZOOM = 10;                 // hover/click active at or past this zoom
 const HIT_RADIUS = 14;               // px hit-test radius around the cursor
 // Deploy config: a page that sets window.MAPADEMIC_CONFIG (script tag before
@@ -686,7 +771,9 @@ function updateRasterOpacity() {
 // entry so the next call retries, while this attempt's callers still get
 // `fallback`, exactly as before.
 function fetchJsonOr404(url) {
-  return fetch(url).then(r => {
+  const request = new URL(url, location.href).origin === "https://api.openalex.org"
+    ? fetchOpenAlex(url) : fetch(url);
+  return request.then(r => {
     if (r.ok) return r.json();
     if (r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429) return null;
     throw new Error(`${url}: HTTP ${r.status}`);
@@ -2001,11 +2088,11 @@ function writeCoauthorLocalCache(bareId, data) {
 async function fetchOpenAlexWorksPage(url) {
   let r;
   try {
-    r = await fetch(url);
-  } catch {
+    r = await fetchOpenAlex(url);
+  } catch (error) {
+    if (error.message.startsWith("OpenAlex ")) throw error;
     throw new Error("couldn't reach OpenAlex - check your connection");
   }
-  if (r.status === 429) throw new Error("OpenAlex rate limit - try again shortly");
   if (!r.ok) throw new Error(`OpenAlex request failed (${r.status})`);
   return r.json();
 }
@@ -2311,10 +2398,9 @@ function repositionActiveOverlays() {
 const displayNameCache = new Map();  // bare id -> Promise<string>
 function fetchDisplayName(bareId) {
   if (!displayNameCache.has(bareId)) {
-    displayNameCache.set(bareId, fetch(`https://api.openalex.org/people/${bareId}?select=display_name`)
-      .then(r => r.ok ? r.json() : null)
-      .then(j => (j && j.display_name) || bareId)
-      .catch(() => bareId));
+    cacheUnlessFailed(displayNameCache, bareId,
+      fetchJsonOr404(`https://api.openalex.org/people/${bareId}?select=display_name`)
+        .then(j => (j && j.display_name) || bareId), bareId);
   }
   return displayNameCache.get(bareId);
 }

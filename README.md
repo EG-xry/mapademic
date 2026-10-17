@@ -40,6 +40,25 @@ per step.*
   two-level names (field, then country where it explains the cluster)
   overlaid on the map.
 
+## Bring your own OpenAlex key
+
+Open the gear menu, paste your [OpenAlex API key](https://openalex.org/settings/api),
+and select **Use key**. The key is optional: the map and in-browser path search
+still work without it. Your key is used for live researcher details, coauthor
+lookups, restored author names, and shared-paper titles. Retry a failed lookup
+after setting or replacing a key.
+
+The key is kept in `sessionStorage` for this tab (in memory only if browser
+storage is unavailable), and the input is cleared after saving. **Clear key**
+removes it; closing the tab ends the session. It is sent directly to
+`https://api.openalex.org` in an Authorization header, never to the map's data
+host or optional path backend, and never included in share links or display
+settings. Like any client-side credential, it is accessible to scripts running
+on the page. A rejected key does not silently fall back to anonymous requests.
+
+Run the frontend credential regression tests with Node.js 18+:
+`node --test tests/test_openalex_byok.cjs`.
+
 ## Methodology
 
 ### Data
