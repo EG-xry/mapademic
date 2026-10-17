@@ -116,9 +116,17 @@
                   border-radius: 6px; padding: 6px 10px; font: 12px system-ui;
                   cursor: pointer; white-space: nowrap; }
     #share-btn:hover { border-color: #7fae8e; }
-    #connect-panel { margin-top: 6px; display: none; flex-direction: column; gap: 6px; }
+    #connect-panel { margin-top: 6px; display: none; flex-direction: column; gap: 6px;
+                     max-height: calc(100dvh - 60px); overflow-y: auto; }
+    #connect-panel > * { flex-shrink: 0; }
     #connect-panel.open { display: flex; }
     .connect-row { position: relative; }
+    .connect-row > label { display: block; color: #bbb; font: 12px system-ui; margin-bottom: 4px; }
+    #connect-from-kind { background: #111; color: #ddd; border: 1px solid #555;
+                         border-radius: 4px; padding: 3px; font: inherit; }
+    #connect-scope, #connect-affiliation { margin: 0; color: #bbb; background: #0b0b0bf2;
+                                          font: 12px/1.4 system-ui; padding: 4px 10px; border-radius: 6px; }
+    #connect-scope[hidden], #connect-affiliation:empty { display: none; }
     .connect-row input { width: 100%; box-sizing: border-box; background: #0b0b0bd9;
                           color: #ddd; border: 1px solid #333; border-radius: 6px;
                           padding: 6px 10px; font: 13px system-ui; outline: none; }
@@ -274,18 +282,25 @@
   <div id="search-status"></div>
   <div id="connect-panel">
     <div class="connect-row">
-      <input id="connect-a-input" type="text" placeholder="Author A…" autocomplete="off">
+      <label for="connect-from-kind">From <select id="connect-from-kind">
+        <option value="researcher">Researcher</option><option value="institution">Institution</option>
+      </select></label>
+      <input id="connect-a-input" type="text" placeholder="Author A…" autocomplete="off" aria-label="Starting researcher">
       <div id="connect-a-dropdown" class="connect-dropdown"></div>
     </div>
     <div class="connect-row">
+      <label for="connect-b-input">To researcher</label>
       <input id="connect-b-input" type="text" placeholder="Author B…" autocomplete="off">
       <div id="connect-b-dropdown" class="connect-dropdown"></div>
     </div>
+    <p id="connect-scope" hidden>Uses up to 50 most-cited researchers with 15+ works and a last-known
+      OpenAlex affiliation. Searches mapped candidates only; affiliations may not be current.</p>
     <div class="connect-actions">
       <button id="connect-go" type="button">Go</button>
       <button id="connect-clear" type="button">Clear</button>
     </div>
-    <div id="connect-status"></div>
+    <div id="connect-status" role="status" aria-live="polite"></div>
+    <p id="connect-affiliation"></p>
     <div id="path-hops"></div>
   </div>
 </div>
@@ -328,7 +343,10 @@
           <li>Connect finds the shortest coauthor path between two
             researchers, searched right in your browser over the map's whole
             coauthor network, colored the same way hop to hop, with the paper
-            that links each step.</li>
+            that links each step. Choose From: Institution to start from up to
+            50 most-cited researchers with an OpenAlex last-known affiliation.
+            The result is shortest among those mapped candidates, subject to
+            the same search limits, not necessarily the whole institution.</li>
           <li>Hover a dot at deep zoom to see the author's name and
             citations; click it for full details.</li>
           <li>Share copies a link to the exact view.</li>
@@ -541,8 +559,8 @@ function parseHash() {
     const key = parts[i].slice(0, eq), val = parts[i].slice(eq + 1);
     if (key === "a" && val) out.a = val;
     if (key === "p" && val) {
-      const ids = val.split(",");
-      if (ids.length === 2 && ids[0] && ids[1]) out.p = ids;
+      const ids = val.split(",").map(stripId);
+      if (ids.length === 2 && /^[AI]\d+$/.test(ids[0]) && /^A\d+$/.test(ids[1])) out.p = ids;
     }
   }
   return out;
@@ -1117,7 +1135,7 @@ searchClearBtn.addEventListener("click", () => {
 // but keeps its own dropdown state per instance rather than reusing the global
 // searchInput/searchDropdown/searchResults state above, since Connect needs two
 // independent lookups (A and B) live at once.
-function createAuthorLookup(inputEl, dropdownEl, onSelect) {
+function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
   let results = [], active = -1, gen = 0, timer = null;
 
   function render() {
@@ -1166,15 +1184,28 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect) {
     const g = ++gen;
     const norm = normalize(query);
     if (!norm) { close(); return; }
-    const entries = await lookupSearchShard(norm);
-    if (g !== gen) return;
-    results = rankSearchEntries(entries, norm);
-    active = -1;
-    render();
+    try {
+      const institution = kindEl && kindEl.value === "institution";
+      const entries = institution ? await fetchInstitutionMatches(query) : await lookupSearchShard(norm);
+      if (g !== gen) return;
+      results = institution ? entries : rankSearchEntries(entries, norm);
+      active = -1;
+      render();
+    } catch {
+      if (g !== gen) return;
+      close();
+      const row = document.createElement("div");
+      row.className = "row empty";
+      row.textContent = "Couldn't load matches. Retry, or check your OpenAlex access.";
+      dropdownEl.appendChild(row);
+      dropdownEl.classList.add("open");
+    }
   }
 
   inputEl.addEventListener("input", () => {
+    gen++;                    // invalidate an older request during the debounce
     onSelect(null);            // typing invalidates any prior selection
+    close();
     clearTimeout(timer);
     const query = inputEl.value;
     timer = setTimeout(() => run(query), 150);
@@ -1198,7 +1229,11 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect) {
     // chain below (see "keyboard shortcuts" (Task 4)), which calls escape()
     // exposed below instead of a listener local to this input.
   });
-  inputEl.addEventListener("blur", () => setTimeout(close, 100));
+  inputEl.addEventListener("blur", () => {
+    clearTimeout(timer);
+    gen++;
+    setTimeout(close, 100);
+  });
 
   function isOpen() { return dropdownEl.classList.contains("open"); }
   function escape() {
@@ -1213,6 +1248,9 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect) {
 
 const connectToggle = document.getElementById("connect-toggle");
 const connectPanel = document.getElementById("connect-panel");
+const connectFromKind = document.getElementById("connect-from-kind");
+const connectScope = document.getElementById("connect-scope");
+const connectAffiliation = document.getElementById("connect-affiliation");
 const connectAInput = document.getElementById("connect-a-input");
 const connectADropdown = document.getElementById("connect-a-dropdown");
 const connectBInput = document.getElementById("connect-b-input");
@@ -1225,8 +1263,22 @@ const pathHopsEl = document.getElementById("path-hops");
 let connectA = null, connectB = null;    // {id, name, xw, yw} once selected
 // Editing either Connect input discards any not-yet-run p= from the hash:
 // the shared pair no longer matches what the user is about to run.
-const connectALookup = createAuthorLookup(connectAInput, connectADropdown, sel => { connectA = sel; pendingP = null; });
-const connectBLookup = createAuthorLookup(connectBInput, connectBDropdown, sel => { connectB = sel; pendingP = null; });
+const connectALookup = createAuthorLookup(connectAInput, connectADropdown, sel => {
+  connectA = sel; pendingP = null; clearPath();
+}, connectFromKind);
+const connectBLookup = createAuthorLookup(connectBInput, connectBDropdown, sel => {
+  connectB = sel; pendingP = null; clearPath();
+});
+function syncConnectStartUI() {
+  const institution = connectFromKind.value === "institution";
+  connectScope.hidden = !institution;
+  connectAInput.placeholder = institution ? "Institution name…" : "Author A…";
+  connectAInput.setAttribute("aria-label", institution ? "Starting institution" : "Starting researcher");
+}
+connectFromKind.addEventListener("change", () => {
+  connectALookup.escape();
+  syncConnectStartUI();
+});
 
 function setPathStatus(text) { connectStatus.textContent = text || ""; }
 
@@ -1359,6 +1411,7 @@ function renderHopList(points, hopColors) {
 
 function clearPath() {
   pathGen++;                         // any in-flight renderPath is now stale
+  connectAffiliation.textContent = "";
   if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
   pathMarkers.forEach(m => m.remove());
   pathMarkers = [];
@@ -1397,7 +1450,9 @@ async function renderPath(pathSteps, hops, idA, idB) {
   const resolved = await resolvePathCoords(nodes);
   if (gen !== pathGen) return;       // a newer Go/Clear owns the overlay now
   const points = resolved.filter(Boolean);
-  if (points.length < 2) { setPathStatus(`${hops} hops (too few resolved to draw)`); return; }
+  if (points.length < 2 && !(hops === 0 && points.length === 1)) {
+    setPathStatus(`${hops} hops (too few resolved to draw)`); return;
+  }
 
   // R19: resolve every hop's community color up front -- ghosts (interpolated
   // positions with no real z9-tile entry) resolve to null and fall back to
@@ -1720,33 +1775,41 @@ async function pathLists(meta, nodes) {
   await eachPathList(meta, [...new Set(nodes)], (u, list) => { got.set(u, list); return false; });
   return nodes.map(u => got.get(u) || new Int32Array(0));
 }
-// Shortest coauthor path between author numbers a and b: an array of author
+// Shortest coauthor path between author numbers a and b (or sets of numbers): an array of author
 // numbers, null when there is none (within maxHops), or {tooFar: true} past
 // PATH_MAX_LINKS. avoidSuspect skips links flagged as probable namesakes.
-async function browserShortestPath(meta, a, b, onProgress, { avoidSuspect = false, maxHops = PATH_MAX_HOPS } = {}) {
-  if (a === b) return [a];
-  const parent = [new Map([[a, a]]), new Map([[b, b]])];
-  const frontier = [[a], [b]];
+async function browserShortestPath(meta, a, b, onProgress, {
+  avoidSuspect = false, maxHops = PATH_MAX_HOPS, isStale = () => false
+} = {}) {
+  const check = () => { if (isStale()) throw new DOMException("Search cancelled", "AbortError"); };
+  check();
+  const roots = [a, b].map(seed => [...new Set(Array.isArray(seed) ? seed : [seed])].sort((x, y) => x - y));
+  const parent = roots.map(seeds => new Map(seeds.map(u => [u, u])));
+  for (const u of roots[0]) if (parent[1].has(u)) return [u];
+  const frontier = roots.map(seeds => [...seeds]);
   const depth = [0, 0];
   let links = 0;
   const join = meet => {
     const left = [];
-    for (let x = meet; x !== a; x = parent[0].get(x)) left.push(x);
-    left.push(a);
+    let x = meet;
+    while (parent[0].get(x) !== x) { left.push(x); x = parent[0].get(x); }
+    left.push(x);
     const right = [];
-    for (let x = meet; x !== b; ) { x = parent[1].get(x); right.push(x); }
+    for (let x = meet; parent[1].get(x) !== x; ) { x = parent[1].get(x); right.push(x); }
     return left.reverse().concat(right);
   };
   while (frontier[0].length && frontier[1].length && depth[0] + depth[1] < maxHops) {
+    check();
     const side = frontier[0].length <= frontier[1].length ? 0 : 1;
     const mine = parent[side], other = parent[1 - side];
     const next = [];
-    let meet = null;
+    let meet = null, tooFar = false;
     // every meeting found on this level gives the same, shortest length, so
     // the level stops at the first one rather than reading all its lists
     await eachPathList(meta, frontier[side], (u, list) => {
+      if (isStale()) return true;
       for (const raw of list) {
-        links++;
+        if (++links > PATH_MAX_LINKS) { tooFar = true; return true; }
         if (raw < 0 && avoidSuspect) continue;
         const v = raw < 0 ? ~raw : raw;
         if (mine.has(v)) continue;
@@ -1756,10 +1819,11 @@ async function browserShortestPath(meta, a, b, onProgress, { avoidSuspect = fals
       }
       return false;
     });
+    check();
     if (meet !== null) return join(meet);
+    if (tooFar) return { tooFar: true };
     depth[side]++;
     if (onProgress) onProgress(depth[0] + depth[1], mine.size + other.size);
-    if (links > PATH_MAX_LINKS) return { tooFar: true };
     frontier[side] = next;
   }
   return null;
@@ -1793,17 +1857,106 @@ async function authorPathNumber(id) {
   const hit = bucket && bucket.get(stripId(id));
   return hit && hit.length > 2 ? hit[2] : null;
 }
+// ---- Institution Connect: live membership, bounded to the published map ----
+const INSTITUTION_CANDIDATE_LIMIT = 50;
+const institutionCandidateCache = new Map();
+async function fetchInstitutionMatches(query) {
+  if (query.trim().length < 2) return [];
+  const q = new URLSearchParams({ search: query.trim(), per_page: "8", select: "id,display_name,country_code" });
+  // Use the existing JSON gateway so the optional BYOK integration applies
+  // without introducing a second credential store or a backend dependency.
+  const data = await fetchJsonOr404(`https://api.openalex.org/institutions?${q}`);
+  if (!data || !Array.isArray(data.results)) throw new Error("Couldn't load institutions from OpenAlex.");
+  return data.results.filter(i => /^I\d+$/.test(stripId(i.id)) && typeof i.display_name === "string")
+    .map(i => [normalize(i.display_name), i.display_name, i.id, null, null, i.country_code || ""]);
+}
+async function fetchInstitutionCandidates(id) {
+  const bareId = stripId(id);
+  if (!/^I\d+$/.test(bareId)) throw new Error("Select an institution from the results.");
+  if (!institutionCandidateCache.has(bareId)) {
+    const q = new URLSearchParams({
+      filter: `last_known_institutions.id:${bareId},works_count:>14`,
+      sort: "cited_by_count:desc", per_page: String(INSTITUTION_CANDIDATE_LIMIT),
+      select: "id,display_name,last_known_institutions"
+    });
+    const promise = fetchJsonOr404(`https://api.openalex.org/authors?${q}`).then(data => {
+      if (!data || !Array.isArray(data.results)) throw new Error("Couldn't load affiliated researchers from OpenAlex.");
+      // Check exact IDs even if an upstream response unexpectedly ignores the
+      // filter. Preserve every last-known affiliation, not just the first.
+      const seen = new Set();
+      return data.results.slice(0, INSTITUTION_CANDIDATE_LIMIT).filter(a => {
+        const aid = stripId(a.id);
+        if (!/^A\d+$/.test(aid) || seen.has(aid) ||
+            !(a.last_known_institutions || []).some(i => stripId(i.id) === bareId)) return false;
+        seen.add(aid);
+        return true;
+      });
+    });
+    institutionCandidateCache.set(bareId, promise);
+    promise.catch(() => {
+      if (institutionCandidateCache.get(bareId) === promise) institutionCandidateCache.delete(bareId);
+    });
+    if (institutionCandidateCache.size > 10) institutionCandidateCache.delete(institutionCandidateCache.keys().next().value);
+  }
+  return institutionCandidateCache.get(bareId);
+}
+async function resolveInstitutionStart(meta, institution, isStale) {
+  const authors = await fetchInstitutionCandidates(institution.id);
+  if (isStale()) return null;
+  const buckets = [...new Set(authors.map(a => idBucketNum(a.id)))];
+  const resolved = await pooled(buckets.map(bucket => async () => {
+    if (isStale()) return [bucket, null];
+    const hits = await fetchIdBucket(bucket);
+    if (!hits) throw new Error("Couldn't load the map's researcher index. Retry the search.");
+    return [bucket, hits];
+  }), 8);
+  if (isStale()) return null;
+  const hits = new Map(resolved), names = new Map(), nodes = [];
+  for (const author of authors) {
+    const id = stripId(author.id), hit = hits.get(idBucketNum(id)).get(id);
+    if (!hit || !Number.isInteger(hit[2]) || hit[2] < 0 || hit[2] >= meta.authors) continue;
+    nodes.push(hit[2]);
+    names.set(id, author.display_name || id);
+  }
+  return { nodes, names, considered: authors.length };
+}
+async function fetchConnectStartName(id) {
+  if (!/^I\d+$/.test(id)) return fetchDisplayName(id);
+  try {
+    const data = await fetchJsonOr404(`https://api.openalex.org/institutions/${id}?select=display_name`);
+    return (data && data.display_name) || id;
+  } catch { return id; }
+}
+// ---- End Institution Connect ----
 // Connect without a backend: resolves both authors, searches, prefers a path
 // between real people, labels each hop, then hands the steps to renderPath
 // exactly as /api/path's result did.
 async function connectInBrowser(meta, idA, idB, gen) {
   const stale = () => gen !== pathGen;
-  const [a, b] = await Promise.all([authorPathNumber(idA), authorPathNumber(idB)]);
-  if (stale()) return;
-  if (a == null || b == null) {
-    setPathStatus(`${a == null ? connectA.name : connectB.name} has no coauthor links on the map.`);
+  const start = { ...connectA }, target = { ...connectB };
+  const institution = /^I\d+$/.test(idA);
+  let source, b;
+  try {
+    if (institution) setPathStatus(`finding researchers last affiliated with ${start.name}…`);
+    [source, b] = await Promise.all([
+      institution ? resolveInstitutionStart(meta, start, stale) : authorPathNumber(idA).then(u => ({
+        nodes: u == null ? [] : [u], names: new Map([[idA, start.name]])
+      })),
+      authorPathNumber(idB)
+    ]);
+  } catch (error) {
+    if (!stale()) setPathStatus(error.message.startsWith("OpenAlex ") || error.message.startsWith("Couldn't ")
+      ? error.message : "Couldn't load researchers. Retry, or check your OpenAlex access.");
     return;
   }
+  if (stale()) return;
+  if (b == null || source.nodes.length === 0) {
+    setPathStatus(b == null ? `${target.name} has no coauthor links on the map.`
+      : institution ? `No researchers in the map graph among the ${source.considered} candidates from ${start.name}. This does not rule out a connection.`
+        : `${start.name} has no coauthor links on the map.`);
+    return;
+  }
+  const a = source.nodes;
   loadPathIndex(meta);                  // usually already loaded (Connect opened); never waited for
   const t0 = performance.now();
   const progress = (hops, seen) => {
@@ -1813,7 +1966,7 @@ async function connectInBrowser(meta, idA, idB, gen) {
   };
   let nodes, note = null, warn = [];
   try {
-    nodes = await browserShortestPath(meta, a, b, progress);
+    nodes = await browserShortestPath(meta, a, b, progress, { isStale: stale });
     if (stale()) return;
     if (nodes && !nodes.tooFar) {
       const bad = await suspectSteps(meta, nodes);
@@ -1821,7 +1974,7 @@ async function connectInBrowser(meta, idA, idB, gen) {
         // the shortest route runs through a probable namesake merge: look for
         // one between real people, at most one step longer
         setPathStatus("checking for a route that avoids a likely name mix-up…");
-        const clean = await browserShortestPath(meta, a, b, null, { avoidSuspect: true, maxHops: nodes.length });
+        const clean = await browserShortestPath(meta, a, b, null, { avoidSuspect: true, maxHops: nodes.length, isStale: stale });
         if (stale()) return;
         if (clean && !clean.tooFar) {
           if (clean.length > nodes.length) {
@@ -1834,18 +1987,25 @@ async function connectInBrowser(meta, idA, idB, gen) {
       }
     }
   } catch (err) {
+    if (stale()) return;
     console.error("path search failed:", err);
     if (!stale()) setPathStatus("Couldn't load the coauthor network - check the connection and press Go again.");
     return;
   }
   if (stale()) return;
-  if (nodes === null) { setPathStatus("no coauthor path between these authors"); return; }
-  if (nodes.tooFar) { setPathStatus("These authors are too far apart to search here."); return; }
+  if (nodes === null) {
+    setPathStatus(institution
+      ? `No path within ${PATH_MAX_HOPS} hops among ${source.nodes.length} mapped candidates from ${start.name}; other institution researchers may connect.`
+      : `No coauthor path found within ${PATH_MAX_HOPS} hops between these authors.`);
+    return;
+  }
+  if (nodes.tooFar) { setPathStatus("Search limit reached. A connection may still exist; try a closer researcher."); return; }
   setPathStatus("finding the papers that link each step…");
   const ids = await pathAuthorIds(meta, nodes);
   if (stale()) return;
   const [names, labels] = await Promise.all([
-    Promise.all(ids.map((id, i) => i === 0 ? connectA.name : i === ids.length - 1 ? connectB.name : fetchDisplayName(id))),
+    Promise.all(ids.map((id, i) => i === ids.length - 1 ? target.name
+      : i === 0 ? source.names.get(id) || fetchDisplayName(id) : fetchDisplayName(id))),
     Promise.all(ids.slice(0, -1).map((id, i) => sharedPaper(id, ids[i + 1]))),
   ]);
   if (stale()) return;
@@ -1855,11 +2015,18 @@ async function connectInBrowser(meta, idA, idB, gen) {
   console.info(`path: ${nodes.length - 1} hops in ${((performance.now() - t0) / 1000).toFixed(2)}s`);
   await renderPath(ids.map((id, i) => ({ author_id: id, author_name: names[i], label: labels[i] || null })),
                    nodes.length - 1, idA, idB);
-  if (!stale() && note) setPathStatus(`${nodes.length - 1} hops - ${note}`);
+  if (!stale()) {
+    if (institution) {
+      connectAffiliation.textContent = `${names[0]} — OpenAlex last-known affiliation: ${start.name}. ` +
+        `${source.nodes.length} of ${source.considered} candidates are in the map's coauthor graph.`;
+    }
+    setPathStatus([`${nodes.length - 1} hops`, institution ? `among ${source.nodes.length} mapped institution candidates` : null, note]
+      .filter(Boolean).join(" — "));
+  }
 }
 
 connectGo.addEventListener("click", async () => {
-  if (!connectA || !connectB) { setPathStatus("select both authors"); return; }
+  if (!connectA || !connectB) { setPathStatus("select a starting researcher or institution and a destination researcher"); return; }
   clearRays();    // a path replaces any coauthor rays from a prior search
   clearPath();    // starting a new Go clears any previous path first
   const gen = ++pathGen;   // this Go owns the overlay from here (clearPath also bumps)
@@ -1869,7 +2036,15 @@ connectGo.addEventListener("click", async () => {
   // host has it; the path backend is only a fallback for older data.
   const meta = await pathsMeta();
   if (gen !== pathGen) return;
-  if (meta) { await connectInBrowser(meta, idA, idB, gen); return; }
+  if (meta) {
+    try { await connectInBrowser(meta, idA, idB, gen); }
+    catch { if (gen === pathGen) setPathStatus("Couldn't finish the connection. Check your connection and retry."); }
+    return;
+  }
+  if (/^I\d+$/.test(idA)) {
+    setPathStatus("Institution connections need a map release with browser coauthor paths. Try again when the map data is available.");
+    return;
+  }
   if (!(await wakeBackend(setPathStatus, () => gen !== pathGen))) {
     if (gen === pathGen) setPathStatus(backendOfflineMessage("Connect"));
     return;
@@ -2401,18 +2576,26 @@ async function restoreFromHash(parsed) {
     if (pStale()) return;
     connectPanel.classList.add("open");
     connectToggle.classList.add("active");
-    const [nameA, nameB] = await Promise.all([fetchDisplayName(bareA), fetchDisplayName(bareB)]);
+    const [nameA, nameB] = await Promise.all([fetchConnectStartName(bareA), fetchDisplayName(bareB)]);
     if (pStale()) return;
+    connectFromKind.value = /^I\d+$/.test(bareA) ? "institution" : "researcher";
+    syncConnectStartUI();
     connectAInput.value = nameA;
     connectBInput.value = nameB;
     connectA = { id: bareA, name: nameA };
     connectB = { id: bareB, name: nameB };
-    const reachable = await wakeBackend(setPathStatus, pStale);
+    // Current releases search in the browser. Only old researcher pairs
+    // should ever try waking the optional legacy backend.
+    const meta = await pathsMeta();
+    if (pStale()) return;
+    const institution = /^I\d+$/.test(bareA);
+    const reachable = Boolean(meta) || (!institution && await wakeBackend(setPathStatus, pStale));
     if (pStale()) return;
     if (reachable) {
       connectGo.click();
     } else {
-      setPathStatus("path backend offline - press Go to retry");
+      setPathStatus(institution ? "Institution connections need the browser coauthor map. Press Go to retry."
+        : "path backend offline - press Go to retry");
     }
   }
 }
@@ -5353,6 +5536,9 @@ infoCardConnectBtn.addEventListener("click", () => {
   const { bareId, name, xw, yw } = infoCardData;
   connectPanel.classList.add("open");
   connectToggle.classList.add("active");
+  connectFromKind.value = "researcher";
+  connectALookup.escape();
+  syncConnectStartUI();
   connectAInput.value = name;
   connectA = { id: bareId, name, xw, yw };   // bare id, same shape createAuthorLookup's select() now hands to onSelect
   pendingP = null;
