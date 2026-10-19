@@ -17,7 +17,19 @@ country when one other than the community's own dominates it, e.g.
 The old names were the single most distinctive OpenAlex topic (of ~4,500),
 typically held by about 1 percent of a community, so "Battery Materials" labelled China
 and "Legal and Regulatory Analysis" labelled Japan. Near-empty communities
-(palette.sparse_communities) fade to dust and get no name. regions.json is
+(palette.sparse_communities) fade to dust and get no name.
+
+Only what is drawn in colour is named (R36, 2026-10-16): 84 of 113 names
+went to communities under 1,000 members, which webcoords draws as dust (a
+37-member "Social Sciences, Business & Economics (Pakistan)" floated over
+the economists). And a label sits at its group's average or median
+position, which for a group spread over the map (the Iran and West African
+clusters) can land in another field's territory: "Optics & Radiation", a
+compact Iranian sub-group, sat among economists, where its group was 8 percent of
+the dots. A label whose group is under SCATTER_SHARE of the coloured dots
+around it, at the zoom it first shows, moves to its group's densest spot if
+it is a level-1 name, and otherwise is marked "scattered": the viewer shows
+it only while that group is filtered in the legend. regions.json is
 data: hand-edit freely.
 """
 import glob as globmod
@@ -27,6 +39,7 @@ import os
 from pathlib import Path
 
 import duckdb
+import numpy as np
 
 from pipeline import config
 from pipeline.config import apply_resource_limits, data_dir
@@ -53,6 +66,7 @@ SUB_SHARE_RARE, SUB_LIFT_RARE = 0.02, 8.0       # 2% at 8x (dentistry is split o
 SUB_MIN_COUNT = 20
 SUB_COUNTRY_FIRST, SUB_COUNTRY_NEXT = 0.12, 0.08
 LABEL_PX = 60           # a sub-area's label shows once its spread is this many pixels
+SCATTER_SHARE = 0.3     # below this share of the coloured dots around it, a label is "scattered"
 
 FIELD_LABELS = {
     "Biochemistry, Genetics and Molecular Biology": "Molecular Biology",
@@ -229,6 +243,7 @@ def build_regions(webcoords_path: str, authors_glob: str, out_path: str,
     cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{webcoords_path}')").fetchall()}
     sub_col = "coalesce(w.sub, -1)" if "sub" in cols else "-1"
     ring = "WHERE NOT w.is_ring" if "is_ring" in cols else ""
+    dust = "w.is_dust" if "is_dust" in cols else "FALSE"
     con.execute(f"""CREATE TEMP TABLE ic AS SELECT display_name, mode(country_code) AS cc
                     FROM read_parquet('{institutions_glob}') WHERE country_code IS NOT NULL GROUP BY 1""")
     con.execute(f"""CREATE TEMP TABLE tp AS SELECT display_name, mode(subfield.display_name) AS subfield
@@ -237,7 +252,8 @@ def build_regions(webcoords_path: str, authors_glob: str, out_path: str,
         SELECT w.community, {sub_col} AS sub, CAST(w.xw AS DOUBLE) AS xw, CAST(w.yw AS DOUBLE) AS yw,
                ic.cc, t.topic,
                CASE WHEN t.topic = '{FALLBACK_TOPIC}' THEN NULL ELSE w.field END AS field,
-               CASE WHEN t.topic = '{FALLBACK_TOPIC}' THEN NULL ELSE tp.subfield END AS subfield
+               CASE WHEN t.topic = '{FALLBACK_TOPIC}' THEN NULL ELSE tp.subfield END AS subfield,
+               {dust} AS dust
         FROM read_parquet('{webcoords_path}') w
         LEFT JOIN ic ON ic.display_name = w.institution
         LEFT JOIN (SELECT id, topics[1].display_name AS topic FROM read_parquet('{authors_glob}')) t
@@ -246,9 +262,10 @@ def build_regions(webcoords_path: str, authors_glob: str, out_path: str,
         {ring}""")
     faded = sparse_communities(con, webcoords_path, min_members=fade_min)
     comms = con.execute(f"""
-        SELECT community, count(*) AS members, avg(xw), avg(yw), sqrt(var_pop(xw) + var_pop(yw))
+        SELECT community, count(*) AS members, avg(xw), avg(yw), sqrt(var_pop(xw) + var_pop(yw)),
+               count(*) FILTER (WHERE NOT dust) AS coloured
         FROM m GROUP BY community ORDER BY members DESC, community LIMIT {int(top_n)}""").fetchall()
-    ranked = [(int(c), int(n), x, y, s or 0.0, r + 1) for r, (c, n, x, y, s) in enumerate(comms)]
+    ranked = [(int(c), int(n), x, y, s or 0.0, r + 1) for r, (c, n, x, y, s, k) in enumerate(comms) if k]
     named = [row for row in ranked if row[5] <= keep and row[0] not in faded]
     ids = ",".join(str(r[0]) for r in named) or "NULL"
 
@@ -279,10 +296,67 @@ def build_regions(webcoords_path: str, authors_glob: str, out_path: str,
                         "community": c, "zmin": 2 if rank <= 30 else 4, "zmax": 4 if rank <= 30 else 6})
     if "sub" in cols:
         regions += _sub_regions(con, ids, label_of, top_country, {r["community"]: r["rank"] for r in regions})
+    _mark_scattered(con, regions)
     tmp = str(out_path) + ".tmp"
     Path(tmp).write_text(json.dumps(regions, indent=1, ensure_ascii=False))
     os.replace(tmp, out_path)
     return len(regions)
+
+
+def _mark_scattered(con, regions: list[dict], grid: int = 2048) -> None:
+    """Flag labels whose group holds under SCATTER_SHARE of the coloured dots
+    in a LABEL_PX box around the label at the zoom it first shows. A level-1
+    label first moves to its group's densest box (a group spread over the
+    map averages to somewhere it barely is); a sub-area is compact, so where
+    it is outnumbered it stays put and is flagged."""
+    if not regions:
+        return
+    p = con.execute("SELECT xw, yw, community FROM m WHERE NOT dust").fetchnumpy()
+    gx = np.clip((p["xw"] * grid).astype(np.int64), 0, grid - 1)
+    gy = np.clip((p["yw"] * grid).astype(np.int64), 0, grid - 1)
+
+    def table(cx, cy):                                               # summed-area table of dot counts
+        t = np.zeros((grid + 1, grid + 1), np.int64)
+        t[1:, 1:] = np.bincount(cx * grid + cy, minlength=grid * grid).reshape(grid, grid).cumsum(0).cumsum(1)
+        return t
+
+    def box(t, x0, x1, y0, y1):
+        return t[x1, y1] - t[x0, y1] - t[x1, y0] + t[x0, y0]
+
+    total = table(gx, gy)
+    comm = p["community"]
+    order = np.argsort(comm, kind="stable")
+    by_comm = comm[order]
+    for r in regions:
+        lo, hi = np.searchsorted(by_comm, [r["community"], r["community"] + 1])
+        own = order[lo:hi]
+        if not len(own):
+            r["scattered"] = True
+            continue
+        mine = table(gx[own], gy[own])
+        k = max(1, int(min(0.03, max(0.001, LABEL_PX / (512 * 2 ** r["zmin"]))) * grid))
+        cx, cy = int(r["xw"] * grid), int(r["yw"] * grid)
+        span = lambda c: (max(0, c - k), min(grid, c + k + 1))
+
+        def share(cx, cy):
+            (x0, x1), (y0, y1) = span(cx), span(cy)
+            n = box(total, x0, x1, y0, y1)
+            return box(mine, x0, x1, y0, y1) / n if n else 0.0
+
+        if share(cx, cy) >= SCATTER_SHARE:
+            continue
+        if not r.get("level"):
+            idx = np.arange(grid)
+            x0, x1 = np.maximum(0, idx - k), np.minimum(grid, idx + k + 1)
+            dense = (mine[x1][:, x1] - mine[x0][:, x1] - mine[x1][:, x0] + mine[x0][:, x0])
+            bx, by = np.unravel_index(int(dense.argmax()), dense.shape)
+            (x0, x1), (y0, y1) = span(bx), span(by)
+            inside = own[(gx[own] >= x0) & (gx[own] < x1) & (gy[own] >= y0) & (gy[own] < y1)]
+            mx, my = float(p["xw"][inside].mean()), float(p["yw"][inside].mean())   # centre on its dots
+            if share(int(mx * grid), int(my * grid)) >= SCATTER_SHARE:
+                r["xw"], r["yw"] = mx, my
+                continue
+        r["scattered"] = True
 
 
 def _sub_regions(con, ids: str, label_of: dict, top_country: dict, rank_of: dict) -> list[dict]:

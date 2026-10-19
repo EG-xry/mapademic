@@ -2785,6 +2785,10 @@ function drawRegions() {
   for (const s of subs) {
     if (isolateCommunity != null && s.community !== isolateCommunity) continue;
     if (z < s.zmin && s.community !== isolateCommunity) continue;   // a filtered group's names show at once
+    // R36: a label that would sit in another group's territory (its own group
+    // under 30% of the dots around it; pipeline/regions.py) shows only while
+    // its group is filtered, when the other groups are hidden
+    if (s.scattered && s.community !== isolateCommunity) continue;
     place(s, 11 + 3 * Math.min(1, s.members / 200_000), "region region-sub");
   }
   if (z > 8) return;
@@ -2793,6 +2797,7 @@ function drawRegions() {
     // Task R10a: community isolate v1 -- while isolating, only that
     // community's region name is ever shown.
     if (isolateCommunity != null && r.community !== isolateCommunity) continue;
+    if (r.scattered && r.community !== isolateCommunity) continue;     // R36, as for sub-areas above
     // Task R10a: global 2.3 floor keeps ANY region name (including rank 1,
     // "Advancements in Battery Materials") off the initial ~z1.4 default
     // view -- the old formula alone put rank 1 at zmin 1.5, visible from
@@ -4544,7 +4549,19 @@ async function prefetchEdgeLines1m() {
   await loadBinShared(attrUrl, onBytes(1));
   if (!dpEdgeLines.checked) setEdgeLinesStatus("");
 }
+// R36: the prefetch is ~78MB (a first visit was 86MB in all) for two
+// overlays that are off by default. Phones, data-saver mode, slow
+// connections and low-memory devices skip it; switching an overlay on still
+// downloads its data then.
+function startupPrefetchWanted() {
+  const conn = navigator.connection;
+  if (conn && (conn.saveData || /(^|-)(2g|3g)$/.test(conn.effectiveType || ""))) return false;
+  if (navigator.deviceMemory && navigator.deviceMemory <= 2) return false;
+  const phone = matchMedia("(pointer: coarse)").matches && Math.min(screen.width, screen.height) < 700;
+  return !phone;
+}
 map.once("idle", () => {
+  if (!startupPrefetchWanted()) return;
   (async () => {
     // R32: a failed prefetch used to leave its last "prefetching… N%" text in
     // the pill forever. Clear it unless the toggle is on -- then the toggle's

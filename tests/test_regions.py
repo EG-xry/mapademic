@@ -19,13 +19,16 @@ def write_fixture(tmp_path, people):
     optional sub/xw/yw/cited. Writes coords_web, authors, institutions and
     topics tables; returns the four paths/globs."""
     web = tmp_path / "coords_web.parquet"
+    with_dust = any("dust" in p for p in people)          # is_dust only when a test sets it
     rows = ", ".join(
         f"('{p['id']}', 'N', {p.get('xw', 0.3)}, {p.get('yw', 0.3)}, {p['community']},"
         f" CAST({p.get('sub', -1)} AS SMALLINT), 20, {p.get('cited', 100)},"
-        f" {('NULL' if p.get('institution') is None else repr(p['institution']))}, '{p['field']}', FALSE)"
+        f" {('NULL' if p.get('institution') is None else repr(p['institution']))}, '{p['field']}', FALSE"
+        + (f", {bool(p.get('dust'))}" if with_dust else "") + ")"
         for p in people)
     duckdb.sql(f"COPY (SELECT * FROM (VALUES {rows}) t(id, display_name, xw, yw, community, sub,"
-               f" works_count, cited_by_count, institution, field, is_ring)) TO '{web}' (FORMAT PARQUET)")
+               f" works_count, cited_by_count, institution, field, is_ring"
+               + (", is_dust" if with_dust else "") + f")) TO '{web}' (FORMAT PARQUET)")
     authors = tmp_path / "authors" / "updated_date=2026-01-01"
     authors.mkdir(parents=True)
     tvals = ", ".join(f"('{p['id']}', [{{'display_name': '{p['topic']}'}}])" for p in people)
@@ -83,6 +86,31 @@ def test_near_empty_communities_get_no_name(tmp_path):
            + people("Z", 2, 20, "Social Sciences", FALLBACK_TOPIC, [None], cited=0))
     regions = build(tmp_path, ppl, top_n=10, keep=10, fade_min=10)
     assert [r["community"] for r in regions] == [1]
+
+
+def test_only_communities_drawn_in_colour_are_named(tmp_path):
+    # community 2 is too small for the legend, so webcoords draws it as dust
+    ppl = (people("A", 1, 60, "Medicine", "Heart Failure", ["MIT", "Oxford"], dust=False)
+           + people("P", 2, 37, "Social Sciences", "Statistics", ["MIT"], dust=True))
+    regions = build(tmp_path, ppl, top_n=10, keep=10)
+    assert [r["community"] for r in regions] == [1]
+
+
+def test_a_label_in_another_groups_territory_moves_or_is_scattered(tmp_path):
+    # community 2 is split between two corners, so its average lands in the
+    # middle of community 3: its name moves to one of its own corners.
+    # community 4 lives inside community 3 wherever it is: scattered.
+    intl = ["MIT", "Oxford", "ETH", "Sorbonne"]
+    ppl = (people("A", 1, 100, "Medicine", "Heart Failure", intl, xw=0.3, yw=0.3)
+           + people("L", 2, 60, "Engineering", "Compilers", intl, xw=0.1, yw=0.1)
+           + people("R", 2, 50, "Engineering", "Compilers", intl, xw=0.9, yw=0.9)
+           + people("M", 3, 200, "Computer Science", "Deep Learning", intl, xw=0.5, yw=0.5)
+           + people("S", 4, 40, "Physics", "Statistics", intl, xw=0.5, yw=0.5))
+    by = {r["community"]: r for r in build(tmp_path, ppl, top_n=10, keep=10)}
+    assert by[2]["xw"] == pytest.approx(0.1, abs=0.002) and "scattered" not in by[2]
+    assert by[4].get("scattered") is True
+    assert "scattered" not in by[1] and "scattered" not in by[3]
+    assert by[1]["xw"] == pytest.approx(0.3)
 
 
 def test_repeated_names_are_made_unique_with_a_topic(tmp_path):
