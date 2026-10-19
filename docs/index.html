@@ -2725,14 +2725,15 @@ async function drawLabels() {
   entries.sort((a, b) => b[4] - a[4]);          // by citations desc
   const placed = [];                            // screen-space rects
   // overlay name tags (path hops, the search highlight, coauthor-ray ends)
-  // claim their space first, so no regular label is drawn over them, and
-  // the side panels theirs, so none shows through the gaps between controls
+  // and area names claim their space first, so no regular label is drawn
+  // over them, and the side panels theirs, so none shows through the gaps
+  // between controls
   const box = map.getContainer().getBoundingClientRect();
   const claim = el => {
     const r = el.getBoundingClientRect();
     if (r.width) placed.push({ x: r.left - box.left + r.width / 2, y: r.top - box.top + r.height / 2, w: r.width + 8, h: r.height + 4 });
   };
-  map.getContainer().querySelectorAll(".path-label, .coauthor-label").forEach(claim);
+  map.getContainer().querySelectorAll(".path-label, .coauthor-label, .region").forEach(claim);
   document.querySelectorAll("#search, #legend").forEach(claim);
   const baseCap = z >= 10 ? 150 : 60;
   const cap = Math.round(baseCap * displaySettings.labelDensity);
