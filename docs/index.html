@@ -1299,7 +1299,8 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
   inputEl.addEventListener("input", () => {
     gen++;                    // invalidate an older request during the debounce
     onSelect(null);            // typing invalidates any prior selection
-    close();
+    // the previous matches stay up until the new ones arrive (closing here
+    // made the dropdown blink on every keystroke); gen discards late replies
     clearTimeout(timer);
     const query = inputEl.value;
     timer = setTimeout(() => run(query), 150);
@@ -1545,7 +1546,7 @@ async function renderPath(pathSteps, hops, idA, idB) {
   if (gen !== pathGen) return;       // a newer Go/Clear owns the overlay now
   const points = resolved.filter(Boolean);
   if (points.length < 2 && !(hops === 0 && points.length === 1)) {
-    setPathStatus(`${hops} hops (too few resolved to draw)`); return;
+    setPathStatus(`${hopsText(hops)} (too few resolved to draw)`); return;
   }
 
   // R19: resolve every hop's community color up front -- ghosts (interpolated
@@ -1639,7 +1640,7 @@ function drawResolvedPath(points, hopColors, hops, idA, idB, { writeUrl = true }
     pendingP = null;             // the drawn path owns p= from here
     writeHash();
   }
-  setPathStatus(`${hops} hops`);
+  setPathStatus(hopsText(hops));
 }
 
 // ---- R29: startup demo connection ----
@@ -1956,13 +1957,18 @@ const INSTITUTION_CANDIDATE_LIMIT = 50;
 const institutionCandidateCache = new Map();
 async function fetchInstitutionMatches(query) {
   if (query.trim().length < 2) return [];
-  const q = new URLSearchParams({ search: query.trim(), per_page: "8", select: "id,display_name,country_code" });
+  // OpenAlex's autocomplete endpoint is free, while ?search= costs $0.001 a
+  // call (10x a lookup; measured 2026-10-19): typing ran one per pause and
+  // could spend a keyless visitor's whole $0.10 daily budget, after which
+  // paper titles and rays fail for the day. Its hint ("Chicago, USA") also
+  // disambiguates better than a country code.
+  const q = new URLSearchParams({ q: query.trim() });          // no per_page: autocomplete rejects it (400)
   // Use the existing JSON gateway so the optional BYOK integration applies
   // without introducing a second credential store or a backend dependency.
-  const data = await fetchJsonOr404(`https://api.openalex.org/institutions?${q}`);
+  const data = await fetchJsonOr404(`https://api.openalex.org/autocomplete/institutions?${q}`);
   if (!data || !Array.isArray(data.results)) throw new Error("Couldn't load institutions from OpenAlex.");
   return data.results.filter(i => /^I\d+$/.test(stripId(i.id)) && typeof i.display_name === "string")
-    .map(i => [normalize(i.display_name), i.display_name, i.id, null, null, i.country_code || ""]);
+    .slice(0, 8).map(i => [normalize(i.display_name), i.display_name, i.id, null, null, i.hint || ""]);
 }
 async function fetchInstitutionCandidates(id) {
   const bareId = stripId(id);
@@ -2114,10 +2120,13 @@ async function connectInBrowser(meta, idA, idB, gen) {
       connectAffiliation.textContent = `${names[0]} — OpenAlex last-known affiliation: ${start.name}. ` +
         `${source.nodes.length} of ${source.considered} candidates are in the map's coauthor graph.`;
     }
-    setPathStatus([`${nodes.length - 1} hops`, institution ? `among ${source.nodes.length} mapped institution candidates` : null, note]
+    setPathStatus([hopsText(nodes.length - 1), institution ? `among ${source.nodes.length} mapped institution candidates` : null, note]
       .filter(Boolean).join(" — "));
   }
 }
+
+// "1 hop", "3 hops" (a function declaration, so renderPath above can use it)
+function hopsText(n) { return `${n} hop${n === 1 ? "" : "s"}`; }
 
 connectGo.addEventListener("click", async () => {
   if (!connectA || !connectB) { setPathStatus("select a starting researcher or institution and a destination researcher"); return; }

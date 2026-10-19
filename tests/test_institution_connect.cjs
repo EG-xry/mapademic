@@ -100,15 +100,21 @@ function institutionHarness(overrides = {}) {
 }
 const member = (id, institutions = ['I42']) => ({ id, display_name: id,
   last_known_institutions: institutions.map(id => ({ id: 'https://openalex.org/' + id })) });
-test('institution lookup safely encodes queries, keeps stable IDs, and returns country disambiguation', async () => {
+test('institution lookup uses the free autocomplete endpoint, encodes queries, keeps stable IDs, and shows a place hint', async () => {
   let requested;
   const h = institutionHarness({ fetchJsonOr404: async url => {
     requested = new URL(url);
-    return { results: [{ id: 'https://openalex.org/I42', display_name: 'A & B', country_code: 'US' }, { id: 'A123', display_name: 'wrong entity' }] };
+    return { results: [{ id: 'https://openalex.org/I42', display_name: 'A & B', hint: 'Chicago, USA' },
+      { id: 'https://openalex.org/I43', display_name: 'No hint', hint: null }, { id: 'A123', display_name: 'wrong entity' }] };
   } });
-  assert.deepEqual(plain(await h.fetchInstitutionMatches('A & B')), [['a & b', 'A & B', 'https://openalex.org/I42', null, null, 'US']]);
-  assert.equal(requested.searchParams.get('search'), 'A & B');
+  assert.deepEqual(plain(await h.fetchInstitutionMatches('A & B')), [
+    ['a & b', 'A & B', 'https://openalex.org/I42', null, null, 'Chicago, USA'],
+    ['no hint', 'No hint', 'https://openalex.org/I43', null, null, '']]);
   assert.equal(requested.origin, 'https://api.openalex.org');
+  assert.equal(requested.pathname, '/autocomplete/institutions');   // free; ?search= costs 10x a lookup
+  assert.equal(requested.searchParams.get('q'), 'A & B');
+  assert.equal(requested.searchParams.get('search'), null);
+  assert.equal(requested.searchParams.get('per_page'), null);         // autocomplete answers 400 to it
 });
 test('candidate discovery caps the pool, checks every last-known institution, and deduplicates authors', async () => {
   let url, calls = 0;
@@ -288,6 +294,30 @@ test('late lookup results cannot reopen an institution dropdown after a mode cha
   await running;
   assert.equal(lookup.isOpen(), false);
   assert.equal(input.value, '');
+});
+test('typing keeps the current matches visible until new ones arrive', async () => {
+  const timers = new Map(); let timerId = 0;
+  function element() {
+    const classes = new Set();
+    return { value: '', innerHTML: '', listeners: {},
+      classList: { add: c => classes.add(c), remove: c => classes.delete(c), contains: c => classes.has(c) },
+      addEventListener(type, callback) { this.listeners[type] = callback; },
+      appendChild() {}, append() {}, blur() {} };
+  }
+  const input = element(), dropdown = element(), kind = { value: 'institution' };
+  const context = vm.createContext({
+    stripId, normalize: s => s.toLowerCase(), document: { createElement: element },
+    setTimeout: fn => { const id = ++timerId; timers.set(id, fn); return id; },
+    clearTimeout: id => timers.delete(id),
+    fetchInstitutionMatches: async q => [[q.toLowerCase(), q, 'I42', null, null, 'Gothenburg, Sweden']]
+  });
+  vm.runInContext(section('function createAuthorLookup(', 'const connectToggle ='), context);
+  const lookup = context.createAuthorLookup(input, dropdown, () => {}, kind);
+  input.value = 'Chal'; input.listeners.input();
+  await [...timers.values()].at(-1)();
+  assert.equal(lookup.isOpen(), true);
+  input.value = 'Chalm'; input.listeners.input();
+  assert.equal(lookup.isOpen(), true);          // no blink while the next lookup is pending
 });
 test('the complete viewer script parses', () => {
   new vm.Script(html.match(/<script>\n([\s\S]*?)<\/script>/)[1]);
