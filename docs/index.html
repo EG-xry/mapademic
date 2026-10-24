@@ -295,9 +295,20 @@
     #path-hops .hop .hop-sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
     #path-hops .hop .hop-name { flex: 1; display: flex; flex-direction: column; gap: 1px;
                         min-width: 0; }
-    /* R31: paper title under the name -- clipped to one line, full text on hover. */
-    #path-hops .hop .hop-via { color: #888; font-size: 10px; white-space: nowrap;
+    /* R31: paper title under the name -- clipped to one line, full text on hover.
+       R44: it is a button now; a click opens the full title, year, venue and a
+       link to the paper (hover alone never worked on phones). */
+    #path-hops .hop .hop-via { all: unset; box-sizing: border-box; display: block; cursor: pointer;
+                        color: #888; font-size: 10px; white-space: nowrap;
                         overflow: hidden; text-overflow: ellipsis; }
+    #path-hops .hop .hop-via::before { content: "\25B8  "; }
+    #path-hops .hop .hop-via:hover { color: #bbb; }
+    #path-hops .hop.open { align-items: flex-start; }
+    #path-hops .hop.open .hop-via { white-space: normal; color: #ccc; }
+    #path-hops .hop.open .hop-via::before { content: "\25BE  "; }
+    #path-hops .hop .hop-paper { display: none; color: #888; font-size: 10px; }
+    #path-hops .hop.open .hop-paper { display: block; }
+    #path-hops .hop .hop-paper a { color: #9dc9ad; }
     #path-hops .hop .hop-ghost { color: #888; font-size: 10px; flex: none; }
       /* ---- R40: phones (Eric: mobile pass) ----
        The page had no viewport tag, so phones laid it out 980px wide and
@@ -319,6 +330,7 @@
       #connect-panel { max-height: 58dvh; }
       #path-hops { max-height: 28dvh; }
       #path-hops .hop, #search-status, #connect-status { font-size: 13px; }
+      #path-hops .hop .hop-via, #path-hops .hop .hop-paper { font-size: 12px; padding: 2px 0; }
       #legend { top: auto; right: auto; left: 8px; bottom: calc(8px + env(safe-area-inset-bottom));
                 width: auto; max-width: calc(100vw - 72px); max-height: 55dvh; }
       #legend[open] { width: min(320px, calc(100vw - 72px)); }
@@ -1540,7 +1552,7 @@ async function resolvePathCoords(nodes) {
     return hit ? { xw: hit[0], yw: hit[1] } : null;
   });
   return nodes.map((n, i) => {
-    if (hits[i]) return { ...hits[i], ghost: false, name: n.name, id: n.id, label: n.label };
+    if (hits[i]) return { ...hits[i], ghost: false, name: n.name, id: n.id, label: n.label, paper: n.paper };
     let prevIdx = -1;
     for (let j = i - 1; j >= 0; j--) if (hits[j]) { prevIdx = j; break; }
     let nextIdx = -1;
@@ -1550,7 +1562,7 @@ async function resolvePathCoords(nodes) {
       const t = (i - prevIdx) / (nextIdx - prevIdx);
       return { xw: prev.xw + (next.xw - prev.xw) * t,
                yw: prev.yw + (next.yw - prev.yw) * t,
-               ghost: true, name: n.name, id: n.id, label: n.label };
+               ghost: true, name: n.name, id: n.id, label: n.label, paper: n.paper };
     }
     return null;
   });
@@ -1589,12 +1601,35 @@ function renderHopList(points, hopColors) {
     // R31: the paper that links this hop to the next one. The last hop has no
     // outgoing edge, and a ghost's label describes an edge whose other end may
     // have been skipped -- both simply render without a subtitle.
+    // R44 (Eric, 2026-10-24): a click on the paper opens the step -- full
+    // title, year, venue, a link to the paper -- without flying the map there.
     if (p.label && i < points.length - 1) {
-      const via = document.createElement("span");
+      const via = document.createElement("button");
+      via.type = "button";
       via.className = "hop-via";
       via.textContent = p.label;
       via.title = p.label;
+      via.setAttribute("aria-expanded", "false");
+      via.addEventListener("click", ev => {
+        ev.stopPropagation();
+        via.setAttribute("aria-expanded", String(row.classList.toggle("open")));
+        drawRegions(); drawLabels();   // the list grew or shrank: names move clear of it
+      });
       name.appendChild(via);
+      if (p.paper) {
+        const more = document.createElement("span");
+        more.className = "hop-paper";
+        const facts = [p.paper.year, p.paper.venue].filter(Boolean).join(" · ");
+        if (facts) more.append(facts);
+        if (p.paper.url) {
+          const a = document.createElement("a");
+          a.href = p.paper.url; a.target = "_blank"; a.rel = "noopener";
+          a.textContent = "Open paper \u2197";
+          a.addEventListener("click", ev => ev.stopPropagation());
+          more.append(facts ? " · " : "", a);
+        }
+        if (more.childNodes.length) name.appendChild(more);
+      }
     }
     row.append(idx, sw, name);
     if (p.ghost) {
@@ -1645,7 +1680,7 @@ async function renderPath(pathSteps, hops, idA, idB) {
   // show the evidence for each hop rather than just the two names.
   const nodes = pathSteps
     .filter(s => !String(s.author_id).startsWith("W"))
-    .map(s => ({ id: s.author_id, name: s.author_name, label: s.label }));
+    .map(s => ({ id: s.author_id, name: s.author_name, label: s.label, paper: s.paper || null }));
   if (nodes.length === 0) { setPathStatus("no author path"); return; }
 
   const resolved = await resolvePathCoords(nodes);
@@ -1997,12 +2032,32 @@ async function pathAuthorIds(meta, nodes) {
     return "A" + (PATH_ID_BASE + new DataView(u8.buffer, u8.byteOffset, 4).getUint32(0, true));
   }));
 }
-// Title of the most-cited paper two authors wrote together (OpenAlex), or null.
+// The paper behind one step: the most-cited work the two wrote together among
+// the works the map's coauthor network counts (2-50 authors, none of the
+// excluded types: pipeline/build_edges.py MAX_AUTHORS, pipeline/works.py
+// EXCLUDED_TYPES). R44: the most-cited shared work overall was often a
+// collaboration paper with hundreds of authors that the network ignores, so
+// the step showed a paper that didn't make the link. Falls back to any shared
+// work. Returns { title, year, venue, url } or null.
+const LINK_WORK_FILTER = "authors_count:<51," +
+  ["dataset", "software", "other", "paratext", "libguides", "peer-review", "erratum",
+   "retraction", "supplementary-materials", "reference-entry", "standard"].map(t => `type:!${t}`).join(",");
 async function sharedPaper(idA, idB) {
-  const q = `filter=authorships.author.id:${idA},authorships.author.id:${idB}&per_page=1&select=title&sort=cited_by_count:desc`;
+  const q = filter => `https://api.openalex.org/works?filter=authorships.author.id:${idA},authorships.author.id:${idB}` +
+    `${filter}&per_page=1&select=id,title,publication_year,doi,primary_location&sort=cited_by_count:desc`;
   try {
-    const j = await fetchJsonOr404(`https://api.openalex.org/works?${q}`);
-    return (j && j.results && j.results[0] && j.results[0].title) || null;
+    let j = await fetchJsonOr404(q("," + LINK_WORK_FILTER));
+    if (!(j && j.results && j.results.length)) j = await fetchJsonOr404(q(""));
+    const w = j && j.results && j.results[0];
+    if (!w || !w.title) return null;
+    const loc = w.primary_location || {}, src = loc.source || {};
+    return {
+      title: w.title,
+      year: w.publication_year || null,
+      // a repository (arXiv, Figshare...) is where a copy sits, not where it was published
+      venue: (src.type !== "repository" && src.display_name) || null,
+      url: [w.doi, loc.landing_page_url, w.id].find(u => /^https?:\/\//i.test(u || "")) || null,
+    };
   } catch { return null; }
 }
 async function authorPathNumber(id) {
@@ -2161,17 +2216,18 @@ async function connectInBrowser(meta, idA, idB, gen) {
   setPathStatus("finding the papers that link each step…");
   const ids = await pathAuthorIds(meta, nodes);
   if (stale()) return;
-  const [names, labels] = await Promise.all([
+  const [names, papers] = await Promise.all([
     Promise.all(ids.map((id, i) => i === ids.length - 1 ? target.name
       : i === 0 ? source.names.get(id) || fetchDisplayName(id) : fetchDisplayName(id))),
     Promise.all(ids.slice(0, -1).map((id, i) => sharedPaper(id, ids[i + 1]))),
   ]);
   if (stale()) return;
+  const labels = papers.map(p => p && p.title);
   for (const i of warn) {
     labels[i] = `possible name mix-up in OpenAlex: this step may join two different people${labels[i] ? " - " + labels[i] : ""}`;
   }
   console.info(`path: ${nodes.length - 1} hops in ${((performance.now() - t0) / 1000).toFixed(2)}s`);
-  await renderPath(ids.map((id, i) => ({ author_id: id, author_name: names[i], label: labels[i] || null })),
+  await renderPath(ids.map((id, i) => ({ author_id: id, author_name: names[i], label: labels[i] || null, paper: papers[i] || null })),
                    nodes.length - 1, idA, idB);
   if (!stale()) {
     if (institution) {
@@ -3128,6 +3184,13 @@ function drawRegions() {
   const subZ = new Map();
   for (const s of subs) subZ.set(s.community, Math.min(subZ.get(s.community) ?? Infinity, s.zmin));
   const placed = [];                                             // screen-space rects
+  // R44: area names keep clear of the side panels, as author names do (a name
+  // under the Connect list showed through it once a step was opened)
+  const box = map.getContainer().getBoundingClientRect();
+  document.querySelectorAll("#search, #legend, #display-panel").forEach(el => {
+    const r = el.getBoundingClientRect();
+    if (r.width) placed.push({ x: r.left - box.left + r.width / 2, y: r.top - box.top + r.height / 2, w: r.width + 8, h: r.height + 4 });
+  });
   const place = (r, size, cls) => {
     const pt = map.project(toLngLat(r.xw, r.yw));
     if (pt.x < -50 || pt.y < -20 || pt.x > innerWidth + 50 || pt.y > innerHeight + 20) return;

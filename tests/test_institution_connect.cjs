@@ -178,7 +178,8 @@ function connectHarness(overrides = {}) {
     resolveInstitutionStart: async () => ({ nodes: [1, 3], names: new Map([['A1', 'Institution Researcher']]), considered: 50 }),
     authorPathNumber: async () => 9, loadPathIndex() {}, suspectSteps: async () => [],
     browserShortestPath: async () => [1, 9], pathAuthorIds: async () => ['A1', 'A9'],
-    fetchDisplayName: async id => id, sharedPaper: async () => 'Shared paper',
+    fetchDisplayName: async id => id,
+    sharedPaper: async () => ({ title: 'Shared paper', year: 2020, venue: 'Journal', url: 'https://doi.org/10.1/x' }),
     renderPath: async (...args) => rendered.push(plain(args)), ...overrides
   });
   vm.runInContext(connectCode, context);
@@ -189,6 +190,7 @@ test('institution results render actual researchers and paper labels, retaining 
   await h.context.connectInBrowser({}, 'I42', 'A9', 1);
   assert.equal(h.rendered[0][0][0].author_name, 'Institution Researcher');
   assert.equal(h.rendered[0][0][0].label, 'Shared paper');
+  assert.equal(h.rendered[0][0][0].paper.url, 'https://doi.org/10.1/x');   // the paper reaches the hop list
   assert.deepEqual(h.rendered[0].slice(1), [1, 'I42', 'A9']);
   assert.match(h.context.connectAffiliation.textContent, /last-known affiliation: Example University/);
   assert.match(h.statuses.at(-1), /2 mapped institution candidates/);
