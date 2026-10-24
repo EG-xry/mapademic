@@ -310,6 +310,24 @@
     #path-hops .hop.open .hop-paper { display: block; }
     #path-hops .hop .hop-paper a { color: #9dc9ad; }
     #path-hops .hop .hop-ghost { color: #888; font-size: 10px; flex: none; }
+    /* ---- R45: share a chain as an image ---- */
+    #share-overlay { position: fixed; inset: 0; background: #000000b3; z-index: 21;
+                      display: none; align-items: center; justify-content: center; }
+    #share-overlay.open { display: flex; }
+    #share-card { background: #0b0b0bf5; color: #ddd; font: 13px system-ui; border: 1px solid #333;
+                   border-radius: 8px; width: 640px; max-width: calc(100vw - 16px); box-sizing: border-box;
+                   padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+    #share-card .sc-head { display: flex; justify-content: space-between; align-items: center;
+                            font-size: 14px; font-weight: 600; }
+    #share-close { background: none; border: none; color: #ddd; font-size: 18px; line-height: 1;
+                    padding: 0 2px; cursor: pointer; }
+    #share-close:hover { color: #7fae8e; }
+    #share-preview { display: block; width: 100%; height: auto; border-radius: 6px; border: 1px solid #222; }
+    .sc-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .sc-actions button { flex: 1 1 auto; background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
+                          border-radius: 6px; padding: 7px 10px; font: 12px system-ui; cursor: pointer; }
+    .sc-actions button:hover { border-color: #7fae8e; }
+    #share-note { margin: 0; min-height: 15px; color: #9dc9ad; font-size: 12px; }
       /* ---- R40: phones (Eric: mobile pass) ----
        The page had no viewport tag, so phones laid it out 980px wide and
        shrank it: every control came out at ~40% size. With the tag, a
@@ -345,6 +363,7 @@
       #info-card { left: 8px; right: 8px; width: auto; bottom: calc(8px + env(safe-area-inset-bottom)); z-index: 11; }
       .ic-actions button { min-height: 40px; font-size: 13px; }
       #help-card { width: calc(100vw - 16px); max-width: none; max-height: calc(100dvh - 16px); font-size: 14px; }
+      .sc-actions button { min-height: 40px; font-size: 14px; }
       .maplibregl-ctrl-bottom-right .maplibregl-ctrl-group { display: none; }
       /* one solid card, so map names don't show through its inputs */
       #connect-panel.open { background: #0b0b0bf2; border-radius: 8px; padding: 8px; }
@@ -385,6 +404,7 @@
     <div class="connect-actions">
       <button id="connect-go" type="button">Go</button>
       <button id="connect-clear" type="button">Clear</button>
+      <button id="connect-share" type="button" hidden>Share chain</button>
     </div>
     <div id="connect-status" role="status" aria-live="polite"></div>
     <p id="connect-affiliation"></p>
@@ -470,6 +490,19 @@
         </ul>
       </section>
     </div>
+  </div>
+</div>
+<div id="share-overlay" role="dialog" aria-modal="true" aria-label="Share this chain">
+  <div id="share-card">
+    <div class="sc-head"><span>Share this chain</span><button id="share-close" type="button" aria-label="Close">&times;</button></div>
+    <img id="share-preview" alt="">
+    <div class="sc-actions">
+      <button id="share-native" type="button" hidden>Share…</button>
+      <button id="share-download" type="button">Download image</button>
+      <button id="share-copy-image" type="button" hidden>Copy image</button>
+      <button id="share-copy-link" type="button">Copy link</button>
+    </div>
+    <p id="share-note" role="status" aria-live="polite"></p>
   </div>
 </div>
 <button id="display-gear" type="button" aria-label="Display settings" aria-expanded="false">&#9881;</button>
@@ -1643,6 +1676,7 @@ function clearPath() {
   pathMarkers.forEach(m => m.remove());
   pathMarkers = [];
   activePath = null;
+  document.getElementById("connect-share").hidden = true;    // R45
   if (pathOverlayIds.length) {
     overlayLabelClear("path", pathOverlayIds);
     pathOverlayIds = [];
@@ -1751,7 +1785,8 @@ function drawResolvedPath(points, hopColors, hops, idA, idB, { writeUrl = true }
     el.append(dot, label);
     return markerOnDot(el, dot, toLngLat(p.xw, p.yw));
   });
-  activePath = { points, hopColors };
+  activePath = { points, hopColors, hops, ids: [idA, idB] };
+  document.getElementById("connect-share").hidden = false;   // R45
 
   pathOverlayIds = points.map(p => stripId(p.id));
   overlayLabelAdd("path", pathOverlayIds);
@@ -6120,6 +6155,281 @@ map.on("zoomend", () => { drawLabels(); drawRegions(); });
 map.on("zoom", applyShardDotOpacity);   // R35: shard dots reappear as the filtered group's deep-zoom points
 
 // ---- Task 2 (night-polish): Share button ----
+// ---- R45 (Eric, 2026-10-24): share a chain as an image ----
+// A 1200x630 card, the size link previews use, to post anywhere: the map
+// around the chain with each person named, "N steps from A to B", the paper
+// behind each step, and the address. The map pixels are copied from the map's
+// own canvas in a render event, while the frame is still in the drawing
+// buffer; the names are drawn here, since the map's labels are page elements.
+const SHARE_W = 1200, SHARE_H = 630, SHARE_MAP_X = 560, SHARE_PAD = 56;
+const SHARE_FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const shareOverlay = document.getElementById("share-overlay");
+const sharePreview = document.getElementById("share-preview");
+const shareNote = document.getElementById("share-note");
+const shareNativeBtn = document.getElementById("share-native");
+const shareCopyImageBtn = document.getElementById("share-copy-image");
+let shareState = null;               // { blob, url, file, summary, link } of the open preview
+let shareNoteTimer = null;
+
+// What the card and the share sheet say about a chain of `hops` steps.
+function shareChainSummary(points, hops) {
+  const from = points[0].name, to = points[points.length - 1].name;
+  const slug = name => normalize(name).split(" ").pop() || "researcher";
+  return {
+    from, to,
+    steps: `${hops} step${hops === 1 ? "" : "s"}`,
+    text: `${from} is ${hops} coauthor step${hops === 1 ? "" : "s"} from ${to}.`,
+    fileName: `mapademic-${slug(from)}-to-${slug(to)}.png`,
+  };
+}
+// Indices of the n chain members that fit in `max` rows: all of them, or both
+// ends with a gap (null) in between.
+function elideChain(n, max) {
+  const idx = k => [...Array(k).keys()];
+  if (n <= max) return idx(n);
+  const head = Math.ceil((max - 1) / 2), tail = max - 1 - head;
+  return [...idx(head), null, ...idx(tail).map(i => n - tail + i)];
+}
+// The paper line under step i: the linking paper and its year, else the label.
+function shareStepPaper(point) {
+  const p = point.paper;
+  return p && p.title ? p.title + (p.year ? ` (${p.year})` : "") : point.label || "";
+}
+
+function fitText(ctx, text, width) {
+  if (ctx.measureText(text).width <= width) return text;
+  let lo = 0, hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (ctx.measureText(text.slice(0, mid) + "…").width <= width) lo = mid; else hi = mid - 1;
+  }
+  return text.slice(0, lo).trimEnd() + "…";
+}
+// docs/favicon.svg, drawn (no image load to wait for or to fail)
+function drawShareLogo(ctx, x, y, size) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(size / 64, size / 64);
+  ctx.fillStyle = "#07080b"; ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(0, 0, 64, 64, 14); else ctx.rect(0, 0, 64, 64);
+  ctx.fill();
+  const g = ctx.createLinearGradient(0, 64, 64, 0);
+  [[0, "#f6cf3f"], [0.38, "#5ddf6b"], [0.7, "#3ec3ef"], [1, "#c36cf5"]].forEach(([o, c]) => g.addColorStop(o, c));
+  ctx.strokeStyle = g; ctx.lineWidth = 4; ctx.lineCap = "round"; ctx.lineJoin = "round";
+  ctx.beginPath(); ctx.moveTo(13, 51); ctx.lineTo(26, 36); ctx.lineTo(38, 39); ctx.lineTo(51, 14); ctx.stroke();
+  for (const [cx, cy, r, c] of [[13, 51, 6.5, "#f6cf3f"], [26, 36, 5, "#5ddf6b"], [38, 39, 5, "#3ec3ef"], [51, 14, 7.5, "#c36cf5"]]) {
+    ctx.fillStyle = c; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2 * Math.PI); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// The map's pixels around the chain: a copy of the map canvas, its pixel
+// ratio, and the crop (CSS px, card-shaped, may run past the map's edges).
+async function captureChainMap(points) {
+  const box = map.getContainer();
+  const screen = () => points.map(p => map.project(toLngLat(p.xw, p.yw)));
+  // a chain partly off screen (the viewer zoomed in on one person) is framed whole first
+  const moved = !screen().every(q => q.x > 20 && q.y > 20 && q.x < box.clientWidth - 20 && q.y < box.clientHeight - 20);
+  if (moved) {
+    const cs = points.map(p => toLngLat(p.xw, p.yw));
+    map.fitBounds(cs.reduce((b, c) => b.extend(c), new maplibregl.LngLatBounds(cs[0], cs[0])),
+                  { padding: fitPadding(), maxZoom: 11, duration: 0 });
+  }
+  if (moved || !(map.loaded() && map.areTilesLoaded())) await new Promise(resolve => map.once("idle", resolve));
+  const qs = screen(), aspect = (SHARE_W - SHARE_MAP_X) / SHARE_H;
+  let x0 = Math.min(...qs.map(q => q.x)), x1 = Math.max(...qs.map(q => q.x));
+  let y0 = Math.min(...qs.map(q => q.y)), y1 = Math.max(...qs.map(q => q.y));
+  const m = Math.max(60, 0.18 * Math.max(x1 - x0, y1 - y0));
+  x0 -= m; x1 += m; y0 -= m; y1 += m + 20;                     // names hang below their dots
+  let w = Math.max(x1 - x0, 360), h = Math.max(y1 - y0, 360 / aspect);
+  if (w / h < aspect) w = h * aspect; else h = w / aspect;
+  const crop = { x: (x0 + x1) / 2 - w / 2, y: (y0 + y1) / 2 - h / 2, w, h };
+  const gl = map.getCanvas(), copy = document.createElement("canvas"), scale = gl.width / gl.clientWidth;
+  copy.width = gl.width; copy.height = gl.height;
+  await new Promise(resolve => {
+    map.once("render", () => { copy.getContext("2d").drawImage(gl, 0, 0); resolve(); });
+    map.triggerRepaint();
+  });
+  // a shown path dims the map (raster-opacity 0.45 over black): the card
+  // brings it most of the way back, since its own bold line carries the path
+  const dim = map.getZoom() < VECTOR_POINTS_MIN_ZOOM ? map.getPaintProperty("dots", "raster-opacity") : 1;
+  if (dim > 0 && dim < 0.85) {
+    try {
+      const x = Math.max(0, Math.floor(crop.x * scale)), y = Math.max(0, Math.floor(crop.y * scale));
+      const w = Math.min(copy.width - x, Math.ceil(crop.w * scale)), h = Math.min(copy.height - y, Math.ceil(crop.h * scale));
+      if (w > 0 && h > 0) {
+        const c = copy.getContext("2d"), img = c.getImageData(x, y, w, h), d = img.data, k = 0.85 / dim;
+        for (let i = 0; i < d.length; i += 4) { d[i] *= k; d[i + 1] *= k; d[i + 2] *= k; }
+        c.putImageData(img, x, y);
+      }
+    } catch { /* unreadable pixels: keep the dim map */ }
+  }
+  return { canvas: copy, scale, crop, project: ll => map.project(ll) };
+}
+
+async function renderShareCard() {
+  const { points, hopColors } = activePath, hops = activePath.hops ?? points.length - 1;
+  const summary = shareChainSummary(points, hops);
+  const shot = await captureChainMap(points);
+  const card = document.createElement("canvas");
+  card.width = SHARE_W; card.height = SHARE_H;
+  const ctx = card.getContext("2d");
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, SHARE_W, SHARE_H);   // the map's own black, so its edges don't show
+
+  // the map, right of the text, fading into it
+  const { canvas: src, scale, crop } = shot;
+  const dx = SHARE_MAP_X, dw = SHARE_W - SHARE_MAP_X, kx = dw / crop.w, ky = SHARE_H / crop.h;
+  const sx0 = Math.max(0, crop.x), sy0 = Math.max(0, crop.y);
+  const sx1 = Math.min(src.width / scale, crop.x + crop.w), sy1 = Math.min(src.height / scale, crop.y + crop.h);
+  if (sx1 > sx0 && sy1 > sy0) {
+    ctx.drawImage(src, sx0 * scale, sy0 * scale, (sx1 - sx0) * scale, (sy1 - sy0) * scale,
+                  dx + (sx0 - crop.x) * kx, (sy0 - crop.y) * ky, (sx1 - sx0) * kx, (sy1 - sy0) * ky);
+  }
+  const fade = ctx.createLinearGradient(SHARE_MAP_X, 0, SHARE_MAP_X + 150, 0);
+  fade.addColorStop(0, "#000"); fade.addColorStop(1, "#0000");
+  ctx.fillStyle = fade; ctx.fillRect(SHARE_MAP_X, 0, 150, SHARE_H);
+
+  // the chain, bolder than the map's own line, coloured hop to hop
+  const at = points.map(p => { const q = shot.project(toLngLat(p.xw, p.yw)); return [dx + (q.x - crop.x) * kx, (q.y - crop.y) * ky]; });
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  for (let i = 0; i < at.length - 1; i++) {
+    const [ax, ay] = at[i], [bx, by] = at[i + 1];
+    ctx.strokeStyle = "#0009"; ctx.lineWidth = 9;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    const g = ctx.createLinearGradient(ax, ay, bx, by);
+    g.addColorStop(0, hopColors[i]); g.addColorStop(1, hopColors[i + 1]);
+    ctx.strokeStyle = g; ctx.lineWidth = 4.5;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+  }
+  // each person: a dot in their colour, and their name below it unless it
+  // would cover another name (both ends are named first)
+  points.forEach((p, i) => {
+    const [x, y] = at[i];
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, 2 * Math.PI);
+    ctx.lineWidth = 2.5; ctx.strokeStyle = p.ghost ? "#888" : "#fff";
+    if (!p.ghost) { ctx.fillStyle = hopColors[i]; ctx.fill(); }
+    ctx.stroke();
+  });
+  ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.font = `600 18px ${SHARE_FONT}`;
+  const named = [];
+  for (const i of new Set([0, points.length - 1, ...points.keys()])) {
+    const name = fitText(ctx, points[i].name, 260), half = ctx.measureText(name).width / 2;
+    const x = Math.min(Math.max(at[i][0], SHARE_MAP_X + 12 + half), SHARE_W - 12 - half), y = at[i][1] + 11;
+    const box = { x0: x - half - 4, x1: x + half + 4, y0: y - 2, y1: y + 22 };
+    if (named.some(o => box.x0 < o.x1 && o.x0 < box.x1 && box.y0 < o.y1 && o.y0 < box.y1)) continue;
+    named.push(box);
+    ctx.save(); ctx.shadowColor = "#000"; ctx.shadowBlur = 8; ctx.fillStyle = "#fff";
+    ctx.fillText(name, x, y);
+    ctx.restore();
+  }
+
+  // the text: name, headline, the chain, the address
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  const textW = SHARE_MAP_X - SHARE_PAD - 20;
+  drawShareLogo(ctx, SHARE_PAD, 42, 42);
+  ctx.fillStyle = "#fff"; ctx.font = `700 28px ${SHARE_FONT}`;
+  ctx.fillText("Mapademic", SHARE_PAD + 56, 74);
+  ctx.font = `800 100px ${SHARE_FONT}`; ctx.fillStyle = "#9dc9ad";
+  ctx.fillText(String(hops), SHARE_PAD, 196);
+  const nw = ctx.measureText(String(hops)).width;
+  ctx.font = `700 46px ${SHARE_FONT}`; ctx.fillStyle = "#fff";
+  ctx.fillText(hops === 1 ? " step" : " steps", SHARE_PAD + nw, 196);
+  ctx.font = `400 26px ${SHARE_FONT}`; ctx.fillStyle = "#c9ced6";
+  ctx.fillText(fitText(ctx, `from ${summary.from}`, textW), SHARE_PAD, 240);
+  ctx.fillText(fitText(ctx, `to ${summary.to}`, textW), SHARE_PAD, 276);
+  const withPapers = points.length <= 5;                       // papers fit for up to 4 steps
+  let y = 330;
+  for (const i of elideChain(points.length, withPapers ? 5 : 8)) {
+    if (i === null) { ctx.fillStyle = "#8a919c"; ctx.font = `700 20px ${SHARE_FONT}`; ctx.fillText("⋮", SHARE_PAD + 3, y); y += 28; continue; }
+    ctx.fillStyle = points[i].ghost ? "#888" : hopColors[i];
+    ctx.beginPath(); ctx.arc(SHARE_PAD + 7, y - 7, 7, 0, 2 * Math.PI); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.font = `600 21px ${SHARE_FONT}`;
+    ctx.fillText(fitText(ctx, points[i].name, textW - 26), SHARE_PAD + 26, y);
+    y += 28;
+    const paper = withPapers && i < points.length - 1 ? shareStepPaper(points[i]) : "";
+    if (paper) {
+      ctx.fillStyle = "#8a919c"; ctx.font = `400 15px ${SHARE_FONT}`;
+      ctx.fillText(fitText(ctx, paper, textW - 26), SHARE_PAD + 26, y - 5);
+      y += 22;
+    }
+  }
+  ctx.font = `400 20px ${SHARE_FONT}`; ctx.fillStyle = "#c9ced6";
+  const lead = "Find your own chain at ";
+  ctx.fillText(lead, SHARE_PAD, SHARE_H - 34);
+  ctx.font = `700 20px ${SHARE_FONT}`; ctx.fillStyle = "#9dc9ad";
+  ctx.fillText("mapademic.app", SHARE_PAD + ctx.measureText(lead).width + 1, SHARE_H - 34);
+
+  const blob = await new Promise((resolve, reject) => card.toBlob(b => b ? resolve(b) : reject(new Error("toBlob")), "image/png"));
+  return { blob, summary };
+}
+
+// The link to this chain: the address bar's, or rebuilt when the path came from elsewhere.
+function chainShareLink() {
+  if (/[#&]p=/.test(location.hash)) return location.href;
+  const [a, b] = (activePath && activePath.ids) || [];
+  const view = location.hash.slice(1).split("&")[0];
+  return a && b ? `${location.origin}${location.pathname}#${view}&p=${a},${b}` : location.href;
+}
+function shareSay(text) {
+  shareNote.textContent = text;
+  clearTimeout(shareNoteTimer);
+  shareNoteTimer = setTimeout(() => { shareNote.textContent = ""; }, 2500);
+}
+function closeShare() {
+  shareOverlay.classList.remove("open");
+  if (shareState) { URL.revokeObjectURL(shareState.url); shareState = null; }
+}
+document.getElementById("connect-share").addEventListener("click", async ev => {
+  const btn = ev.currentTarget;
+  if (!activePath || btn.disabled) return;
+  btn.disabled = true; btn.textContent = "Making image…";
+  try {
+    const { blob, summary } = await renderShareCard();
+    const file = new File([blob], summary.fileName, { type: "image/png" });
+    if (shareState) URL.revokeObjectURL(shareState.url);
+    shareState = { blob, file, summary, url: URL.createObjectURL(blob), link: chainShareLink() };
+    sharePreview.src = shareState.url;
+    sharePreview.alt = summary.text;
+    shareNativeBtn.hidden = !(navigator.canShare && navigator.canShare({ files: [file] }));
+    shareCopyImageBtn.hidden = !(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write);
+    shareNote.textContent = "";
+    shareOverlay.classList.add("open");
+    (shareNativeBtn.hidden ? document.getElementById("share-download") : shareNativeBtn).focus();
+  } catch (err) {
+    console.error("share image failed:", err);
+    setPathStatus("Couldn't make the image here. Copy the link with Share instead.");
+  } finally {
+    btn.disabled = false; btn.textContent = "Share chain";
+  }
+});
+shareNativeBtn.addEventListener("click", async () => {
+  if (!shareState) return;
+  try {
+    await navigator.share({ files: [shareState.file], title: "Mapademic",
+                            text: `${shareState.summary.text} Find your own chain: ${shareState.link}` });
+  } catch (err) {
+    if (err.name !== "AbortError") shareSay("Sharing didn't work here. Download the image instead.");
+  }
+});
+document.getElementById("share-download").addEventListener("click", () => {
+  if (!shareState) return;
+  const a = document.createElement("a");
+  a.href = shareState.url; a.download = shareState.summary.fileName;
+  document.body.append(a); a.click(); a.remove();
+});
+shareCopyImageBtn.addEventListener("click", async () => {
+  if (!shareState) return;
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": shareState.blob })]);
+    shareSay("Image copied");
+  } catch { shareSay("Couldn't copy the image here. Download it instead."); }
+});
+document.getElementById("share-copy-link").addEventListener("click", async () => {
+  if (!shareState) return;
+  try { await navigator.clipboard.writeText(shareState.link); shareSay("Link copied"); }
+  catch { prompt("Copy this link:", shareState.link); }
+});
+document.getElementById("share-close").addEventListener("click", closeShare);
+shareOverlay.addEventListener("click", ev => { if (ev.target === shareOverlay) closeShare(); });
+
 const shareBtn = document.getElementById("share-btn");
 let shareBtnTimer = null;
 shareBtn.addEventListener("click", async () => {
@@ -6167,7 +6477,10 @@ helpOverlay.addEventListener("click", ev => { if (ev.target === helpOverlay) clo
 // keydown handlers.
 document.addEventListener("keydown", ev => {
   if (ev.key === "Escape") {
-    if (infoCard.classList.contains("open")) {
+    if (shareOverlay.classList.contains("open")) {
+      ev.preventDefault(); ev.stopPropagation();
+      closeShare();
+    } else if (infoCard.classList.contains("open")) {
       ev.preventDefault(); ev.stopPropagation();
       closeInfoCard();
     } else if (helpOverlay.classList.contains("open")) {
