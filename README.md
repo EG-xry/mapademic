@@ -15,15 +15,13 @@ by [riptideiv](https://github.com/riptideiv); see
 
 **Live map: [mapademic.app](https://mapademic.app)**
 
-![The whole map, without the dust of loosely connected authors: coauthorship communities colored by their position around the map center, each packed into sub-areas, brightness by author density](docs/map.jpg)
+![Mapademic in 17 seconds: the 1 million strongest coauthor ties, then 8.4 million researchers placed by who they write papers with, a zoom into economics, and Connect drawing the shortest coauthor chain from Somik Lall to Amy Dittmar](docs/mapademic.gif)
 
-![Connect across economics: Somik Lall to Amy Dittmar through Raghuram Rajan and Henri Servaes, in a straight line from development economics to corporate finance, each step labelled with a paper the two wrote together](docs/connect.jpg)
+*Mapademic in 17 seconds: the strongest coauthor ties, the map itself, a zoom
+into economics, and Connect finding the shortest chain of coauthors from Somik
+Lall to Amy Dittmar, one shared paper per step.*
 
-*Connect across economics: Somik Lall → Raghuram Rajan → Henri Servaes → Amy
-Dittmar. Each researcher sits among their own coauthors, so the path walks
-from the development economists (near Acemoglu, Sen and Stiglitz) to the
-corporate-finance researchers (near Fama, Stulz and Harvey), one shared paper
-per step.*
+![The map as it opens: coauthorship communities colored by their position around the map center, the most-cited researchers as bright dots, and faint lines joining the million most frequent coauthor pairs](docs/map.jpg)
 
 ## Features
 
