@@ -406,6 +406,8 @@ site needs no server.
 
 ## License and attribution
 
+The code is released under the [MIT License](LICENSE).
+
 Author and work data originates from [OpenAlex](https://openalex.org),
 released under CC0. The viewer is built on
 [MapLibre GL JS](https://maplibre.org).
