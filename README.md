@@ -1,5 +1,7 @@
 # mapademic
 
+Created by [Eric Gao](https://github.com/EG-xry), a student at UC San Diego.
+
 A zoomable map of 8,396,458 researchers: OpenAlex authors with 15 or more
 works, positioned by coauthorship and colored by detected community. The map
 is served as a static site: raster tiles plus JSON indexes, rendered in the
@@ -382,6 +384,14 @@ institution search.
 
 Run frontend regression tests with Node.js 18+:
 `node --test tests/test_institution_connect.cjs`.
+
+## Credits
+
+Mapademic was created and is maintained by
+[Eric Gao](https://github.com/EG-xry), a student at UC San Diego.
+
+[Bruce Wen](https://github.com/owlsowo) contributed Connect from an
+institution and the optional personal OpenAlex API key (pull requests #1 and #2).
 
 ## Acknowledgements
 

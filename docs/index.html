@@ -147,8 +147,6 @@
     .connect-actions button:hover { border-color: #7fae8e; }
     /* R31: startup demo caption -- same pill language, one step louder since
        it is the first thing a visitor reads. */
-    #connect-status .demo-note { color: #ddd; }
-    #connect-status .demo-note b { color: #7fae8e; font-weight: 600; }
     #connect-status { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
                        border-radius: 6px; padding: 4px 10px; min-height: 14px; }
     .path-node { display: flex; flex-direction: column; align-items: center;
@@ -314,7 +312,7 @@
   </div>
 </div>
 <button id="help-btn" type="button" aria-label="Help">?</button>
-<details id="legend" open><summary>Legend</summary><div id="legend-isolate-pill"></div><div id="legend-rows"></div></details>
+<details id="legend"><summary>Legend</summary><div id="legend-isolate-pill"></div><div id="legend-rows"></div></details>
 <div id="help-overlay" role="dialog" aria-modal="true" aria-labelledby="help-title">
   <div id="help-card">
     <div class="hc-head">
@@ -330,17 +328,21 @@
       </section>
       <section>
         <h3>Reading the map</h3>
-        <p>Bright splats are highly-cited authors (60,000+ citations). The
-          faint grey web visible at z8-9 is repeat coauthorships - at max
-          zoom the map stays clean, and you see a researcher's coauthorships
-          by searching them or via the info card's Coauthors button. The
-          faint grey speckle in dark areas is background dust - authors with
-          no retained coauthor links, kept searchable but not rendered as
-          interactive dots. The gear's Full point cloud toggle sizes and
-          colors every author as a dot at every zoom, not just up close, and
-          hides the raster splats while it's on; the Top-author dots
-          checkbox controls a lighter top-cited overlay below deep zoom on
-          its own.</p>
+        <p>Each dot is a researcher, placed near the people they write papers
+          with and colored by their community: a field, or a national research
+          network. Lighter and darker shades of a color are its sub-groups, and
+          bigger dots mean more citations. Top-author dots mark the most-cited
+          researchers before you zoom in close.</p>
+        <p>Faint lines join the million most frequent coauthor pairs. They are
+          on at their faintest on computers (the gear's Line visibility slider
+          brightens them) and off on phones, where they would be a 16MB
+          download; switch them on with Connection lines in the gear.</p>
+        <p><b>Cosmic dust</b> (off by default; switch it on in the gear) is the
+          faint grey haze of researchers the map cannot place in a field:
+          authors with no coauthor links on the map, groups too small for the
+          legend (under 1,000 researchers), and near-empty records with no
+          institution and few citations. Most of it forms the ring around the
+          map's edge. Dust authors stay searchable either way.</p>
       </section>
       <section>
         <h3>Controls</h3>
@@ -431,14 +433,14 @@
          vary: whether the mid-zoom top-author overlay renders. See
          displaySettings.overlayDots. -->
     <label class="dp-check">
-      <input id="dp-overlay-dots" type="checkbox">
+      <input id="dp-overlay-dots" type="checkbox" checked>
       Top-author dots at low zoom
     </label>
     <!-- R35b: the citation size-contrast slider is gone -- it resized the
          clickable dots and the cloud but not the baked raster, so any value
          but the default made big authors jump in size at the hand-off. -->
     <label class="dp-check" title="Authors with no coauthor links, groups too small for the legend, and near-empty records, drawn as faint grey dust">
-      <input id="dp-dust" type="checkbox" checked>
+      <input id="dp-dust" type="checkbox">
       Cosmic dust
     </label>
     <!-- R17: full-cloud WebGL layer, graduated from the R15b experiment --
@@ -1563,15 +1565,13 @@ async function renderPath(pathSteps, hops, idA, idB) {
   drawResolvedPath(points, hopColors, hops, idA, idB);
 }
 
-// R29: split out of renderPath so the startup demo path (see demo_path.json/
-// showDemoPath below) can draw the exact same overlay -- segment gradients,
-// hop markers, hop list, label suppression, path-dim, camera framing -- from
-// an already-resolved points/hopColors pair, with zero network access.
-// writeUrl (false only for the demo) gates the activeP/p= hash claim, so the
-// baked demo never looks like a user-requested Connect result in a copied
-// link; every other side effect (activePath, pathMarkers, pathOverlayIds,
-// pathDimActive) is set the same way either way, so clearPath/a real Go both
-// tear it down exactly as they would a normal path.
+// R29: split out of renderPath to draw a path from an already-resolved
+// points/hopColors pair -- segment gradients, hop markers, hop list, label
+// suppression, path-dim, camera framing -- with zero network access.
+// writeUrl gates the activeP/p= hash claim (it was false only for the startup
+// example path, removed in R37); every other side effect (activePath,
+// pathMarkers, pathOverlayIds, pathDimActive) is set the same way either way,
+// so clearPath/a real Go both tear it down exactly as they would a normal path.
 function drawResolvedPath(points, hopColors, hops, idA, idB, { writeUrl = true } = {}) {
   // One visual mode at a time: a path about to draw takes over the highlight
   // slot, so drop any active search highlight (and its rays) first -- covers
@@ -1641,53 +1641,6 @@ function drawResolvedPath(points, hopColors, hops, idA, idB, { writeUrl = true }
     writeHash();
   }
   setPathStatus(hopsText(hops));
-}
-
-// ---- R29: startup demo connection ----
-// R33: the startup example (a real 4-hop coauthor chain, Geoffrey Hinton ->
-// Jennifer Doudna; see pipeline/build_index.py DEMO_PATH for why this pair)
-// is written per release as data/index/demo_path.json, with each author's
-// position and community from that release's layout. It used to be baked in
-// here with July 2026 coordinates and hop colours, which left the five dots
-// off their researchers once the 2026-09-23 layout moved everyone. One small
-// fetch; still no /api/path call, so the public site needs no backend for it.
-// Draws the example exactly like a resolved Connect result (writeUrl: false --
-// see drawResolvedPath -- so the demo never appears in a copied link) and
-// counts as a pathGen of its own, so a real Go/Clear afterwards tears it down
-// through the ordinary clearPath path with no special-casing. Async: it waits
-// for demo_path.json and legend.json (hop colours), then bails if the visitor
-// has meanwhile started a search, rays or a path of their own (same R32 rule
-// as the load handler that calls it).
-function visitorOwnsOverlay() {
-  return activeA != null || activeRays != null || rayEventSource != null
-    || activePath != null || pathEventSource != null;
-}
-async function showDemoPath() {
-  const gen = ++pathGen;
-  const demo = await fetchJsonOr404(DATA_BASE + "/data/index/demo_path.json").catch(() => null);
-  if (!demo || !Array.isArray(demo.points) || demo.points.length < 2) return;
-  await legendLoaded;
-  if (gen !== pathGen || visitorOwnsOverlay()) return;
-  const points = demo.points.map(p => ({ id: p.id, name: p.name, xw: p.xw, yw: p.yw, ghost: false, label: p.label }));
-  const hopColors = demo.points.map(p => colorForCommunity(p.community, p.sub));
-  drawResolvedPath(points, hopColors, demo.hops, demo.idA, demo.idB, { writeUrl: false });
-  // R31: the drawn path lives inside the Connect panel, so a visitor who never
-  // clicks "Connect" sees five labelled dots with no explanation of what they
-  // are. Open the panel and replace the bare "4 hops" with a caption naming the
-  // endpoints and inviting a real search. drawResolvedPath's own setPathStatus
-  // runs first, so this overwrites it -- and any later Go/Clear overwrites this
-  // in turn through the ordinary setPathStatus path (textContent), no
-  // special-casing needed to tear the markup down.
-  const [nameA, nameB] = demo.caption || [points[0].name, points[points.length - 1].name];
-  connectPanel.classList.add("open");
-  connectToggle.classList.add("active");
-  connectStatus.innerHTML = "";
-  const note = document.createElement("span");
-  note.className = "demo-note";
-  note.append("Example: ", Object.assign(document.createElement("b"), { textContent: nameA }), " to ",
-              Object.assign(document.createElement("b"), { textContent: nameB }),
-              ` in ${demo.hops} co-authorship hops. Search any two researchers above.`);
-  connectStatus.appendChild(note);
 }
 
 // ---- R35c: Connect searched in the visitor's browser ----
@@ -2737,14 +2690,20 @@ function collides(placed, x, y, w, h) {
 // at low zoom off by default) -- was true, matching the old pointMode
 // "both" default's behavior (see loadDisplaySettings' migration comment
 // below for the retired three-way radio).
-const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0.16, saturation: 0, labelDensity: 1, regionNames: true, overlayDots: false, labelMode: "faint", dust: true, allPoints: false, edgeLines: false, edgeIntensity: 0.005, edgeCount: 1000000 };
+// R37 (Eric, 2026-10-23): top-author dots on, cosmic dust off, connection
+// lines on at the faintest visibility -- on computers only: phones, data
+// saver and slow connections (startupPrefetchWanted) keep them off, since they
+// are a 16MB download (a phone's first visit is ~7MB without them).
+const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0.16, saturation: 0, labelDensity: 1, regionNames: true, overlayDots: true, labelMode: "faint", dust: false, allPoints: false, edgeLines: startupPrefetchWanted(), edgeIntensity: 0.005, edgeCount: 1000000 };
 // R28: bumped key (was "mapademic.display") -- resets every visitor's saved
 // settings ONCE to the new defaults above; the old key is simply never read
 // again (harmless orphan, same "stale key" reasoning as the retired
 // "boundaries"/pointMode/vectorPoints keys below). Persistence itself is
 // unchanged going forward -- saveDisplaySettings still writes here on every
 // change.
-const DISPLAY_KEY = "mapademic.display.v2";
+// R37: bumped again so every visitor, returning ones included, gets the R37
+// defaults once.
+const DISPLAY_KEY = "mapademic.display.v3";
 
 // R12b: a stale localStorage value still carrying the removed "boundaries"
 // key just spreads in as an extra unused property on displaySettings below
@@ -5181,8 +5140,13 @@ async function updateVectorPoints() {
     features = entries.map(entryToFeature);
   }
 
+  // R37: with top-author dots on by default, a call made before the map's
+  // "load" (settings sync at startup) gets here before setupVectorPointsLayer
+  // has added the source; the load handler calls this again once it exists.
+  const source = map.getSource("vector-points");
+  if (!source) return;
   vectorPointsLastKey = incomplete ? null : setKey;
-  map.getSource("vector-points").setData({ type: "FeatureCollection", features });
+  source.setData({ type: "FeatureCollection", features });
   setVectorPointsVisible(true);
 }
 
@@ -5423,7 +5387,9 @@ function areaName(community, sub) {
   return s && s.name ? `${e.name} \u203A ${s.name}` : e.name;
 }
 
-// R33: kept as a promise so showDemoPath can wait for hop colours.
+// R33: a promise, for anything that must wait for hop colours. (R37: the
+// startup example path that awaited it is gone -- Eric did not want the site
+// to open on a canned connection.)
 const legendLoaded = fetch(DATA_BASE + "/data/index/legend.json").then(r => r.ok ? r.json() : []).catch(() => [])
   .then(entries => {
     // All 37 big communities go into the color map, so vector points match
@@ -5904,29 +5870,13 @@ map.on("load", () => {
   // comment -- kept in this order simply to match the panel's top-to-bottom
   // row order (Full point cloud above Connection lines).
   if (displaySettings.edgeLines) setEdgeLinesActive(true);
-  syncDustVisible();   // R35b: dust is its own layer now (on by default)
+  syncDustVisible();   // R35b: dust is its own layer now (R37: off by default)
   applyDisplayPaint();
   drawLabels();
   drawRegions();
   updateVectorPoints();
   updateRasterOpacity();
   restoreFromHash(initialHash);   // async; resolves a=/p= independently of view restore
-  // R29: startup demo path -- only on a truly bare load (no view/a/p at all
-  // in the URL), so a shared link or a returning visitor's own restored view/
-  // search/path is never replaced by the canned example. restoreFromHash
-  // above is async but only acts when a/p is present, which this branch
-  // already excludes, so there's no race between the two over the highlight/
-  // path slot.
-  // R32: ...but the URL isn't the only thing the demo can clobber. "load"
-  // waits for the initial raster tiles, while the search box works from the
-  // first frame, so on a slow tile host a visitor can already have searched
-  // (highlight + rays) or started a Connect before this runs -- and
-  // drawResolvedPath's clearSearchAndRays wiped that for the canned example
-  // (reproduced with tiles held back). Only show it while the visitor owns
-  // none of the highlight/rays/path slots.
-  if ((!initialHash || (!initialHash.view && !initialHash.a && !initialHash.p)) && !visitorOwnsOverlay()) {
-    showDemoPath();
-  }
 });
 // ---- Task 5 (data-pipeline): live label/region updates while panning/zooming ----
 // "move" fires repeatedly for the whole duration of a gesture (pan, zoom,
