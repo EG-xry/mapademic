@@ -192,14 +192,19 @@
     .coauthor-label { color: #fff; font: 11px system-ui; text-shadow: 0 0 4px #000, 0 0 8px #000;
                        white-space: nowrap; margin-top: 2px; pointer-events: none; }
     /* ---- Task 1 (night-polish): display settings panel ---- */
-    #display-gear { position: fixed; right: 10px; bottom: 46px; z-index: 9;
+    /* R42 (Eric, 2026-10-24): on a computer the gear sits at the top right
+       beside ?, and its panel drops down left of the legend's column, so the
+       legend and the settings can be open together without covering each
+       other. The +/- buttons moved to the bottom right, out from under the
+       legend. */
+    #display-gear { position: fixed; right: 250px; top: 10px; z-index: 9;
                      width: 30px; height: 30px; background: #0b0b0bd9; color: #ddd;
                      border: 1px solid #333; border-radius: 6px; cursor: pointer;
                      font: 15px system-ui; line-height: 1; }
     #display-gear:hover { border-color: #7fae8e; }
-    #display-panel { position: fixed; right: 10px; bottom: 82px; background: #0b0b0bd9;
+    #display-panel { position: fixed; right: 250px; top: 46px; background: #0b0b0bd9;
                       color: #ddd; font: 12px system-ui; border-radius: 6px;
-                      width: 230px; max-height: calc(100dvh - 100px); overflow-y: auto;
+                      width: 230px; max-height: calc(100dvh - 56px); overflow-y: auto;
                       z-index: 9; display: none; }
     #display-panel.open { display: block; }
     #display-panel .dp-body { padding: 4px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
@@ -254,7 +259,7 @@
     button:focus-visible, input:focus-visible, a:focus-visible, [tabindex]:focus-visible {
       outline: 2px solid #7fae8e; outline-offset: 2px;
     }
-    #help-btn { position: fixed; right: 250px; top: 10px; z-index: 9;
+    #help-btn { position: fixed; right: 286px; top: 10px; z-index: 9;
                  width: 30px; height: 30px; background: #0b0b0bd9; color: #ddd;
                  border: 1px solid #333; border-radius: 6px; cursor: pointer;
                  font: 15px system-ui; line-height: 1; }
@@ -320,13 +325,13 @@
       #legend-rows { max-height: calc(55dvh - 60px); }
       #legend button.row { padding-top: 6px; padding-bottom: 6px; font-size: 13px; }
       #help-btn { top: auto; right: 8px; bottom: calc(84px + env(safe-area-inset-bottom)); width: 40px; height: 40px; }
-      #display-gear { right: 8px; bottom: calc(36px + env(safe-area-inset-bottom)); width: 40px; height: 40px; }
-      #display-panel { left: 8px; right: 8px; width: auto; bottom: calc(132px + env(safe-area-inset-bottom));
+      #display-gear { top: auto; right: 8px; bottom: calc(36px + env(safe-area-inset-bottom)); width: 40px; height: 40px; }
+      #display-panel { top: auto; left: 8px; right: 8px; width: auto; bottom: calc(132px + env(safe-area-inset-bottom));
                        max-height: calc(100dvh - 220px); font-size: 14px; }
       #info-card { left: 8px; right: 8px; width: auto; bottom: calc(8px + env(safe-area-inset-bottom)); z-index: 11; }
       .ic-actions button { min-height: 40px; font-size: 13px; }
       #help-card { width: calc(100vw - 16px); max-width: none; max-height: calc(100dvh - 16px); font-size: 14px; }
-      .maplibregl-ctrl-top-right { display: none; }
+      .maplibregl-ctrl-bottom-right .maplibregl-ctrl-group { display: none; }
       /* one solid card, so map names don't show through its inputs */
       #connect-panel.open { background: #0b0b0bf2; border-radius: 8px; padding: 8px; }
     }
@@ -763,7 +768,7 @@ const map = new maplibregl.Map({
   center: [0, 0], zoom: 1, minZoom: PHONE_LAYOUT.matches ? -1 : 0, maxZoom: 11, renderWorldCopies: false,
   pixelRatio: RENDER_PIXEL_RATIO
 });
-map.addControl(new maplibregl.NavigationControl());
+map.addControl(new maplibregl.NavigationControl(), "bottom-right");   // R42: clear of the legend
 // R40: the map has no north, so a two-finger twist or tilt only disorients
 if (TOUCH) { map.touchZoomRotate.disableRotation(); map.touchPitch.disable(); }
 
@@ -2900,6 +2905,9 @@ syncDisplayUI();
 dpGear.addEventListener("click", () => {
   const open = dpPanel.classList.toggle("open");
   dpGear.setAttribute("aria-expanded", String(open));
+  // R42: on a phone the two sheets would cover each other: one at a time
+  if (open && PHONE_LAYOUT.matches) document.getElementById("legend").open = false;
+  drawLabels();       // no labels under the panel, and none missing once it closes
 });
 
 // R24: brightness/contrast/saturation now also drive the point cloud's own
@@ -3062,7 +3070,7 @@ async function drawLabels() {
     if (r.width) placed.push({ x: r.left - box.left + r.width / 2, y: r.top - box.top + r.height / 2, w: r.width + 8, h: r.height + 4 });
   };
   map.getContainer().querySelectorAll(".path-label, .coauthor-label, .region").forEach(claim);
-  document.querySelectorAll("#search, #legend").forEach(claim);
+  document.querySelectorAll("#search, #legend, #display-panel").forEach(claim);
   const baseCap = z >= 10 ? 150 : 60;
   const cap = Math.round(baseCap * displaySettings.labelDensity);
   for (const [name, id, xw, yw, cited] of entries) {
@@ -5284,6 +5292,9 @@ function applyLegendPadding() {
   map.setPadding({ top: 0, bottom: 0, left: 0, right: legendEl.open && !PHONE_LAYOUT.matches ? 260 : 0 });
 }
 legendEl.addEventListener("toggle", applyLegendPadding);
+legendEl.addEventListener("toggle", () => {   // R42: one sheet at a time on a phone
+  if (legendEl.open && PHONE_LAYOUT.matches && dpPanel.classList.contains("open")) dpGear.click();
+});
 PHONE_LAYOUT.addEventListener("change", applyLegendPadding);
 
 // ---- Task R10a: legend author highlight + community isolate v1 ----
