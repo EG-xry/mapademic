@@ -5,7 +5,7 @@
 #   MAPADEMIC_DATA=data/2026-09-23 bash scripts/build_map.sh
 #
 # Writes <release>/{subcommunities.parquet, coords_web.parquet,
-# edges_px.parquet, regions.json, tiles/, pathgraph/, paths/, index/,
+# regions.json, tiles/, pathgraph/, paths/, index/,
 # vector_experiment/}.
 # subcommunities (about 15 min on a laptop) reruns only when the layout is
 # newer than its output. regions runs before tiles because the tiles stage
@@ -24,10 +24,9 @@ if [ ! -f "$D/subcommunities.parquet" ] || [ "$D/coords.parquet" -nt "$D/subcomm
   step "$PY" -m pipeline subcommunities
 fi
 step "$PY" -m pipeline webcoords
-step "$PY" -m pipeline edgepx
 step "$PY" -m pipeline regions
 rm -rf "$D/tiles"
-step "$PY" -m pipeline tiles --zooms 0-10 --edges "$D/edges_px.parquet"
+step "$PY" -m pipeline tiles --zooms 0-10
 [ -f "$D/pathgraph/neighbors.npy" ] && [ "$D/pathgraph/neighbors.npy" -nt "$D/graph/edges_int32.parquet" ] \
   || step "$PY" -m pipeline pathgraph
 step "$PY" -m scripts.export_paths_bin          # paths/: Connect's graph for the browser (~9 min)

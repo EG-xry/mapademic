@@ -109,9 +109,9 @@ per-community jitter in lightness and saturation. Communities below the
 
 Dominant community and log-density brightness are computed per pixel at
 zoom 10 (a 262144 x 262144 virtual grid), then reduced by pyramid
-downsampling through zoom 0 and written as PNG tiles. Coauthor edges with
-weight 2 or higher and bounded length are baked into tiles at zoom 8-9.
-From zoom 8 up, each author is also drawn as an anti-aliased disc sized by
+downsampling through zoom 0 and written as PNG tiles. Tiles carry no
+coauthor edges; the viewer draws the strongest ties itself (Connection
+lines in the settings). From zoom 8 up, each author is also drawn as an anti-aliased disc sized by
 citations on a log scale (`pipeline/sizing.py`): t = log(1 + c/100) /
 log(1 + 150000/100), and a radius of 2^(z-10) px plus 3.5·t·2^((z-10)/2) px,
 so at zoom 10 discs run from 1 px (uncited) to 4.5 px (150k+ citations). The
@@ -247,8 +247,7 @@ fetches `coords.parquet`. On Expanse's 32GB V100s the full graph needs
 With `coords.parquet` in place, the remaining stages run on CPU again;
 `MAPADEMIC_DATA=<release> bash scripts/build_map.sh` runs all of them below,
 plus the three browser binaries, in the required order.
-`edgepx` must run after `webcoords` and before `tiles --edges`, since it
-reads both `coords_web.parquet` and `edges.parquet`. `regions` names the
+`regions` names the
 map from the OpenAlex institutions and topics tables (about 100 MB), so
 mirror them once per release first:
 
@@ -256,9 +255,8 @@ mirror them once per release first:
 python -m pipeline download --entities institutions topics   # snapshot/{institutions,topics}
 python -m pipeline subcommunities                       # subcommunities.parquet: sub-groups of each big community (~15 min)
 python -m pipeline webcoords                            # coords_web.parquet (spread 1.6; each sub-group gets its own area)
-python -m pipeline edgepx                               # edges_px.parquet
 python -m pipeline regions                              # regions.json: region + sub-area names (tiles names the legend from it)
-python -m pipeline tiles --zooms 0-10 --edges "$MAPADEMIC_DATA/edges_px.parquet"  # tiles/ (~4.7GB)
+python -m pipeline tiles --zooms 0-10                   # tiles/ (~2.4GB)
 python -m pipeline index                                # index/ (~3.5GB: label tiles, search shards, legend, community rosters)
 ```
 

@@ -18,7 +18,7 @@ and data/tiles are untouched.
 Edges touching a ring/dust node (is_ring=true, see pipeline/webcoords.py's
 ring_pred) are excluded, same as the point-cloud export. Only the
 repeat-collaboration set (weight >= 2) is exported; no edge-length filter
-is applied here (unlike pipeline/edge_px.py's tile-baking stage).
+is applied here.
 
 Colors reuse pipeline.palette via scripts.export_points_bin's community
 color LUT (same min_members=1000 rule as the legend and the point cloud):

@@ -7,7 +7,7 @@ from PIL import Image
 
 from pipeline.palette import group_key, load_community_stats
 from pipeline import sizing
-from pipeline.tiles import (EDGE_MAXZ, MAXZ, PIX, TILE, aggregate_maxz, legend_inputs,
+from pipeline.tiles import (MAXZ, PIX, TILE, aggregate_maxz, legend_inputs,
                             load_level9, load_markers, reduce_level,
                             render_zoom, write_legend)
 
@@ -253,112 +253,6 @@ def test_legend_json(tmp_path):
                         "field": "Medicine", "members": 1500,
                         "color": entries[0]["color"]}]
     assert entries[0]["color"].startswith("#") and len(entries[0]["color"]) == 7
-
-
-def test_render_zoom_bakes_faint_edges_at_edge_maxz(tmp_path):
-    # edges are stored at native MAXZ pixel resolution and get right-shifted
-    # by (MAXZ - z) at render time, so scale x2 to land on the same
-    # zoom-EDGE_MAXZ pixels the old MAXZ-scale test targeted (shift == 0).
-    level = {"px": np.array([10]), "py": np.array([10]),
-             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
-    edges = {"x0": np.array([20]), "y0": np.array([20]),
-             "x1": np.array([220]), "y1": np.array([20])}
-    render_zoom(level, EDGE_MAXZ, tmp_path, bloom=False, edges=edges)
-    # EDGE_MAXZ: yu = py // TILE = 0, ntiles = 1 << EDGE_MAXZ, ty = (ntiles-1) - yu
-    ntiles = 1 << EDGE_MAXZ
-    img = np.asarray(Image.open(tmp_path / str(EDGE_MAXZ) / "0" / f"{ntiles - 1}.png")).astype(int)
-    mid = img[(TILE - 1) - 10, 60]              # a pixel along the edge
-    assert 3 <= mid.max() <= 40                 # faint but present
-    assert img[(TILE - 1) - 10, 10, 0] > 200    # node still bright red
-
-
-def test_no_regular_edges_at_maxz(tmp_path):
-    # z10 stays edge-free: regular edges are capped at EDGE_MAXZ (9), so
-    # passing an edges dict at z == MAXZ must draw nothing.
-    level = {"px": np.array([10]), "py": np.array([10]),
-             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
-    edges = {"x0": np.array([10]), "y0": np.array([10]),
-             "x1": np.array([110]), "y1": np.array([10])}
-    render_zoom(level, MAXZ, tmp_path, bloom=False, edges=edges)
-    ntiles = 1 << MAXZ
-    img = np.asarray(Image.open(tmp_path / str(MAXZ) / "0" / f"{ntiles - 1}.png")).astype(int)
-    mid = img[(TILE - 1) - 10, 60]              # a pixel along where the edge would be
-    assert mid.max() == 0                        # no regular edges drawn at MAXZ
-    assert img[(TILE - 1) - 10, 10, 0] > 200      # node still bright red
-
-
-def test_no_edges_below_z8(tmp_path):
-    level = {"px": np.array([0]), "py": np.array([0]),
-             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
-    edges = {"x0": np.array([0]), "y0": np.array([0]),
-             "x1": np.array([200 << 2]), "y1": np.array([0])}
-    render_zoom(level, 7, tmp_path, bloom=False, edges=edges)
-    ntiles = 1 << 7
-    img = np.asarray(Image.open(tmp_path / "7" / "0" / f"{ntiles - 1}.png")).astype(int)
-    assert img[TILE - 1, 30].max() == 0         # nothing drawn along the line
-
-
-def test_render_zoom_draws_w1_edges_at_maxz(tmp_path):
-    level = {"px": np.array([10]), "py": np.array([10]),
-             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
-    edges_w1 = {"x0": np.array([10]), "y0": np.array([10]),
-                "x1": np.array([110]), "y1": np.array([10])}
-    render_zoom(level, MAXZ, tmp_path, bloom=False, edges_w1=edges_w1)
-    ntiles = 1 << MAXZ
-    img = np.asarray(Image.open(tmp_path / str(MAXZ) / "0" / f"{ntiles - 1}.png")).astype(int)
-    mid = img[(TILE - 1) - 10, 60]              # a pixel along the w1 edge
-    assert 1 <= mid.max() <= 15                 # faint (W1_ALPHA=0.05 < EDGE_ALPHA=0.08)
-    assert img[(TILE - 1) - 10, 10, 0] > 200    # node still bright red
-
-
-def test_w1_edges_not_drawn_below_maxz(tmp_path):
-    level = {"px": np.array([10]), "py": np.array([10]),
-             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
-    edges_w1 = {"x0": np.array([10]), "y0": np.array([10]),
-                "x1": np.array([110]), "y1": np.array([10])}
-    render_zoom(level, MAXZ - 1, tmp_path, bloom=False, edges_w1=edges_w1)
-    ntiles = 1 << (MAXZ - 1)
-    img = np.asarray(Image.open(tmp_path / str(MAXZ - 1) / "0" / f"{ntiles - 1}.png")).astype(int)
-    mid = img[(TILE - 1) - 5, 30]                # where the shifted edge midpoint would land
-    assert mid.max() == 0                        # w1 edges draw only at z == MAXZ
-
-
-def test_edge_with_midpoint_in_other_tile_still_renders(tmp_path):
-    # Edge (10,10)-(700,10) post-shift at EDGE_MAXZ (raw coords x2, since
-    # edges are native-MAXZ-scale and get >>1 at z == EDGE_MAXZ): midpoint
-    # x=355 lies in tile (1,0), but the segment crosses tile (0,0). Pins
-    # neighbor-bucket union correctness: a midpoint-only bucket lookup would
-    # miss this edge for tile (0,0).
-    level = {"px": np.array([10]), "py": np.array([10]),
-             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
-    edges = {"x0": np.array([20]), "y0": np.array([20]),
-             "x1": np.array([1400]), "y1": np.array([20])}
-    render_zoom(level, EDGE_MAXZ, tmp_path, bloom=False, edges=edges)
-    ntiles = 1 << EDGE_MAXZ
-    img = np.asarray(Image.open(tmp_path / str(EDGE_MAXZ) / "0" / f"{ntiles - 1}.png")).astype(int)
-    assert img[(TILE - 1) - 10, 200].max() >= 3   # edge drawn inside tile (0,0)
-
-
-def test_regular_edges_share_single_glow_ceiling(tmp_path):
-    # 4 overlapping regular-edge copies on the SAME pixels (4*0.08=0.32
-    # accumulated alpha) get clipped to the 0.25 ceiling before EDGE_RGB is
-    # applied. This replaces the old cross-layer (edges + w1) ceiling test,
-    # which is no longer reachable now that regular edges (z8-9) and w1
-    # edges (z == MAXZ only) never render at the same zoom.
-    from pipeline.tiles import EDGE_RGB
-    level = {"px": np.array([200]), "py": np.array([200]),
-             "cnt": np.array([1]), "rgb": np.array([[1.0, 0, 0]], np.float32)}
-    edges = {"x0": np.array([20] * 4), "y0": np.array([20] * 4),
-             "x1": np.array([220] * 4), "y1": np.array([20] * 4)}
-    render_zoom(level, EDGE_MAXZ, tmp_path, bloom=False, edges=edges)
-    ntiles = 1 << EDGE_MAXZ
-    img = np.asarray(Image.open(tmp_path / str(EDGE_MAXZ) / "0" / f"{ntiles - 1}.png"))
-    expected = tuple((np.clip(np.float32(0.25) * EDGE_RGB, 0, 1) * 255)
-                     .astype(np.uint8))
-    assert tuple(img[(TILE - 1) - 10, 60]) == expected
-    # combined brightness never exceeds the single ceiling on any channel
-    line = img[(TILE - 1) - 10, 10:111].astype(int)
-    assert (line <= np.array(expected)[None, :]).all()
 
 
 def test_sub_groups_colour_their_own_pixels(tmp_path):
