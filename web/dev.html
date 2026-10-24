@@ -193,20 +193,21 @@
                        white-space: nowrap; margin-top: 2px; pointer-events: none; }
     /* ---- Task 1 (night-polish): display settings panel ---- */
     /* R42 (Eric, 2026-10-24): on a computer the gear sits at the top right
-       beside ?, and its panel drops down left of the legend's column, so the
-       legend and the settings can be open together without covering each
-       other. The +/- buttons moved to the bottom right, out from under the
-       legend. */
+       beside ?. Its panel opens at the right edge under the legend chip,
+       stopping above the +/- buttons (moved to the bottom right, out from
+       under the legend); with the legend open too, the panel moves to the
+       legend's left, so both show side by side. */
     #display-gear { position: fixed; right: 250px; top: 10px; z-index: 9;
                      width: 30px; height: 30px; background: #0b0b0bd9; color: #ddd;
                      border: 1px solid #333; border-radius: 6px; cursor: pointer;
                      font: 15px system-ui; line-height: 1; }
     #display-gear:hover { border-color: #7fae8e; }
-    #display-panel { position: fixed; right: 250px; top: 46px; background: #0b0b0bd9;
+    #display-panel { position: fixed; right: 10px; top: 46px; background: #0b0b0bd9;
                       color: #ddd; font: 12px system-ui; border-radius: 6px;
-                      width: 230px; max-height: calc(100dvh - 56px); overflow-y: auto;
+                      width: 230px; max-height: calc(100dvh - 200px); overflow-y: auto;
                       z-index: 9; display: none; }
     #display-panel.open { display: block; }
+    #legend[open] ~ #display-panel { right: 250px; max-height: calc(100dvh - 56px); }
     #display-panel .dp-body { padding: 4px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
     #display-panel .dp-row { display: flex; flex-direction: column; gap: 2px; }
     #display-panel .dp-row-head { display: flex; justify-content: space-between; align-items: center; }
@@ -328,6 +329,7 @@
       #display-gear { top: auto; right: 8px; bottom: calc(36px + env(safe-area-inset-bottom)); width: 40px; height: 40px; }
       #display-panel { top: auto; left: 8px; right: 8px; width: auto; bottom: calc(132px + env(safe-area-inset-bottom));
                        max-height: calc(100dvh - 220px); font-size: 14px; }
+      #legend[open] ~ #display-panel { right: 8px; max-height: calc(100dvh - 220px); }
       #info-card { left: 8px; right: 8px; width: auto; bottom: calc(8px + env(safe-area-inset-bottom)); z-index: 11; }
       .ic-actions button { min-height: 40px; font-size: 13px; }
       #help-card { width: calc(100vw - 16px); max-width: none; max-height: calc(100dvh - 16px); font-size: 14px; }
