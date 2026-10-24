@@ -1072,6 +1072,15 @@ function clearSearchHighlight() {
 // Places the pulsing highlight marker plus a persistent name tag -- used by
 // both a live search selection and an a=<id> hash restore (which has no
 // dropdown row to read the name from, so callers fetch it themselves).
+// R38 (Eric: on Connect the dots don't sit on the lines): a path, ray-end
+// or highlight marker stacks its dot above its name, and a centred marker
+// put the whole stack's middle on the point -- the dot sat 8.5px above where
+// its lines end (measured). Anchor the stack's top edge at the point instead
+// and lift it by half the dot, so the dot's own centre is exactly there.
+function markerOnDot(el, dot, lngLat) {
+  const marker = new maplibregl.Marker({ element: el, anchor: "top" }).setLngLat(lngLat).addTo(map);
+  return marker.setOffset([0, -dot.offsetHeight / 2]);
+}
 function setSearchHighlight(id, name, xw, yw) {
   clearSearchHighlight();
   const el = document.createElement("div");
@@ -1082,8 +1091,7 @@ function setSearchHighlight(id, name, xw, yw) {
   label.className = "path-label";
   label.textContent = name;
   el.append(dot, label);
-  highlightMarker = new maplibregl.Marker({ element: el })
-    .setLngLat(toLngLat(xw, yw)).addTo(map);
+  highlightMarker = markerOnDot(el, dot, toLngLat(xw, yw));
   highlightXY = { xw, yw };
   activeA = stripId(id);
   pendingA = null;             // the real highlight owns a= from here
@@ -1612,7 +1620,7 @@ function drawResolvedPath(points, hopColors, hops, idA, idB, { writeUrl = true }
     label.className = "path-label";
     label.textContent = p.name;
     el.append(dot, label);
-    return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
+    return markerOnDot(el, dot, toLngLat(p.xw, p.yw));
   });
   activePath = { points, hopColors };
 
@@ -2451,7 +2459,7 @@ async function finishCoauthorRays(bareId, xw, yw, gen, coauthors) {
     label.className = "coauthor-label";
     label.textContent = p.name;
     el.append(dot, label);
-    return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p.xw, p.yw)).addTo(map);
+    return markerOnDot(el, dot, toLngLat(p.xw, p.yw));
   });
   activeRays = endpoints.length ? { originXw: xw, originYw: yw, originColor, endpoints } : null;
 
