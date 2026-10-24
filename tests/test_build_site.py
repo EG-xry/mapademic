@@ -45,3 +45,20 @@ def test_inject_config_passes_api_base_through():
     html = "<div></div>\n<script>\nconsole.log(1);\n</script>\n"
     out = inject_config(html, data_base="https://d.test", api_base="https://a.test")
     assert 'apiBase: "https://a.test"' in out
+
+
+def test_analytics_beacon_only_on_the_deployed_page_and_only_with_a_token(tmp_path):
+    from scripts.build_site import build, inject_analytics, inject_config
+    dev = tmp_path / "dev.html"
+    dev.write_text("<html><head><title>t</title></head><body><script>x()</script></body></html>")
+    token = "0123456789abcdef0123456789abcdef"
+    assert "cloudflareinsights" not in build(dev, "https://d.test", None, None)
+    page = build(dev, "https://d.test", None, token)
+    assert page.count("static.cloudflareinsights.com/beacon.min.js") == 1
+    assert page.index("cloudflareinsights") < page.index("</head>")
+    assert f'"token": "{token}"' in page
+    # local previews build with inject_config alone: never counted
+    assert "cloudflareinsights" not in inject_config(dev.read_text(), "", None)
+    import pytest
+    with pytest.raises(ValueError):
+        inject_analytics("<head></head>", "not-a-token")

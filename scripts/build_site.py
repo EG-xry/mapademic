@@ -15,6 +15,7 @@ local experiment-of-the-moment is ready to go public, then runs this without
 stale relative to a fresh build, without writing anything.
 """
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -42,6 +43,13 @@ DATA_BASE = "https://data.mapademic.app/2026-09-23"   # R35c: one prefix per rel
 # scripts/export_paths_bin.py), and coauthor rays read OpenAlex directly, so
 # the public site needs no backend -- and no host to pay for or keep awake.
 API_BASE = None
+# R41 (Eric, 2026-10-24): Cloudflare Web Analytics -- free, no cookies; it
+# counts visits, referrers (reddit.com, linkedin.com, ...), countries and
+# devices. The site token comes from the dashboard (Analytics & Logs > Web
+# Analytics > mapademic.app) and is public by design: every visitor's browser
+# sends it. Only docs/index.html gets the beacon; the local-data review build
+# (inject_config alone) has none. None = no beacon.
+ANALYTICS_TOKEN = "999d99d8c9dc4bef80e1ab3121a6b632"
 
 BARE_SCRIPT_TAG = "<script>"
 
@@ -79,12 +87,26 @@ def inject_config(html: str, data_base: str = DATA_BASE, api_base: str | None = 
     return html[:idx] + build_config_block(data_base, api_base) + html[idx:]
 
 
+def inject_analytics(html: str, token: str | None = ANALYTICS_TOKEN) -> str:
+    """Add the Cloudflare Web Analytics beacon just before </head>, or
+    nothing when token is None."""
+    if not token:
+        return html
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise ValueError(f"not a Cloudflare Web Analytics token: {token!r}")
+    tag = ('<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js" '
+           f'data-cf-beacon=\'{{"token": "{token}"}}\'></script>\n')
+    idx = html.index("</head>")
+    return html[:idx] + tag + html[idx:]
+
+
 def build(
     dev_html_path: Path = DEV_HTML,
     data_base: str = DATA_BASE,
     api_base: str | None = API_BASE,
+    analytics_token: str | None = ANALYTICS_TOKEN,
 ) -> str:
-    return inject_config(dev_html_path.read_text(), data_base, api_base)
+    return inject_analytics(inject_config(dev_html_path.read_text(), data_base, api_base), analytics_token)
 
 
 def main() -> int:
