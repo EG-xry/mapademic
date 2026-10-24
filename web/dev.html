@@ -335,7 +335,7 @@
           researchers before you zoom in close.</p>
         <p>Faint lines join the million most frequent coauthor pairs. They are
           on at their faintest on computers (the gear's Line visibility slider
-          brightens them) and off on phones, where they would be a 16MB
+          brightens them) and off on phones, where they would be a 20MB
           download; switch them on with Connection lines in the gear.</p>
         <p><b>Cosmic dust</b> (off by default; switch it on in the gear) is the
           faint grey haze of researchers the map cannot place in a field:
@@ -462,9 +462,9 @@
          -- the 3M/7M/14.3M tiers stay in EDGE_TIERS/loadEdgeTier for the
          code path, just unreachable from this control, so the label/title
          below no longer advertise them. -->
-    <label class="dp-check" title="Renders repeat-coauthorship edges as GPU line segments, colored endpoint-to-endpoint by community; downloads the 1M tier (16MB), cached afterwards. Temporarily hidden while a community isolate is active.">
+    <label class="dp-check" title="Renders repeat-coauthorship edges as GPU line segments, colored endpoint-to-endpoint by community; downloads the 1M tier (20MB), cached afterwards. Temporarily hidden while a community isolate is active.">
       <input id="dp-edge-lines" type="checkbox">
-      Connection lines (1M, 16MB)
+      Connection lines (1M, 20MB)
     </label>
     <div id="dp-edge-lines-status"></div>
     <div class="dp-row">
@@ -1517,6 +1517,7 @@ function clearPath() {
   if (map.getSource("path")) map.removeSource("path");
   pathDimActive = false;
   updateRasterOpacity();
+  updateVectorPoints();   // R37: top-author dots return once the path is gone
   setPathStatus("");
   activeP = null;
   writeHash();
@@ -1621,6 +1622,7 @@ function drawResolvedPath(points, hopColors, hops, idA, idB, { writeUrl = true }
 
   pathDimActive = true;
   updateRasterOpacity();
+  updateVectorPoints();   // R37: top-author dots step aside for the path
 
   const bounds = coords.reduce(
     (b, c) => b.extend(c),
@@ -2686,7 +2688,7 @@ function collides(placed, x, y, w, h) {
 // R37 (Eric, 2026-10-23): top-author dots on, cosmic dust off, connection
 // lines on at the faintest visibility -- on computers only: phones, data
 // saver and slow connections (startupPrefetchWanted) keep them off, since they
-// are a 16MB download (a phone's first visit is ~7MB without them).
+// are a 20MB download (a phone's first visit is ~7MB without them).
 const DISPLAY_DEFAULTS = { brightness: 1.0, contrast: 0.16, saturation: 0, labelDensity: 1, regionNames: true, overlayDots: true, labelMode: "faint", dust: false, allPoints: false, edgeLines: startupPrefetchWanted(), edgeIntensity: 0.005, edgeCount: 1000000 };
 // R28: bumped key (was "mapademic.display") -- resets every visitor's saved
 // settings ONCE to the new defaults above; the old key is simply never read
@@ -4316,8 +4318,8 @@ vec4 toClip(vec2 world) {
 }
 
 void main() {
-  vec2 w0 = aP0 / 65535.0;
-  vec2 w1 = aP1 / 65535.0;
+  vec2 w0 = aP0;                             // world 0..1 (R37: floats, see edgeEndpoints)
+  vec2 w1 = aP1;
   vec4 clip0 = toClip(w0);
   vec4 clip1 = toClip(w1);
   // The actual drawn vertex sits at the t-mix of the two world
@@ -4474,9 +4476,10 @@ const edgeLinesLayer = {
     // this fires automatically on webglcontextrestored): re-upload straight
     // from the cached ArrayBuffers instead of re-fetching, if we have them.
     if (this.cachedPosBuf && this.cachedAttrBuf) {
-      const count = Math.min(this.cachedPosBuf.byteLength, this.cachedAttrBuf.byteLength) >>> 3;
+      // cachedPosBuf holds float endpoints (16 bytes/edge, R37), attrs 8
+      const count = Math.min(this.cachedPosBuf.byteLength >>> 4, this.cachedAttrBuf.byteLength >>> 3);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(this.cachedPosBuf, 0, count * 8), gl.STATIC_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(this.cachedPosBuf, 0, count * 16), gl.STATIC_DRAW);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.attrBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(this.cachedAttrBuf, 0, count * 8), gl.STATIC_DRAW);
       this.totalCount = count;
@@ -4506,10 +4509,8 @@ const edgeLinesLayer = {
     // cloud cedes to the precise per-author vector layer at. Edges have no
     // such precise replacement, so that early-return just made every
     // connection disappear past mid zoom -- removed; edges now draw at
-    // every zoom. Endpoints are u16-quantized (edges_pos.bin, 65535 levels
-    // per axis), so at z11+ a line's endpoint can sit a few px off the
-    // exact (float-precision) dot it connects to -- a known, accepted
-    // trade-off (Eric), not a bug to chase.
+    // every zoom. R37: endpoints are exact floats now (edgeEndpoints), so
+    // a line meets its dots at every zoom; uint16 alone sat up to 16px off.
     gl.useProgram(this.program);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -4532,10 +4533,10 @@ const edgeLinesLayer = {
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
     gl.enableVertexAttribArray(this.aP0);
-    gl.vertexAttribPointer(this.aP0, 2, gl.UNSIGNED_SHORT, false, 8, 0);
+    gl.vertexAttribPointer(this.aP0, 2, gl.FLOAT, false, 16, 0);     // R37: exact float endpoints
     this.inst.vertexAttribDivisor(this.aP0, 1);
     gl.enableVertexAttribArray(this.aP1);
-    gl.vertexAttribPointer(this.aP1, 2, gl.UNSIGNED_SHORT, false, 8, 4);
+    gl.vertexAttribPointer(this.aP1, 2, gl.FLOAT, false, 16, 8);
     this.inst.vertexAttribDivisor(this.aP1, 1);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this.attrBuffer);
@@ -4600,9 +4601,9 @@ const EDGE_COUNT_STOPS = [1000000, 3000000, 7000000, 14316429];
 // already-loaded tier re-fetches and replaces; lowering it never re-fetches,
 // since a bigger tier already covers every smaller one.
 const EDGE_TIERS = [
-  { max: 1000000, suffix: "_1m", label: "1M", bytes: 16000000 },
-  { max: 3000000, suffix: "_3m", label: "3M", bytes: 48000000 },
-  { max: Infinity, suffix: "", label: "14.3M", bytes: 229062864 },
+  { max: 1000000, suffix: "_1m", label: "1M", bytes: 20000000 },     // pos 8 + attr 8 + fine 4 bytes/edge
+  { max: 3000000, suffix: "_3m", label: "3M", bytes: 60000000 },
+  { max: Infinity, suffix: "", label: "13.2M", bytes: 263371080 },
 ];
 function edgeTierFor(count) {
   return EDGE_TIERS.find(t => count <= t.max);
@@ -4631,6 +4632,19 @@ function edgeTierProgressLabel(tier, totalBytes) {
     ? `loading ${tier.label} connections… ${mb(totalBytes)} of ${mb(tier.bytes)}MB`
     : `prefetching… ${Math.min(100, Math.round(totalBytes / tier.bytes * 100))}%`;
 }
+// R37 (Eric: "connection lines not perfectly placed upon dots"): edges_pos
+// alone is uint16, 1/65535 of the map -- up to 4px off a dot at zoom 10 and
+// 16px at 12. edges_fine holds each coordinate's int8 remainder in 1/254 of a
+// step (scripts/export_edges_bin.py); merged once into floats here, endpoints
+// are within 0.1px at zoom 12. Without the fine file (older releases) the
+// uint16 values are used alone, as before.
+function edgeEndpoints(posBuf, fineBuf, count) {
+  const coarse = new Uint16Array(posBuf, 0, count * 4);
+  const fine = fineBuf && fineBuf.byteLength >= count * 4 ? new Int8Array(fineBuf, 0, count * 4) : null;
+  const out = new Float32Array(count * 4);
+  for (let i = 0; i < out.length; i++) out[i] = (coarse[i] + (fine ? fine[i] / 254 : 0)) / 65535;
+  return out;
+}
 async function loadEdgeTier(tier) {
   if (edgeLinesLayer.loading) return;
   if (edgeLinesLayer.loaded && edgeLinesLayer.loadedTierMax >= tier.max) return;   // already covers this tier
@@ -4638,13 +4652,14 @@ async function loadEdgeTier(tier) {
   try {
     const posUrl = DATA_BASE + `/data/vector_experiment/edges_pos${tier.suffix}.bin`;
     const attrUrl = DATA_BASE + `/data/vector_experiment/edges_attr${tier.suffix}.bin`;
+    const fineUrl = DATA_BASE + `/data/vector_experiment/edges_fine${tier.suffix}.bin`;
     // R30: loadBinShared adopts an already-running startup prefetch instead
     // of starting a second download -- see its own comment and
     // ensurePointCloudLoaded's analogous change.
     if (!sharedBinFetches.has(posUrl) && !sharedBinFetches.has(attrUrl)) {
       setEdgeLinesStatus(`loading ${tier.label} connections (${(tier.bytes / 1048576).toFixed(1)}MB)… 0%`);
     }
-    const receivedByFile = [0, 0];
+    const receivedByFile = [0, 0, 0];
     let lastStatusUpdate = 0;
     const onBytes = (i) => (n) => {
       if (!edgeLinesLayer.loading) return;   // R32: same settled-call guard as ensurePointCloudLoaded's onBytes
@@ -4652,17 +4667,19 @@ async function loadEdgeTier(tier) {
       const now = performance.now();
       if (now - lastStatusUpdate < 250) return;   // throttle to ~4x/second
       lastStatusUpdate = now;
-      setEdgeLinesStatus(edgeTierProgressLabel(tier, receivedByFile[0] + receivedByFile[1]));
+      setEdgeLinesStatus(edgeTierProgressLabel(tier, receivedByFile[0] + receivedByFile[1] + receivedByFile[2]));
     };
-    const [posBuf, attrBuf] = await Promise.all([
+    const [posBuf, attrBuf, fineBuf] = await Promise.all([
       loadBinShared(posUrl, onBytes(0)),
       loadBinShared(attrUrl, onBytes(1)),
+      loadBinShared(fineUrl, onBytes(2)).catch(() => null),   // absent on older releases
     ]);
     const count = Math.min(posBuf.byteLength, attrBuf.byteLength) >>> 3;   // 8 bytes/edge in both files
+    const ends = edgeEndpoints(posBuf, fineBuf, count);              // 16 bytes/edge on the GPU
     edgeLinesLayer.totalCount = count;
     // Retained for onAdd's context-restore re-upload path -- see the
     // cachedPosBuf/cachedAttrBuf comment above edgeLinesLayer.
-    edgeLinesLayer.cachedPosBuf = posBuf;
+    edgeLinesLayer.cachedPosBuf = ends.buffer;
     edgeLinesLayer.cachedAttrBuf = attrBuf;
     const gl = edgeLinesLayer.gl;
 
@@ -4671,7 +4688,7 @@ async function loadEdgeTier(tier) {
     // this function's own header comment.
     edgeLinesLayer.loadedCount = 0;
     gl.bindBuffer(gl.ARRAY_BUFFER, edgeLinesLayer.posBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, count * 8, gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, count * 16, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, edgeLinesLayer.attrBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, count * 8, gl.STATIC_DRAW);
 
@@ -4680,10 +4697,10 @@ async function loadEdgeTier(tier) {
       const start = i * chunkSize;
       const end = Math.min(count, start + chunkSize);
       if (end <= start) break;
-      const posChunk = new Uint8Array(posBuf, start * 8, (end - start) * 8);
+      const posChunk = new Uint8Array(ends.buffer, start * 16, (end - start) * 16);
       const attrChunk = new Uint8Array(attrBuf, start * 8, (end - start) * 8);
       gl.bindBuffer(gl.ARRAY_BUFFER, edgeLinesLayer.posBuffer);
-      gl.bufferSubData(gl.ARRAY_BUFFER, start * 8, posChunk);
+      gl.bufferSubData(gl.ARRAY_BUFFER, start * 16, posChunk);
       gl.bindBuffer(gl.ARRAY_BUFFER, edgeLinesLayer.attrBuffer);
       gl.bufferSubData(gl.ARRAY_BUFFER, start * 8, attrChunk);
       edgeLinesLayer.loadedCount = end;
@@ -4785,17 +4802,19 @@ async function prefetchEdgeLines1m() {
   const tier = EDGE_TIERS[0];   // 1M tier only -- 3M/7M/14.3M are never prefetched
   const posUrl = DATA_BASE + `/data/vector_experiment/edges_pos${tier.suffix}.bin`;
   const attrUrl = DATA_BASE + `/data/vector_experiment/edges_attr${tier.suffix}.bin`;
-  const receivedByFile = [0, 0];
+  const fineUrl = DATA_BASE + `/data/vector_experiment/edges_fine${tier.suffix}.bin`;
+  const receivedByFile = [0, 0, 0];
   let lastStatusUpdate = 0;
   const onBytes = (i) => (n) => {
     receivedByFile[i] = n;
     const now = performance.now();
     if (now - lastStatusUpdate < 250) return;
     lastStatusUpdate = now;
-    setEdgeLinesStatus(edgeTierProgressLabel(tier, receivedByFile[0] + receivedByFile[1]));
+    setEdgeLinesStatus(edgeTierProgressLabel(tier, receivedByFile[0] + receivedByFile[1] + receivedByFile[2]));
   };
   await loadBinShared(posUrl, onBytes(0));
   await loadBinShared(attrUrl, onBytes(1));
+  await loadBinShared(fineUrl, onBytes(2)).catch(() => null);   // R37; absent on older releases
   if (!dpEdgeLines.checked) setEdgeLinesStatus("");
 }
 // R36: the prefetch is ~78MB (a first visit was 86MB in all) for two
@@ -5063,7 +5082,9 @@ async function updateVectorPoints() {
   // layer above. updateRasterOpacity's vectorActive check stays gated purely
   // on z >= VECTOR_POINTS_MIN_ZOOM, so this path never dims the raster on
   // its own -- it only ever complements it.
-  const globalMidZoomActive = displaySettings.overlayDots && !vectorActive && isolateCommunity == null;
+  // R37 (Eric): while a Connect path is shown they are hidden too -- bright
+  // dots in the same colours competed with the path's own five.
+  const globalMidZoomActive = displaySettings.overlayDots && !vectorActive && isolateCommunity == null && !activePath;
 
   // R15b: the full point-cloud custom layer renders every author itself, so
   // below vector-points zoom the capped GeoJSON overlay (shard/global-top,

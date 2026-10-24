@@ -270,7 +270,7 @@ written by three scripts:
 ```
 python -m scripts.export_points_bin       # positions.bin, attrs.bin, meta.json   (point cloud)
 python -m scripts.export_ids_bin          # ids.bin                               (cloud hover)
-python -m scripts.export_edges_bin        # edges_{pos,attr}[_1m,_3m].bin, edges_meta.json (connection lines)
+python -m scripts.export_edges_bin        # edges_{pos,attr,fine}[_1m,_3m].bin, edges_meta.json (connection lines)
 ```
 
 ### Connect (coauthor paths) runs in the browser

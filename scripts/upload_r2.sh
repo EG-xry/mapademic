@@ -37,7 +37,7 @@ FREE_BUDGET_GB=${FREE_BUDGET_GB:-9.5}
 STAGE=.tmp/r2-stage/$REL
 CACHE=(--header-upload "Cache-Control: public, max-age=604800")
 COMMON=(--size-only --transfers "${TRANSFERS:-128}" --checkers 64 --stats 60s --stats-one-line --stats-log-level NOTICE)
-SKIP=(--exclude "edges_pos.bin" --exclude "edges_attr.bin" --exclude "*_3m.bin")
+SKIP=(--exclude "edges_pos.bin" --exclude "edges_attr.bin" --exclude "edges_fine.bin" --exclude "*_3m.bin")
 
 rclone listremotes | grep -qx "${BUCKET%%:*}:" || { echo "no rclone remote '${BUCKET%%:*}' - see the header of this script" >&2; exit 1; }
 for d in tiles index paths vector_experiment; do
@@ -69,7 +69,7 @@ EOF
 total=$(.venv/bin/python - "$D" "$STAGE" <<'EOF'
 import os, sys
 src, stage = sys.argv[1], sys.argv[2]
-skip = {"edges_pos.bin", "edges_attr.bin", "edges_pos_3m.bin", "edges_attr_3m.bin"}
+skip = {"edges_pos.bin", "edges_attr.bin", "edges_fine.bin", "edges_pos_3m.bin", "edges_attr_3m.bin", "edges_fine_3m.bin"}
 def size(p, keep=lambda f: True):
     return sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(p) for f in fs if keep(f))
 t = size(os.path.join(src, "tiles")) + size(os.path.join(src, "paths")) + size(stage)

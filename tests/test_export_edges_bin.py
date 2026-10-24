@@ -4,7 +4,7 @@ import duckdb
 import numpy as np
 
 from pipeline.palette import community_rgb
-from scripts.export_edges_bin import QUANT, SIZE_SCALE, WEIGHT_CAP, export_edges
+from scripts.export_edges_bin import FINE, QUANT, SIZE_SCALE, WEIGHT_CAP, export_edges
 from scripts.export_points_bin import GREY_RGB, MIN_MEMBERS
 
 
@@ -185,6 +185,28 @@ def test_quantization_roundtrip(tmp_path):
         assert abs(y0 / QUANT - ey0) <= 1 / QUANT + 1e-12
         assert abs(x1 / QUANT - ex1) <= 1 / QUANT + 1e-12
         assert abs(y1 / QUANT - ey1) <= 1 / QUANT + 1e-12
+
+
+def test_fine_remainders_make_positions_256x_more_precise(tmp_path):
+    web = tmp_path / "web.parquet"
+    edges = tmp_path / "edges.parquet"
+    rng = np.random.default_rng(5)
+    xy = rng.random((40, 2))
+    write_web(web, [(f"A{i}", x, y, 1, 10, False) for i, (x, y) in enumerate(xy)])
+    write_edges(edges, [(f"A{i}", f"A{i + 1}", 2 + i) for i in range(39)])
+    out = tmp_path / "vector_experiment"
+    meta = export_edges(str(edges), str(web), out, tiers={"1m": 10})
+    n = meta["count"]
+    pos = _load_pos(out, n).astype(np.float64)
+    fine = np.fromfile(out / "edges_fine.bin", dtype="i1").reshape(n, 4)
+    assert (out / "edges_fine_1m.bin").stat().st_size == 10 * 4
+    exact = (pos + fine / FINE) / QUANT
+    coarse = pos / QUANT
+    want = {f"A{i}": xy[i] for i in range(40)}
+    ids = [(f"A{i}", f"A{i + 1}") for i in range(39)][::-1]          # heaviest first
+    truth = np.array([[*want[a], *want[b]] for a, b in ids])
+    assert np.abs(exact - truth).max() <= 0.5 / (QUANT * FINE) + 1e-12
+    assert np.abs(coarse - truth).max() > 20 * np.abs(exact - truth).max()
 
 
 def test_weight_and_size_attrs(tmp_path):

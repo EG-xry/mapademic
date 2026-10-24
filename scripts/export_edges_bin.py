@@ -5,6 +5,12 @@ JOINed to coords_web.parquet for both endpoints and writes two flat
 little-endian arrays under data/vector_experiment/ for GPU-friendly
 progressive loading -- edges_pos.bin (x0,y0,x1,y1 uint16, 8 bytes/edge)
 and edges_attr.bin (r0,g0,b0,r1,g1,b1,w,s uint8, 8 bytes/edge) -- plus
+edges_fine.bin (x0,y0,x1,y1 int8, 4 bytes/edge: each coordinate's rounding
+remainder in 1/254 of a uint16 step; R37, Eric: "connection lines not
+perfectly placed upon dots" -- uint16 alone is 1/65535 of the map, up to 4px
+off at zoom 10 and 16px at 12, while edges_pos + edges_fine/254 is under half
+a pixel at zoom 14; the viewer still draws edges_pos alone if it is absent) --
+plus
 edges_meta.json (named distinctly from export_points_bin's meta.json,
 since both scripts share the vector_experiment/ directory). data/index
 and data/tiles are untouched.
@@ -37,6 +43,8 @@ from pipeline.palette import group_key_expr, group_rgb_u8
 from scripts.export_points_bin import GREY_RGB, SIZE_SCALE, _color_palette
 
 QUANT = 65535        # xw,yw uint16 quantization scale (round(v * QUANT))
+FINE = 254           # edges_fine.bin: v * QUANT = edges_pos + edges_fine / FINE (254, not 256:
+                     # a remainder of +-0.5 step then fits int8 without clipping)
 MIN_WEIGHT = 2        # repeat-collaboration threshold
 WEIGHT_CAP = 20        # weight clamp before scaling to uint8
 # name -> edge count; names are the file suffixes web/dev.html's EDGE_TIERS fetch
@@ -83,10 +91,11 @@ def export_edges(edges_path: str, web_path: str, out_dir: Path, sample: int | No
         return np.clip(np.round(v * QUANT), 0, QUANT).astype("<u2")
 
     positions = np.empty((n, 4), dtype="<u2")
-    positions[:, 0] = quant(cols["xw0"])
-    positions[:, 1] = quant(cols["yw0"])
-    positions[:, 2] = quant(cols["xw1"])
-    positions[:, 3] = quant(cols["yw1"])
+    fines = np.empty((n, 4), dtype="i1")
+    for k, c in enumerate(("xw0", "yw0", "xw1", "yw1")):
+        positions[:, k] = quant(cols[c])
+        rest = cols[c] * QUANT - positions[:, k]            # in [-0.5, 0.5] uint16 steps
+        fines[:, k] = np.clip(np.round(rest * FINE), -128, 127)
 
     rgb0 = group_rgb_u8(pal, cols["gkey0"], default=GREY_RGB)  # (n, 3) uint8
     rgb1 = group_rgb_u8(pal, cols["gkey1"], default=GREY_RGB)
@@ -110,11 +119,13 @@ def export_edges(edges_path: str, web_path: str, out_dir: Path, sample: int | No
     attr_path = out_dir / "edges_attr.bin"
     positions.tofile(pos_path)
     attrs.tofile(attr_path)
+    fines.tofile(out_dir / "edges_fine.bin")
 
-    files = {"pos": "edges_pos.bin", "attr": "edges_attr.bin"}
+    files = {"pos": "edges_pos.bin", "attr": "edges_attr.bin", "fine": "edges_fine.bin"}
     layout = {
         "edges_pos.bin": "little-endian uint16 x0,y0,x1,y1 per edge (8 bytes/edge)",
         "edges_attr.bin": "uint8 r0,g0,b0,r1,g1,b1,w,s per edge (8 bytes/edge)",
+        "edges_fine.bin": "int8 x0,y0,x1,y1 per edge (4 bytes/edge): coordinate = (edges_pos + edges_fine / 254) / 65535",
     }
 
     subsets = {}
@@ -122,8 +133,10 @@ def export_edges(edges_path: str, web_path: str, out_dir: Path, sample: int | No
         k = min(n, size)
         positions[:k].tofile(out_dir / f"edges_pos_{name}.bin")
         attrs[:k].tofile(out_dir / f"edges_attr_{name}.bin")
+        fines[:k].tofile(out_dir / f"edges_fine_{name}.bin")
         files[f"pos_{name}"] = f"edges_pos_{name}.bin"
         files[f"attr_{name}"] = f"edges_attr_{name}.bin"
+        files[f"fine_{name}"] = f"edges_fine_{name}.bin"
         subsets[name] = int(k)
     subsets["full"] = int(n)
 
@@ -132,6 +145,7 @@ def export_edges(edges_path: str, web_path: str, out_dir: Path, sample: int | No
         "files": files,
         "layout": layout,
         "quantization": QUANT,
+        "fine": FINE,
         "size_scale": SIZE_SCALE,
         "weight_cap": WEIGHT_CAP,
         "generated_from": "edges.parquet + coords_web.parquet",
