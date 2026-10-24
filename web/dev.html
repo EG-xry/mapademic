@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Mapademic: a map of 8.4 million researchers</title>
   <meta name="description" content="A zoomable map of 8.4 million researchers, placed by who they write papers with. Find the shortest chain of coauthors between any two.">
   <!-- R39 (Eric, 2026-10-23): icon (the Connect-path design) and link
@@ -292,6 +293,45 @@
     #path-hops .hop .hop-via { color: #888; font-size: 10px; white-space: nowrap;
                         overflow: hidden; text-overflow: ellipsis; }
     #path-hops .hop .hop-ghost { color: #888; font-size: 10px; flex: none; }
+      /* ---- R40: phones (Eric: mobile pass) ----
+       The page had no viewport tag, so phones laid it out 980px wide and
+       shrank it: every control came out at ~40% size. With the tag, a
+       phone-width screen gets this layout: search and Connect across the top,
+       the legend as a chip at the bottom left that opens upward, help and
+       settings as finger-sized buttons at the bottom right, full-width sheets
+       for settings, the author card and help, 16px inputs (iOS zooms into
+       smaller ones), 40px tap targets, room for the notch and home bar, and
+       no +/- buttons (pinch zooms). */
+    @media (max-width: 640px) {
+      #search { left: 8px; right: 8px; top: calc(8px + env(safe-area-inset-top)); width: auto; }
+      #search-input, .connect-row input, #openalex-key, #connect-from-kind { font-size: 16px; }
+      #search-input, .connect-row input { padding-top: 9px; padding-bottom: 9px; }
+      #connect-toggle, #share-btn, .connect-actions button { min-height: 40px; font-size: 14px; }
+      #search-dropdown { max-height: 45dvh; }
+      .connect-dropdown { max-height: 40dvh; }
+      #search-dropdown .row, .connect-dropdown .row { padding: 10px 12px; font-size: 14px; }
+      #connect-panel { max-height: 58dvh; }
+      #path-hops { max-height: 28dvh; }
+      #path-hops .hop, #search-status, #connect-status { font-size: 13px; }
+      #legend { top: auto; right: auto; left: 8px; bottom: calc(8px + env(safe-area-inset-bottom));
+                width: auto; max-width: calc(100vw - 72px); max-height: 55dvh; }
+      #legend[open] { width: min(320px, calc(100vw - 72px)); }
+      #legend summary { padding: 10px 14px; font-size: 14px; }
+      #legend-rows { max-height: calc(55dvh - 60px); }
+      #legend button.row { padding-top: 6px; padding-bottom: 6px; font-size: 13px; }
+      #help-btn { top: auto; right: 8px; bottom: calc(84px + env(safe-area-inset-bottom)); width: 40px; height: 40px; }
+      #display-gear { right: 8px; bottom: calc(36px + env(safe-area-inset-bottom)); width: 40px; height: 40px; }
+      #display-panel { left: 8px; right: 8px; width: auto; bottom: calc(132px + env(safe-area-inset-bottom));
+                       max-height: calc(100dvh - 220px); font-size: 14px; }
+      #info-card { left: 8px; right: 8px; width: auto; bottom: calc(8px + env(safe-area-inset-bottom)); z-index: 11; }
+      .ic-actions button { min-height: 40px; font-size: 13px; }
+      #help-card { width: calc(100vw - 16px); max-width: none; max-height: calc(100dvh - 16px); font-size: 14px; }
+      .maplibregl-ctrl-top-right { display: none; }
+      /* one solid card, so map names don't show through its inputs */
+      #connect-panel.open { background: #0b0b0bf2; border-radius: 8px; padding: 8px; }
+    }
+    /* a tap is not a hover: the info card shows the author instead */
+    @media (hover: none) { #tip { display: none !important; } }
   </style>
 </head>
 <body>
@@ -595,7 +635,15 @@ async function fetchOpenAlex(url) {
 }
 // ---- End OpenAlex BYOK ----
 const HIT_ZOOM = 10;                 // hover/click active at or past this zoom
-const HIT_RADIUS = 14;               // px hit-test radius around the cursor
+// R40: a phone-width screen gets the phone layout (CSS @media (max-width:
+// 640px)); a coarse pointer is a finger.
+const PHONE_LAYOUT = matchMedia("(max-width: 640px)");
+const TOUCH = matchMedia("(pointer: coarse)").matches;
+const HIT_RADIUS = TOUCH ? 24 : 14;  // px hit-test radius around the cursor (a fingertip is wider)
+// R40: phones render the map at no more than 2x their CSS pixels (many are
+// 3x): 2.25x fewer pixels to draw each frame, for a barely visible softening
+// of the dots; names and panels are HTML and stay at full sharpness.
+const RENDER_PIXEL_RATIO = Math.min(window.devicePixelRatio || 1, TOUCH ? 2 : Infinity);
 // Deploy config: a page that sets window.MAPADEMIC_CONFIG (script tag before
 // this one) points data/api at a deployed host; unset, both fall back to the
 // same local defaults this file has always used (same-origin /data, :8000).
@@ -711,9 +759,13 @@ const map = new maplibregl.Map({
         paint: { "raster-fade-duration": 150 } }
     ]
   },
-  center: [0, 0], zoom: 1, minZoom: 0, maxZoom: 11, renderWorldCopies: false
+  // R40: phones may zoom out past 0 -- a portrait screen needs about -0.1 to show the whole map
+  center: [0, 0], zoom: 1, minZoom: PHONE_LAYOUT.matches ? -1 : 0, maxZoom: 11, renderWorldCopies: false,
+  pixelRatio: RENDER_PIXEL_RATIO
 });
 map.addControl(new maplibregl.NavigationControl());
+// R40: the map has no north, so a two-finger twist or tilt only disorients
+if (TOUCH) { map.touchZoomRotate.disableRotation(); map.touchPitch.disable(); }
 
 // R34 (Eric: the legend covers the right of the map and the Connect panel the
 // left, so let it move sideways): with renderWorldCopies off, MapLibre keeps
@@ -1100,6 +1152,18 @@ function clearSearchHighlight() {
 // put the whole stack's middle on the point -- the dot sat 8.5px above where
 // its lines end (measured). Anchor the stack's top edge at the point instead
 // and lift it by half the dot, so the dot's own centre is exactly there.
+// R40: frame a path or rays in the part of the map the panel leaves free --
+// below the search/Connect panel on a phone (it spans the top), right of it
+// on a desktop -- so no step hides under it.
+function fitPadding(base = 60) {
+  const pad = { top: base, bottom: base, left: base, right: base };
+  const r = document.getElementById("search").getBoundingClientRect();
+  if (r.width && r.height) {
+    if (PHONE_LAYOUT.matches) pad.top = Math.min(r.bottom + 24, innerHeight * 0.6);
+    else pad.left = Math.min(r.right + 24, innerWidth * 0.45);
+  }
+  return pad;
+}
 function markerOnDot(el, dot, lngLat) {
   const marker = new maplibregl.Marker({ element: el, anchor: "top" }).setLngLat(lngLat).addTo(map);
   return marker.setOffset([0, -dot.offsetHeight / 2]);
@@ -1659,7 +1723,7 @@ function drawResolvedPath(points, hopColors, hops, idA, idB, { writeUrl = true }
     (b, c) => b.extend(c),
     new maplibregl.LngLatBounds(coords[0], coords[0])
   );
-  map.fitBounds(bounds, { padding: 60, maxZoom: 11 });
+  map.fitBounds(bounds, { padding: fitPadding(), maxZoom: 11 });
 
   if (writeUrl) {
     activeP = [idA, idB];
@@ -2515,7 +2579,7 @@ function fitActiveRays() {
   const origin = toLngLat(originXw, originYw);
   const bounds = new maplibregl.LngLatBounds(origin, origin);
   endpoints.forEach(p => bounds.extend(toLngLat(p.xw, p.yw)));
-  map.fitBounds(bounds, { padding: 60, maxZoom: 11 });
+  map.fitBounds(bounds, { padding: fitPadding(), maxZoom: 11 });
 }
 
 // R20: re-projects every currently-drawn ephemeral overlay (search
@@ -3278,7 +3342,7 @@ function buildVectorRadiusExpression(contrast) {
   const bonusScale = 2 * contrast;
   const t = ["^", ["min", 1, ["/", ["ln", ["+", 1, ["/", ["get", "cited"], SIZE_KNEE]]], SIZE_T_DENOM]], SIZE_GAMMA];
   const h = VECTOR_POINTS_MIN_ZOOM, z0 = Math.floor(h), f = h - z0;
-  const aa = 0.5 / (window.devicePixelRatio || 1);
+  const aa = 0.5 / RENDER_PIXEL_RATIO;
   const stop = (base, bonus) => ["max", 0.7, ["+", base + aa, ["*", bonus * bonusScale, t]]];
   const expr = ["interpolate", ["linear"], ["zoom"]];
   for (let z = 2; z <= 14; z++) {
@@ -3552,7 +3616,7 @@ const pointCloudLayer = {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
     gl.uniformMatrix4fv(this.uMatrix, false, matrix);
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = RENDER_PIXEL_RATIO;   // R40: the map's own pixel ratio, not the screen's
     gl.uniform1f(this.uBase, sizeBasePx(zoom) * dpr);
     gl.uniform1f(this.uBonus, sizeBonusPx(zoom) * dpr);
     gl.uniform1f(this.uContrast, SIZE_CONTRAST);
@@ -3650,7 +3714,7 @@ function makeBinPointsLayer(id, shouldDraw, { additive = false, gain = 1 } = {})
       if (additive) gl.blendFunc(gl.ONE, gl.ONE);
       else gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.uniformMatrix4fv(this.uMatrix, false, matrix);
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = RENDER_PIXEL_RATIO;   // R40: the map's own pixel ratio, not the screen's
       gl.uniform1f(this.uBase, sizeBasePx(zoom) * dpr);
       gl.uniform1f(this.uBonus, sizeBonusPx(zoom) * dpr);
       gl.uniform1f(this.uContrast, SIZE_CONTRAST);
@@ -4547,7 +4611,7 @@ const edgeLinesLayer = {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
     gl.uniformMatrix4fv(this.uMatrix, false, matrix);
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = RENDER_PIXEL_RATIO;   // R40: the map's own pixel ratio, not the screen's
     gl.uniform1f(this.uWidthBase, edgeLinesBaseWidthPx(zoom) * dpr);
     // R25: gentle deep-zoom taper -- past z11, 14M quantized edges drawn
     // over the now-unconditional precise vector layer gets visually
@@ -5216,9 +5280,11 @@ async function updateVectorPoints() {
 // other edges -- only the legend overlaps map content.
 const legendEl = document.getElementById("legend");
 function applyLegendPadding() {
-  map.setPadding({ top: 0, bottom: 0, left: 0, right: legendEl.open ? 260 : 0 });
+  // R40: on a phone the legend opens upward from the bottom left, over the map
+  map.setPadding({ top: 0, bottom: 0, left: 0, right: legendEl.open && !PHONE_LAYOUT.matches ? 260 : 0 });
 }
 legendEl.addEventListener("toggle", applyLegendPadding);
+PHONE_LAYOUT.addEventListener("change", applyLegendPadding);
 
 // ---- Task R10a: legend author highlight + community isolate v1 ----
 // legendCommunityRows holds a row for every legend.json entry (all 37 big
@@ -5903,13 +5969,20 @@ map.on("load", () => {
   // from here on (vector-points handoff, path dimming) -- set once, since
   // it's a static paint config rather than a per-call value.
   safePaint("raster-opacity-transition", { duration: 300 });
-  applyLegendPadding();            // R11a: legend starts open, so this applies the initial 260px right pad
+  applyLegendPadding();            // R11a: the desktop legend's 260px right pad, if it starts open
   if (initialHash && initialHash.view) {
     const v = initialHash.view;
     // parseHash already range-checks, but a throw here would kill the rest
     // of the load handler (labels/regions/restore), so belt and braces.
     try { map.jumpTo({ center: [v.lng, v.lat], zoom: v.zoom }); }
     catch { /* keep the default view */ }
+  } else if (PHONE_LAYOUT.matches) {
+    // R40: a phone opens on the whole map, below the search bar (the desktop
+    // zoom cropped both sides of a portrait screen); the bounds are the
+    // coloured map's extent in this release
+    const top = document.getElementById("search").getBoundingClientRect().bottom + 8;
+    map.fitBounds(new maplibregl.LngLatBounds(toLngLat(0.111, 0.805), toLngLat(0.902, 0.155)),
+                  { padding: { top, bottom: 56, left: 8, right: 8 }, duration: 0 });
   }
   setupVectorPointsLayer();        // R15b Part 2: persistent empty source+layer, created once here
   // R17: if the persisted setting is on, run it through the exact same
