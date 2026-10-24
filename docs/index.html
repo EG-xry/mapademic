@@ -2945,6 +2945,7 @@ dpReset.addEventListener("click", () => {
 
 let markers = [];
 let labelGen = 0;                    // invalidates stale in-flight redraws
+const LABEL_GAP = 3;   // px between an author's dot and the top of their name
 async function drawLabels() {
   const gen = ++labelGen;
   const z = map.getZoom();
@@ -2984,13 +2985,17 @@ async function drawLabels() {
     if (pt.x < -50 || pt.y < -20 || pt.x > innerWidth + 50 || pt.y > innerHeight + 20) continue;
     const size = 11 + Math.min(6, Math.log10(1 + cited));       // 11-17 px
     const w = name.length * size * 0.58, h = size + 6;
-    if (collides(placed, pt.x, pt.y, w, h)) continue;
-    placed.push({ x: pt.x, y: pt.y, w, h });
+    // R37: the name hangs just below its author's dot, not centred on it --
+    // with top-author dots on by default a bright dot sat mid-word
+    const gap = dotRadiusPx(cited, z) + LABEL_GAP;
+    const cy = pt.y + gap + h / 2;
+    if (collides(placed, pt.x, cy, w, h)) continue;
+    placed.push({ x: pt.x, y: cy, w, h });
     const el = document.createElement("div");
     el.className = "lbl"; el.textContent = name;
     el.style.fontSize = size + "px";
     if (displaySettings.labelMode === "faint") el.classList.add("lbl-faint");
-    markers.push(new maplibregl.Marker({ element: el })
+    markers.push(new maplibregl.Marker({ element: el, anchor: "top", offset: [0, gap] })
       .setLngLat(toLngLat(xw, yw)).addTo(map));
   }
 }
@@ -3218,6 +3223,12 @@ function sizeBonusPx(zoom) {
   const magnified = Math.min(T, handoff) - native;
   const beyond = Math.max(T - handoff, 0);
   return SIZE_BONUS_PX * Math.pow(2, (native - 10) / 2 + magnified + beyond / 2);
+}
+// R37: an author dot's radius in CSS px, as buildVectorRadiusExpression draws
+// it (which interpolates between whole zooms; this is exact) -- drawLabels
+// hangs each name just below it.
+function dotRadiusPx(cited, zoom) {
+  return Math.max(0.7, sizeBasePx(zoom) + sizeBonusPx(zoom) * 2 * SIZE_CONTRAST * Math.pow(sizeT(cited), SIZE_GAMMA));
 }
 // Raster-matching brightness of a citation disc: pipeline/sizing.py's
 // brightness() times the tiles' bloom gain (1 + the BLOOM kernel's 0.72 for
