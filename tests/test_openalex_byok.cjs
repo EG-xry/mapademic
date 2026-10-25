@@ -8,26 +8,50 @@ const html = readFileSync(join(__dirname, '../web/dev.html'), 'utf8');
 const byok = html.split('// ---- OpenAlex BYOK:')[1].split('// ---- End OpenAlex BYOK ----')[0];
 const jsonHelpers = html.slice(html.indexOf('function fetchJsonOr404('), html.indexOf('const tileCache ='));
 
-function harness({ stored, blocked = false } = {}) {
+function harness({
+  stored, storedRaw, blocked = false, rejectWrites = false,
+  jar = new Map(), href = 'https://mapademic.app/#6/0/0'
+} = {}) {
   const elements = new Map();
-  const storage = new Map(stored ? [['mapademic.openalex-key', stored]] : []);
+  if (stored !== undefined) jar.set('mapademic.openalex-key', encodeURIComponent(stored));
+  if (storedRaw !== undefined) jar.set('mapademic.openalex-key', storedRaw);
+  const cookieWrites = [];
   const calls = [];
   let status = 200;
-  const context = vm.createContext({
-    URL, Map,
-    location: { href: 'https://mapademic.app/#6/0/0' },
-    document: { getElementById(id) {
+  const location = new URL(href);
+  const document = {
+    get cookie() {
+      if (blocked) throw Error('cookies blocked');
+      return [...jar].map(([name, value]) => `${name}=${value}`).join('; ');
+    },
+    set cookie(value) {
+      if (blocked) throw Error('cookies blocked');
+      cookieWrites.push(value);
+      if (rejectWrites) return;
+      const [pair, ...attributes] = value.split(';').map(part => part.trim());
+      const equals = pair.indexOf('=');
+      const name = pair.slice(0, equals);
+      const encoded = pair.slice(equals + 1);
+      const attrs = new Map(attributes.map(attribute => {
+        const index = attribute.indexOf('=');
+        return index < 0 ? [attribute.toLowerCase(), true]
+          : [attribute.slice(0, index).toLowerCase(), attribute.slice(index + 1)];
+      }));
+      if (attrs.has('secure') && location.protocol !== 'https:') return;
+      if (attrs.has('max-age') && Number(attrs.get('max-age')) <= 0) jar.delete(name);
+      else jar.set(name, encoded);
+    },
+    getElementById(id) {
       if (!elements.has(id)) elements.set(id, {
         value: '', textContent: '', listeners: {},
         addEventListener(type, callback) { this.listeners[type] = callback; }
       });
       return elements.get(id);
-    } },
-    sessionStorage: {
-      getItem(key) { if (blocked) throw Error('blocked'); return storage.get(key) || null; },
-      setItem(key, value) { if (blocked) throw Error('blocked'); storage.set(key, value); },
-      removeItem(key) { if (blocked) throw Error('blocked'); storage.delete(key); }
-    },
+    }
+  };
+  const context = vm.createContext({
+    URL, Map,
+    location, document,
     fetch: async (url, options) => {
       calls.push({ url, options });
       return { status, ok: status === 200, json: async () => ({ display_name: 'Researcher' }) };
@@ -36,7 +60,7 @@ function harness({ stored, blocked = false } = {}) {
   // The marker's trailing description is a comment in the production script.
   vm.runInContext('// ' + byok + '\n' + jsonHelpers, context);
   return {
-    elements, storage, calls, context,
+    elements, jar, cookieWrites, calls, context,
     run: code => vm.runInContext(code, context),
     setStatus(value) { status = value; },
     use(key) {
@@ -47,13 +71,24 @@ function harness({ stored, blocked = false } = {}) {
   };
 }
 
-test('anonymous requests work; saved keys are masked, tab-scoped, and cleared from input', async () => {
+function cookieAttributes(write) {
+  const [pair, ...attributes] = write.split(';').map(part => part.trim());
+  assert.match(pair, /^mapademic\.openalex-key=/);
+  return new Map(attributes.map(attribute => {
+    const index = attribute.indexOf('=');
+    return index < 0 ? [attribute.toLowerCase(), true]
+      : [attribute.slice(0, index).toLowerCase(), attribute.slice(index + 1)];
+  }));
+}
+
+test('anonymous requests work; saved keys are masked and cleared from input', async () => {
   const h = harness();
   await h.run('fetchOpenAlex("https://api.openalex.org/works")');
   assert.equal(h.calls[0].options.headers.Authorization, undefined);
   h.use('  test-personal-key  ');
   assert.equal(h.elements.get('openalex-key').value, '');
-  assert.equal(h.storage.get('mapademic.openalex-key'), 'test-personal-key');
+  assert.equal(h.jar.get('mapademic.openalex-key'), 'test-personal-key');
+  assert.match(h.elements.get('openalex-key-status').textContent, /30 days/);
   await h.run('fetchOpenAlex("https://api.openalex.org/people/A123?select=display_name")');
   const { url, options } = h.calls[1];
   assert.equal(options.headers.Authorization, 'Bearer test-personal-key');
@@ -65,21 +100,107 @@ test('anonymous requests work; saved keys are masked, tab-scoped, and cleared fr
   assert.match(html, /id="openalex-key" type="password"/);
 });
 
-test('restore, replace, and clear credentials across reloads', async () => {
+test('restore, replace, and clear credentials across pages and reloads', async () => {
   const h = harness({ stored: 'old-key' });
-  assert.match(h.elements.get('openalex-key-status').textContent, /Using your key/);
+  assert.match(h.elements.get('openalex-key-status').textContent, /Using your saved key/);
+  await h.run('fetchOpenAlex("https://api.openalex.org/works")');
+  assert.equal(h.calls[0].options.headers.Authorization, 'Bearer old-key');
   h.use('new-key');
-  await h.run('fetchOpenAlex("https://api.openalex.org/works")');
-  assert.equal(h.calls[0].options.headers.Authorization, 'Bearer new-key');
-  h.clear();
-  assert.equal(h.storage.size, 0);
-  await h.run('fetchOpenAlex("https://api.openalex.org/works")');
-  assert.equal(h.calls[1].options.headers.Authorization, undefined);
-  assert.equal(h.elements.get('openalex-key').value, '');
+  const nextPage = harness({ jar: h.jar, href: 'https://mapademic.app/other-page' });
+  await nextPage.run('fetchOpenAlex("https://api.openalex.org/works")');
+  assert.equal(nextPage.calls[0].options.headers.Authorization, 'Bearer new-key');
+  nextPage.clear();
+  assert.equal(nextPage.jar.size, 0);
+  assert.equal(nextPage.elements.get('openalex-key').value, '');
+  await nextPage.run('fetchOpenAlex("https://api.openalex.org/works")');
+  assert.equal(nextPage.calls[1].options.headers.Authorization, undefined);
+  const reloaded = harness({ jar: nextPage.jar });
+  await reloaded.run('fetchOpenAlex("https://api.openalex.org/works")');
+  assert.equal(reloaded.calls[0].options.headers.Authorization, undefined);
 });
 
-test('disabled storage still permits an in-memory key and clear', async () => {
-  const h = harness({ blocked: true });
+test('keys use an encoded, 30-day, host-only cookie with matching clear attributes', async () => {
+  const key = 'key;=,%/?:@&+#!$[]';
+  const h = harness();
+  h.use(key);
+  assert.equal(h.jar.get('mapademic.openalex-key'), encodeURIComponent(key));
+  const saved = cookieAttributes(h.cookieWrites.at(-1));
+  assert.equal(saved.get('max-age'), '2592000');
+  assert.equal(saved.get('path'), '/');
+  assert.equal(saved.get('samesite').toLowerCase(), 'strict');
+  assert.equal(saved.get('secure'), true);
+  assert.equal(saved.has('domain'), false);
+  const reloaded = harness({ jar: h.jar });
+  await reloaded.run('fetchOpenAlex("https://api.openalex.org/works")');
+  assert.equal(reloaded.calls[0].options.headers.Authorization, `Bearer ${key}`);
+  h.clear();
+  const cleared = cookieAttributes(h.cookieWrites.at(-1));
+  assert.equal(cleared.get('max-age'), '0');
+  assert.equal(cleared.get('path'), saved.get('path'));
+  assert.equal(cleared.get('samesite').toLowerCase(), saved.get('samesite').toLowerCase());
+  assert.equal(cleared.get('secure'), true);
+  assert.equal(cleared.has('domain'), false);
+  assert.equal(h.jar.size, 0);
+});
+
+test('HTTP local development can save and clear the key without Secure', async () => {
+  const h = harness({ href: 'http://localhost:8000/web/dev.html' });
+  h.use('local-key');
+  assert.equal(cookieAttributes(h.cookieWrites.at(-1)).has('secure'), false);
+  const reloaded = harness({ jar: h.jar, href: 'http://localhost:8000/web/dev.html' });
+  await reloaded.run('fetchOpenAlex("https://api.openalex.org/works")');
+  assert.equal(reloaded.calls[0].options.headers.Authorization, 'Bearer local-key');
+  h.clear();
+  assert.equal(cookieAttributes(h.cookieWrites.at(-1)).has('secure'), false);
+  assert.equal(h.jar.size, 0);
+});
+
+test('only the exact credential cookie is loaded among unrelated cookies', async () => {
+  const jar = new Map([
+    ['other-mapademic.openalex-key', 'wrong-prefix-key'],
+    ['mapademic.openalex-key-extra', 'wrong-suffix-key'],
+    ['display-settings', 'unrelated']
+  ]);
+  const withoutKey = harness({ jar });
+  await withoutKey.run('fetchOpenAlex("https://api.openalex.org/works")');
+  assert.equal(withoutKey.calls[0].options.headers.Authorization, undefined);
+  jar.set('mapademic.openalex-key', encodeURIComponent('right;key=value'));
+  const withKey = harness({ jar });
+  await withKey.run('fetchOpenAlex("https://api.openalex.org/works")');
+  assert.equal(withKey.calls[0].options.headers.Authorization, 'Bearer right;key=value');
+  withKey.clear();
+  assert.equal(jar.size, 3);
+  assert.equal(jar.get('display-settings'), 'unrelated');
+});
+
+test('malformed or invalid saved cookies are ignored', async () => {
+  for (const storedRaw of ['%E0%A4%A', '', encodeURIComponent('a b'),
+    encodeURIComponent('a\nb'), encodeURIComponent('non-ascii-é'), 'a'.repeat(513)]) {
+    const h = harness({ storedRaw });
+    await h.run('fetchOpenAlex("https://api.openalex.org/works")');
+    assert.equal(h.calls[0].options.headers.Authorization, undefined);
+    assert.match(h.elements.get('openalex-key-status').textContent, /without a key/);
+  }
+});
+
+test('blocked cookies and silently rejected writes permit an in-memory key and clear', async () => {
+  for (const options of [{ blocked: true }, { rejectWrites: true }]) {
+    const h = harness(options);
+    h.use('memory-key');
+    assert.match(h.elements.get('openalex-key-status').textContent, /until reload/);
+    await h.run('fetchOpenAlex("https://api.openalex.org/works")');
+    assert.equal(h.calls[0].options.headers.Authorization, 'Bearer memory-key');
+    const reloaded = harness({ ...options, jar: h.jar });
+    await reloaded.run('fetchOpenAlex("https://api.openalex.org/works")');
+    assert.equal(reloaded.calls[0].options.headers.Authorization, undefined);
+    h.clear();
+    await h.run('fetchOpenAlex("https://api.openalex.org/works")');
+    assert.equal(h.calls[1].options.headers.Authorization, undefined);
+  }
+});
+
+test('rejected replacement and clear writes report failure when the old cookie remains', async () => {
+  const h = harness({ stored: 'old-key', rejectWrites: true });
   h.use('memory-key');
   assert.match(h.elements.get('openalex-key-status').textContent, /until reload/);
   await h.run('fetchOpenAlex("https://api.openalex.org/works")');
@@ -87,6 +208,8 @@ test('disabled storage still permits an in-memory key and clear', async () => {
   h.clear();
   await h.run('fetchOpenAlex("https://api.openalex.org/works")');
   assert.equal(h.calls[1].options.headers.Authorization, undefined);
+  assert.equal(h.jar.get('mapademic.openalex-key'), 'old-key');
+  assert.match(h.elements.get('openalex-key-status').textContent, /this page/);
 });
 
 test('invalid input never replaces the working key', async () => {
@@ -99,7 +222,7 @@ test('invalid input never replaces the working key', async () => {
   assert.equal(h.calls[0].options.headers.Authorization, 'Bearer working-key');
 });
 
-test('credentials cannot be sent to data hosts, backends, HTTP, or lookalike origins', async () => {
+test('the credential gateway rejects data hosts, backends, HTTP, and lookalike origins', async () => {
   const h = harness({ stored: 'private-key' });
   for (const url of ['https://data.mapademic.app/data/index/test.json',
     'https://example.test/api/path', 'http://api.openalex.org/works',

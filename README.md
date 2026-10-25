@@ -50,13 +50,20 @@ still work without it. Your key is used for live researcher details, coauthor
 lookups, restored author names, and shared-paper titles. Retry a failed lookup
 after setting or replacing a key.
 
-The key is kept in `sessionStorage` for this tab (in memory only if browser
-storage is unavailable), and the input is cleared after saving. **Clear key**
-removes it; closing the tab ends the session. It is sent directly to
-`https://api.openalex.org` in an Authorization header, never to the map's data
-host or optional path backend, and never included in share links or display
-settings. Like any client-side credential, it is accessible to scripts running
-on the page. A rejected key does not silently fall back to anonymous requests.
+The key is remembered for 30 days in a cookie named `mapademic.openalex-key`,
+so it loads automatically on later visits, including after closing the browser.
+The cookie is limited to the current host and uses `Path=/`, `SameSite=Strict`,
+and `Secure` on HTTPS (HTTP localhost previews also work). **Clear key** expires
+the cookie and clears the key from the current page; the input is cleared after
+saving. If cookies are unavailable, the key works in memory until reload.
+
+Live lookups send the key directly to `https://api.openalex.org` in an
+Authorization header, with cookies omitted. The browser also sends the saved
+cookie with requests to the map site's own host, but not the separate
+`data.mapademic.app` host. The key is never included in share links or display
+settings. The cookie is readable by page scripts (it cannot be `HttpOnly`,
+because this static site's JavaScript must read it). A rejected key does not
+silently fall back to anonymous requests.
 
 Run the frontend credential regression tests with Node.js 18+:
 `node --test tests/test_openalex_byok.cjs`.
