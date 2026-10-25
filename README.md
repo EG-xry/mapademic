@@ -396,11 +396,18 @@ Mapademic was created and is maintained by
 [Bruce Wen](https://github.com/owlsowo) contributed Connect from an
 institution and the optional personal OpenAlex API key (pull requests #1 and #2).
 
+[Xingrui Chen](https://github.com/riptideiv) wrote the early implementation of
+Connect (see Acknowledgements) and made the OpenAlex API key persist between
+visits (pull request #3).
+
+To cite Mapademic, use GitHub's "Cite this repository" button, which reads
+[CITATION.cff](CITATION.cff).
+
 ## Acknowledgements
 
 Connect and the coauthor rays come from
 [academic-degree-of-separation](https://github.com/riptideiv/academic-degree-of-separation)
-by [riptideiv](https://github.com/riptideiv), a "six degrees of separation"
+by Xingrui Chen ([riptideiv](https://github.com/riptideiv)), a "six degrees of separation"
 tool for academics (live at
 [xingruic.net/tools/researchers](https://www.xingruic.net/tools/researchers)).
 Its backend served both features on this map from July to October 2026: the

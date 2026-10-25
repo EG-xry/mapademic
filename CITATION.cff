@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use Mapademic, please cite it as below."
+type: software
+title: "Mapademic: an interactive map of researchers placed by coauthorship"
+abstract: >-
+  A zoomable map of the 8.4 million researchers in OpenAlex with 15 or more
+  works, placed by who they write papers with, and an in-browser search for
+  the shortest chain of coauthors between any two of them.
+authors:
+  - given-names: Eric
+    family-names: Gao
+    affiliation: University of California San Diego
+    orcid: "https://orcid.org/0009-0000-3360-7990"
+  - given-names: Bruce
+    family-names: Wen
+  - given-names: Xingrui
+    family-names: Chen
+repository-code: "https://github.com/EG-xry/mapademic"
+url: "https://mapademic.app"
+license: MIT
+version: 1.0.0
+date-released: "2026-10-24"
+keywords:
+  - science of science
+  - coauthorship network
+  - OpenAlex
+  - network visualization
+  - shortest path
