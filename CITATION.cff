@@ -15,6 +15,7 @@ authors:
     family-names: Wen
   - given-names: Xingrui
     family-names: Chen
+doi: 10.5281/zenodo.23629696
 repository-code: "https://github.com/EG-xry/mapademic"
 url: "https://mapademic.app"
 license: MIT

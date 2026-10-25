@@ -1,5 +1,7 @@
 # mapademic
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23629696.svg)](https://doi.org/10.5281/zenodo.23629696)
+
 Created by [Eric Gao](https://github.com/EG-xry), a student at UC San Diego.
 
 A zoomable map of 8,396,458 researchers: OpenAlex authors with 15 or more
@@ -401,7 +403,9 @@ Connect (see Acknowledgements) and made the OpenAlex API key persist between
 visits (pull request #3).
 
 To cite Mapademic, use GitHub's "Cite this repository" button, which reads
-[CITATION.cff](CITATION.cff).
+[CITATION.cff](CITATION.cff), or the DOI
+[10.5281/zenodo.23629696](https://doi.org/10.5281/zenodo.23629696) (always the
+latest version; each release also has its own DOI on Zenodo).
 
 ## Acknowledgements
 
