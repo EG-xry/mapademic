@@ -252,6 +252,9 @@
     #info-card-body { padding: 0 10px 8px; display: flex; flex-direction: column; gap: 4px; }
     #info-card-body .row { display: flex; justify-content: space-between; gap: 8px; }
     #info-card-body .row .k { color: #888; flex: none; }
+    /* R46: a data-quality note (merged, split or non-person profile) */
+    #info-card-body .note { margin: 2px 0 0; padding-left: 8px; border-left: 2px solid #c9a24a;
+                             color: #e3c98f; font-size: 11.5px; line-height: 1.4; }
     .ic-actions { display: flex; gap: 6px; padding: 0 10px 10px; }
     .ic-actions button { flex: 1; background: #0b0b0bd9; color: #ddd; border: 1px solid #333;
                            border-radius: 6px; padding: 6px 6px; font: 11px system-ui; cursor: pointer; }
@@ -480,6 +483,36 @@
           in your browser.</p>
       </section>
       <section>
+        <h3>Known issues in the data</h3>
+        <p>OpenAlex builds its author profiles automatically, and they have
+          errors that show up on the map:</p>
+        <ul>
+          <li><b>Merged namesakes.</b> Several people who share a common name
+            can end up in one profile. Many of the biggest hubs are such
+            merges, some listing hundreds of institutions in a single year.
+            Their cards say so, and Connect routes around them when a path at
+            most one step longer exists.</li>
+          <li><b>Split and duplicate profiles.</b> One person can have several
+            profiles: about one profile in 16 is a fragment of someone's
+            record. Many Chinese, Japanese and Korean researchers also have a
+            second profile in their own script for their domestic-language
+            papers. It usually sits in its own, almost uncited cluster,
+            away from their main profile.</li>
+          <li><b>Records that aren't people.</b> A few thousand profiles are
+            organizations, teams, typesetters or placeholders such as
+            "unknown unknown".</li>
+          <li><b>Snapshot versus today.</b> The map is the 2026-09-23 snapshot.
+            OpenAlex keeps merging and splitting profiles, so a card's live
+            details can differ from the profile's place on the map. Names
+            come from OpenAlex live, or from the snapshot when OpenAlex
+            can't answer.</li>
+          <li><b>Area names.</b> Each colored area is named for the fields most
+            typical of its coauthorship group. A small group folded into a
+            larger area takes that area's name, so the label can differ from
+            your own field; a card's Topics row shows the researcher's own.</li>
+        </ul>
+      </section>
+      <section>
         <h3>Keyboard shortcuts</h3>
         <ul>
           <li><kbd>/</kbd> focus search</li>
@@ -687,10 +720,18 @@ async function fetchOpenAlex(url) {
     throw new Error("OpenAlex requests must use https://api.openalex.org");
   }
   const key = openAlexKey;
+  // R46: redirects are followed. OpenAlex answers a merged-away id with a 301
+  // to the surviving record, and with redirect: "error" every such lookup
+  // failed, so Connect showed bare ids ("A5012345678") for people OpenAlex had
+  // merged since the snapshot. Browsers drop Authorization on a cross-origin
+  // redirect, and a response that ends anywhere but OpenAlex is refused here.
   const response = await fetch(target.href, {
     headers: key ? { Authorization: `Bearer ${key}` } : {},
-    credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer"
+    credentials: "omit", redirect: "follow", cache: "no-store", referrerPolicy: "no-referrer"
   });
+  if (response.url && new URL(response.url).origin !== "https://api.openalex.org") {
+    throw new Error("OpenAlex redirected off api.openalex.org");
+  }
   // Do not cache authentication failures as missing people/papers, or silently
   // charge an anonymous request after a rejected personal key.
   if (response.status === 401 || response.status === 403 || response.status === 429) {
@@ -2010,9 +2051,11 @@ async function pathLists(meta, nodes) {
 }
 // Shortest coauthor path between author numbers a and b (or sets of numbers): an array of author
 // numbers, null when there is none (within maxHops), or {tooFar: true} past
-// PATH_MAX_LINKS. avoidSuspect skips links flagged as probable namesakes.
+// PATH_MAX_LINKS. avoidSuspect skips links flagged as probable namesakes;
+// avoidNodes (a Set or Map of author numbers, R46: the data flags) are never
+// passed through, though a search may still start or end at one.
 async function browserShortestPath(meta, a, b, onProgress, {
-  avoidSuspect = false, maxHops = PATH_MAX_HOPS, isStale = () => false
+  avoidSuspect = false, avoidNodes = null, maxHops = PATH_MAX_HOPS, isStale = () => false
 } = {}) {
   const check = () => { if (isStale()) throw new DOMException("Search cancelled", "AbortError"); };
   check();
@@ -2046,6 +2089,7 @@ async function browserShortestPath(meta, a, b, onProgress, {
         if (raw < 0 && avoidSuspect) continue;
         const v = raw < 0 ? ~raw : raw;
         if (mine.has(v)) continue;
+        if (avoidNodes && avoidNodes.has(v) && !other.has(v)) continue;
         mine.set(v, u);
         if (other.has(v)) { meet = v; return true; }
         next.push(v);
@@ -2186,6 +2230,76 @@ async function fetchConnectStartName(id) {
   } catch { return id; }
 }
 // ---- End Institution Connect ----
+// ---- R46: data flags ----
+// Profiles flagged by an analysis of this snapshot (scripts/export_flags.py
+// writes flags-<release>.json next to the page). merged: a common name whose
+// OpenAlex affiliations list 25+ institutions in one year, i.e. several people
+// sharing it. split: a common-name profile OpenAlex has broken up since the
+// snapshot. notPerson: an organization, team, typesetter or placeholder. The
+// info card says so, and Connect routes around them when it can. Loaded on
+// first use; without the file there are simply no flags.
+const FLAGS_RELEASE = "2026-09-23";
+const FLAGS_URL = new URL(`flags-${FLAGS_RELEASE}.json`, location.href).href;
+const FLAG_ID_BASE = 5_000_000_000;   // the paths manifest's id_base; flags store ids minus it
+let dataFlagsPromise = null;
+function dataFlags() {
+  if (!dataFlagsPromise) {
+    dataFlagsPromise = fetchJsonOr404(FLAGS_URL).then(raw => {
+      const byNumber = new Map(), byId = new Map();
+      for (const [kind, cols] of Object.entries((raw && raw.flags) || {})) {
+        for (let i = 0; i < cols.n.length; i++) {
+          const flag = { kind };
+          for (const [k, v] of Object.entries(cols)) if (k !== "n" && k !== "id") flag[k] = v[i];
+          byNumber.set(cols.n[i], flag);
+          byId.set(cols.id[i], flag);
+        }
+      }
+      return { byNumber, byId };
+    }).catch(() => { dataFlagsPromise = null; return { byNumber: new Map(), byId: new Map() }; });
+  }
+  return dataFlagsPromise;
+}
+function flagForId(flags, bareId) {
+  return flags.byId.get(Number(String(bareId).replace(/^A/, "")) - FLAG_ID_BASE);
+}
+// The busiest year in a live OpenAlex author record's affiliations: {count, year} or null.
+function peakAffiliations(data) {
+  const perYear = new Map();
+  for (const a of (data && data.affiliations) || []) {
+    for (const y of a.years || []) perYear.set(y, (perYear.get(y) || 0) + 1);
+  }
+  let best = null;
+  for (const [year, count] of perYear) if (!best || count > best.count) best = { count, year };
+  return best;
+}
+// The info card's note on a profile, or null. A live record with 25+
+// institutions in a year but no flag gets a neutral note: an uncommon name
+// with that many is usually one researcher credited with trial or consortium sites.
+function profileNote(flag, peak) {
+  if (flag && flag.kind === "notPerson") {
+    return "This record looks like an organization, team or placeholder rather than a person.";
+  }
+  if (flag && flag.kind === "split") {
+    return `OpenAlex has split this profile since the ${FLAGS_RELEASE} snapshot (${flag.then.toLocaleString()} works then, ` +
+      `${flag.now.toLocaleString()} now). The map shows the older version, which mixes several people.`;
+  }
+  if (flag && flag.kind === "merged") {
+    return `OpenAlex lists ${flag.peak} institutions for this profile in ${flag.year}. It probably merges several ` +
+      "people who share this name, so its coauthors and place on the map mix them.";
+  }
+  if (peak && peak.count >= 25) {
+    return `OpenAlex lists ${peak.count} institutions for this profile in ${peak.year}. That can mean several ` +
+      "people share it, or one researcher credited with many trial or consortium sites.";
+  }
+  return null;
+}
+// The label of a Connect step into a flagged profile (renderPath shows it under the step).
+function flagStepLabel(flag, name) {
+  return flag.kind === "notPerson"
+    ? `not a person in OpenAlex: ${name} looks like an organization or placeholder`
+    : `possible name mix-up in OpenAlex: ${name}'s profile probably merges several people with this name`;
+}
+// ---- End data flags ----
 // Connect without a backend: resolves both authors, searches, prefers a path
 // between real people, labels each hop, then hands the steps to renderPath
 // exactly as /api/path's result did.
@@ -2222,25 +2336,31 @@ async function connectInBrowser(meta, idA, idB, gen) {
     const slow = performance.now() - t0 > 8000 ? " - a hard one, still searching" : "";
     setPathStatus(`searching… ${hops} step${hops > 1 ? "s" : ""} explored (${seen.toLocaleString()} researchers)${slow}`);
   };
-  let nodes, note = null, warn = [];
+  const flagsReady = dataFlags();       // R46: fetched alongside the first search
+  let nodes, note = null, warn = [], warnNodes = [], flags = null;
   try {
     nodes = await browserShortestPath(meta, a, b, progress, { isStale: stale });
     if (stale()) return;
     if (nodes && !nodes.tooFar) {
+      flags = await flagsReady;
       const bad = await suspectSteps(meta, nodes);
-      if (bad.length) {
-        // the shortest route runs through a probable namesake merge: look for
-        // one between real people, at most one step longer
+      const odd = nodes.map((u, i) => i).filter(i => i > 0 && i < nodes.length - 1 && flags.byNumber.has(nodes[i]));
+      if (bad.length || odd.length) {
+        // the shortest route runs through a probable namesake merge (a flagged
+        // link, or a flagged profile in the middle): look for one between real
+        // people, at most one step longer
         setPathStatus("checking for a route that avoids a likely name mix-up…");
-        const clean = await browserShortestPath(meta, a, b, null, { avoidSuspect: true, maxHops: nodes.length, isStale: stale });
+        const clean = await browserShortestPath(meta, a, b, null,
+          { avoidSuspect: true, avoidNodes: flags.byNumber, maxHops: nodes.length, isStale: stale });
         if (stale()) return;
         if (clean && !clean.tooFar) {
           if (clean.length > nodes.length) {
-            note = `the ${nodes.length - 1}-step route runs through what looks like two different people sharing a name in OpenAlex`;
+            note = `the ${nodes.length - 1}-step route runs through what looks like different people sharing a name in OpenAlex`;
           }
           nodes = clean;
         } else {
           warn = bad;
+          warnNodes = odd;
         }
       }
     }
@@ -2270,6 +2390,10 @@ async function connectInBrowser(meta, idA, idB, gen) {
   const labels = papers.map(p => p && p.title);
   for (const i of warn) {
     labels[i] = `possible name mix-up in OpenAlex: this step may join two different people${labels[i] ? " - " + labels[i] : ""}`;
+  }
+  for (const i of warnNodes) {          // the step into a flagged profile
+    if (warn.includes(i - 1)) continue;
+    labels[i - 1] = flagStepLabel(flags.byNumber.get(nodes[i]), names[i]) + (labels[i - 1] ? " - " + labels[i - 1] : "");
   }
   console.info(`path: ${nodes.length - 1} hops in ${((performance.now() - t0) / 1000).toFixed(2)}s`);
   await renderPath(ids.map((id, i) => ({ author_id: id, author_name: names[i], label: labels[i] || null, paper: papers[i] || null })),
@@ -2735,17 +2859,20 @@ function repositionActiveOverlays() {
 }
 
 // ---- Task 2 (night-polish): hash-restore helpers ----
-// Author names aren't in the id-coord shards, so a=/p= restores fetch them
-// lazily from OpenAlex's public People API; the bare id is a fine fallback
-// since it's still usable for Connect's Go button.
+// Author names aren't in the id-coord shards, so a=/p= restores and Connect's
+// steps fetch them from OpenAlex's public People API. R46: when OpenAlex has
+// no name for the id or can't be reached (its free daily quota is shared by
+// everyone behind one network address), the name the snapshot gave the author
+// is used instead (snapshotName); a bare id is the last resort, and is still
+// usable for Connect's Go button.
 const displayNameCache = new Map();  // bare id -> Promise<string>
 function fetchDisplayName(bareId) {
   if (!displayNameCache.has(bareId)) {
     cacheUnlessFailed(displayNameCache, bareId,
       fetchJsonOr404(`https://api.openalex.org/people/${bareId}?select=display_name`)
-        .then(j => (j && j.display_name) || bareId), bareId);
+        .then(j => (j && j.display_name) || snapshotName(bareId)), null);
   }
-  return displayNameCache.get(bareId);
+  return displayNameCache.get(bareId).then(name => name || snapshotName(bareId));
 }
 
 async function probeBackendHealth(timeoutMs = 2000) {
@@ -4376,7 +4503,7 @@ function resolveCloudFallbackHit(idx) {
       return null;
     }
     const data = await fetchAuthorDetails(bareId);
-    const name = (data && data.display_name) || bareId;
+    const name = (data && data.display_name) || await snapshotName(bareId);
     const cited = (data && data.cited_by_count) || 0;
     return [name, bareId, xw, yw, cited, undefined];
   })();
@@ -5516,6 +5643,22 @@ async function fetchZ9Entry(bareId, xw, yw) {
   return found;
 }
 
+// R46: the name the snapshot gave an author, for when OpenAlex can't supply
+// one: its id shard gives its map position, and the z9 label tile there holds
+// its entry, name first. That covers 96% of mapped authors (the rest sit past
+// a dense tile's 4000-entry cap); otherwise, the bare id. Not cached itself:
+// the shard and tile fetches are.
+async function snapshotName(bareId) {
+  try {
+    const bucket = await fetchIdBucket(idBucketNum(bareId));
+    const hit = bucket && bucket.get(bareId);
+    const entry = hit && await fetchZ9Entry(bareId, hit[0], hit[1]);
+    return (entry && entry[0]) || bareId;
+  } catch {
+    return bareId;
+  }
+}
+
 // Search-path community resolution: search-shard entries don't carry
 // community (unlike hitTest's z9-tile hit entries used by openInfoCard), so
 // fetch the z9 label tile at this author's coords and match by id.
@@ -5770,6 +5913,13 @@ function addInfoRow(key, value) {
   row.append(k, v);
   infoCardBody.appendChild(row);
 }
+// R46: a note under the rows (profileNote); text only, never HTML.
+function addInfoNote(text) {
+  const p = document.createElement("p");
+  p.className = "note";
+  p.textContent = text;
+  infoCardBody.appendChild(p);
+}
 
 function closeInfoCard() {
   infoCardGen++;                     // any in-flight fetch for this card is now stale
@@ -5822,15 +5972,24 @@ function openInfoCard(hit) {
   infoCardName.textContent = name;
   infoCardBody.innerHTML = "";
   addInfoRow("Citations", cited.toLocaleString());
+  // R46: "Map area", not "Area": the name belongs to the surrounding coauthorship
+  // group (pipeline/regions.py), which a small group folded into a big one
+  // shares; the person's own field is the Topics row below.
   const area = areaName(community, sub);
-  if (area) addInfoRow("Area", area);
+  if (area) addInfoRow("Map area", area);
   infoCard.classList.add("open");
   // Task R10a: info-card selections already have community from the hit
   // entry, unlike a search selection (see setSearchHighlight), so this skips
   // the z9-tile-fetch resolve and highlights directly.
   highlightLegendCommunity(community, bareId, sub);
 
-  fetchAuthorDetails(bareId).then(data => {
+  const details = fetchAuthorDetails(bareId);
+  Promise.all([dataFlags(), details]).then(([flags, data]) => {
+    if (gen !== infoCardGen) return;
+    const note = profileNote(flagForId(flags, bareId), peakAffiliations(data));
+    if (note) addInfoNote(note);
+  });
+  details.then(data => {
     if (gen !== infoCardGen) return;   // card closed, or replaced, since this fetch started
     if (!data) { addInfoRow("Details", "couldn't load details"); return; }
     const inst = data.last_known_institutions && data.last_known_institutions[0];

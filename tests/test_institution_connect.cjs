@@ -14,6 +14,7 @@ const searchCode = section('async function browserShortestPath(', '// Indices i 
 const institutionCode = section('const INSTITUTION_CANDIDATE_LIMIT', '// ---- End Institution Connect ----');
 const pooledCode = section('async function pooled(', '// The whole list-length index');
 const connectCode = section('async function connectInBrowser(', 'connectGo.addEventListener("click"');
+const flagsCode = section('// ---- R46: data flags ----', '// ---- End data flags ----');
 const plain = value => JSON.parse(JSON.stringify(value));
 const stripId = id => String(id).replace(/^https?:\/\/openalex\.org\//, '');
 const idBucketNum = id => Number(stripId(id).replace(/\D/g, '')) % 1000;
@@ -168,10 +169,11 @@ test('cancelling candidate resolution avoids subsequent bucket downloads', async
   assert.equal(calls, 0);
 });
 
-function connectHarness(overrides = {}) {
+function connectHarness(overrides = {}, flagsRaw = null) {
   const rendered = [], statuses = [];
   const context = vm.createContext({
-    console, performance, pathGen: 1, PATH_MAX_HOPS: 14,
+    console, performance, pathGen: 1, PATH_MAX_HOPS: 14, URL, location: new URL('https://mapademic.app/'),
+    fetchJsonOr404: async () => flagsRaw,
     connectA: { id: 'I42', name: 'Example University' }, connectB: { id: 'A9', name: 'Destination' },
     connectAffiliation: { textContent: '' },
     setPathStatus: text => statuses.push(text),
@@ -182,7 +184,7 @@ function connectHarness(overrides = {}) {
     sharedPaper: async () => ({ title: 'Shared paper', year: 2020, venue: 'Journal', url: 'https://doi.org/10.1/x' }),
     renderPath: async (...args) => rendered.push(plain(args)), ...overrides
   });
-  vm.runInContext(connectCode, context);
+  vm.runInContext(flagsCode + connectCode, context);
   return { context, rendered, statuses };
 }
 test('institution results render actual researchers and paper labels, retaining institution share endpoints', async () => {
@@ -323,4 +325,72 @@ test('typing keeps the current matches visible until new ones arrive', async () 
 });
 test('the complete viewer script parses', () => {
   new vm.Script(html.match(/<script>\n([\s\S]*?)<\/script>/)[1]);
+});
+
+test('avoided profiles are never passed through, but a search may still start or end at one', async () => {
+  const graph = new Map([[1, [2, 4]], [2, [1, 3]], [3, [2, 5]], [4, [1, 5]], [5, [4, 3]]]);
+  const search = searchHarness(graph);
+  assert.deepEqual(plain(await search({}, 1, 3)), [1, 2, 3]);
+  assert.deepEqual(plain(await search({}, 1, 3, null, { avoidNodes: new Set([2]) })), [1, 4, 5, 3]);
+  assert.deepEqual(plain(await search({}, 1, 3, null, { avoidNodes: new Set([1, 3]) })), [1, 2, 3]);
+  assert.equal(await search({}, 1, 3, null, { avoidNodes: new Set([2, 4]) }), null);
+  assert.equal(await search({}, 1, 3, null, { avoidNodes: new Set([2]), maxHops: 2 }), null);
+});
+test('avoiding profiles matches an independent BFS over the remaining graph', async () => {
+  let seed = 7;
+  const rand = () => ((seed = (1664525 * seed + 1013904223) >>> 0) / 2 ** 32);
+  for (let trial = 0; trial < 80; trial++) {
+    const graph = new Map(Array.from({ length: 18 }, (_, i) => [i, []]));
+    for (let u = 0; u < 18; u++) for (let v = u + 1; v < 18; v++) {
+      if (rand() < 0.14) { graph.get(u).push(v); graph.get(v).push(u); }
+    }
+    const avoid = new Set([...graph.keys()].filter(u => u > 1 && rand() < 0.2));
+    const kept = new Map([...graph].map(([u, list]) => [u, avoid.has(u) ? [] : list.filter(v => !avoid.has(v) || v === 1)]));
+    const path = await searchHarness(graph)({}, 0, 1, null, { avoidNodes: avoid });
+    const want = oracle(kept, [0], 1);
+    assert.equal(path === null ? null : path.length - 1, want);
+    if (path) for (const u of path.slice(1, -1)) assert.ok(!avoid.has(u));
+  }
+});
+const mergedFlags = { flags: { merged: { n: [2], id: [12], peak: [40], year: [2020] } } };
+function flaggedConnect(cleanResult) {
+  const calls = [];
+  const h = connectHarness({
+    resolveInstitutionStart: undefined,
+    authorPathNumber: async id => (id === 'A1' ? 1 : 9),
+    browserShortestPath: async (_m, _a, _b, _p, opts = {}) => {
+      calls.push(plain({ avoid: opts.avoidNodes ? [...opts.avoidNodes.keys()] : null, maxHops: opts.maxHops || null }));
+      return opts.avoidNodes ? cleanResult : [1, 2, 9];
+    },
+    pathAuthorIds: async (_meta, nodes) => nodes.map(u => 'A' + u),
+    fetchDisplayName: async id => 'Name ' + id,
+    connectA: { id: 'A1', name: 'Start' },
+  }, mergedFlags);
+  return { h, calls };
+}
+test('a merged profile in the middle of the shortest route sends Connect around it', async () => {
+  const { h, calls } = flaggedConnect([1, 4, 5, 9]);
+  await h.context.connectInBrowser({}, 'A1', 'A9', 1);
+  assert.deepEqual(calls, [{ avoid: null, maxHops: null }, { avoid: [2], maxHops: 3 }]);
+  assert.deepEqual(h.rendered[0][0].map(step => step.author_id), ['A1', 'A4', 'A5', 'A9']);
+  assert.match(h.statuses.at(-1), /2-step route runs through what looks like different people sharing a name/);
+});
+test('with no way around, the step into the merged profile is labelled', async () => {
+  const { h } = flaggedConnect(null);
+  await h.context.connectInBrowser({}, 'A1', 'A9', 1);
+  const steps = h.rendered[0][0];
+  assert.deepEqual(steps.map(step => step.author_id), ['A1', 'A2', 'A9']);
+  assert.match(steps[0].label, /^possible name mix-up in OpenAlex: Name A2's profile probably merges several people/);
+  assert.match(steps[0].label, / - Shared paper$/);
+  assert.equal(steps[1].label, 'Shared paper');
+});
+test('flagged endpoints do not trigger a detour', async () => {
+  const calls = [];
+  const h = connectHarness({
+    resolveInstitutionStart: undefined, authorPathNumber: async id => (id === 'A1' ? 2 : 9),
+    browserShortestPath: async (...args) => { calls.push(args.length); return [2, 9]; },
+    pathAuthorIds: async () => ['A2', 'A9'], connectA: { id: 'A1', name: 'Start' },
+  }, mergedFlags);
+  await h.context.connectInBrowser({}, 'A1', 'A9', 1);
+  assert.equal(calls.length, 1);
 });

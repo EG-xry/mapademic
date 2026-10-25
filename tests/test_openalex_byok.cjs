@@ -17,7 +17,7 @@ function harness({
   if (storedRaw !== undefined) jar.set('mapademic.openalex-key', storedRaw);
   const cookieWrites = [];
   const calls = [];
-  let status = 200;
+  let status = 200, finalUrl = null;
   const location = new URL(href);
   const document = {
     get cookie() {
@@ -54,7 +54,7 @@ function harness({
     location, document,
     fetch: async (url, options) => {
       calls.push({ url, options });
-      return { status, ok: status === 200, json: async () => ({ display_name: 'Researcher' }) };
+      return { status, ok: status === 200, url: finalUrl || url, json: async () => ({ display_name: 'Researcher' }) };
     }
   });
   // The marker's trailing description is a comment in the production script.
@@ -63,6 +63,7 @@ function harness({
     elements, jar, cookieWrites, calls, context,
     run: code => vm.runInContext(code, context),
     setStatus(value) { status = value; },
+    setFinalUrl(value) { finalUrl = value; },
     use(key) {
       elements.get('openalex-key').value = key;
       elements.get('openalex-key-form').listeners.submit({ preventDefault() {} });
@@ -92,7 +93,7 @@ test('anonymous requests work; saved keys are masked and cleared from input', as
   await h.run('fetchOpenAlex("https://api.openalex.org/people/A123?select=display_name")');
   const { url, options } = h.calls[1];
   assert.equal(options.headers.Authorization, 'Bearer test-personal-key');
-  assert.equal(options.redirect, 'error');
+  assert.equal(options.redirect, 'follow');
   assert.equal(options.credentials, 'omit');
   assert.equal(options.cache, 'no-store');
   assert.equal(options.referrerPolicy, 'no-referrer');
@@ -251,6 +252,17 @@ test('auth and rate-limit failures evict cached lookups so replacement keys can 
     const retried = await h.run('fetchJsonOr404("https://api.openalex.org/people/A123")');
     assert.equal(retried.display_name, 'Researcher');
     assert.equal(h.calls[1].options.headers.Authorization, 'Bearer replacement-key');
+  }
+});
+
+test('merged-away ids follow OpenAlex redirects, but never to another origin', async () => {
+  const h = harness({ stored: 'private-key' });
+  h.setFinalUrl('https://api.openalex.org/people/A5006060960?select=display_name');
+  const data = await h.run('fetchJsonOr404("https://api.openalex.org/people/A5092938886?select=display_name")');
+  assert.equal(data.display_name, 'Researcher');
+  for (const away of ['https://evil.test/people/A1', 'http://api.openalex.org/people/A1']) {
+    h.setFinalUrl(away);
+    await assert.rejects(h.run('fetchJsonOr404("https://api.openalex.org/people/A5092938886")'), /redirected off api\.openalex\.org/);
   }
 });
 

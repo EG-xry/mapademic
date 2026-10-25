@@ -311,6 +311,18 @@ flagged, about 4.5% of all links. When the shortest path uses one, Connect
 searches again without flagged links and takes that route if it is at most
 one step longer (in tests it always was), and otherwise marks the step.
 
+Whole profiles are flagged too (`scripts/export_flags.py` writes
+`docs/flags-<release>.json`, about 90KB compressed). A profile counts as
+merged when its name is common (200+ OpenAlex records share its initial
+and surname, and 10+ mapped profiles its full name) and OpenAlex's own
+affiliation list puts it at 25 or more institutions in one year. With an
+uncommon name, that many institutions usually means one clinician credited
+with many trial sites. Also flagged: common-name profiles that OpenAlex has
+broken up since the snapshot, and records that are not people
+(organizations, teams, typesetters, placeholders). Connect routes around
+flagged profiles under the same one-step rule, and their cards carry a note.
+The inputs come from the analysis in `paper/`.
+
 ### Publishing data (free tier)
 
 `MAPADEMIC_DATA=<release> bash scripts/upload_r2.sh` uploads a release to the
