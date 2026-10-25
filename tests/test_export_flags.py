@@ -48,3 +48,17 @@ def test_build_keeps_common_names_and_lets_later_kinds_win(release):
     # node 1 (common name, lost most works): split; node 3's lost half (rare name) is a consolidation, not a split
     assert out["split"] == {"n": [3], "id": [20], "then": [11318], "now": [277]}
     assert out["notPerson"] == {"n": [2], "id": [50]}
+
+
+def test_next_snapshot_splits_add_hubs_the_live_check_missed(release, tmp_path):
+    rd = tmp_path / "data" / "r1"
+    np.save(rd / "pathgraph" / "offsets.npy", np.array([0, 9, 17, 18, 20, 21], np.int64))   # node 0 and 1 are the hubs
+    pd.DataFrame({"id": [f"https://openalex.org/A{5_000_000_000 + 10 * (i + 1)}" for i in range(5)],
+                  "works_count": [100, 11318, 50, 897, 40]}).to_parquet(rd / "nodes.parquet")
+    pd.DataFrame({"id": [5_000_000_010, 5_000_000_020], "works_count": [30, 11000]}).to_parquet(
+        release / "snapshot_20261014.parquet")
+    out = export_flags.build("r1", release)["flags"]
+    # node 0 (common name) fell from 100 to 30 works in the next snapshot: split, though the live check missed it;
+    # it was also merged, and split wins
+    assert sorted(out["split"]["id"]) == [10, 20]
+    assert 10 not in out["merged"]["id"]

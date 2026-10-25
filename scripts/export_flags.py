@@ -6,8 +6,9 @@ Three kinds, from the paper's analysis of the 2026-09-23 snapshot (paper/analysi
              and surname, pipeline/identity.py) and a common full name (10+ mapped profiles carry it):
              several people sharing a name.
   split      a common name, and OpenAlex has broken the profile up since the snapshot: it lost at least
-             half its works by the live API a month later (a6_live_works.py). On the map it still mixes
-             several people.
+             half its works by the live API a month later (a6_live_works.py) or in OpenAlex's next
+             snapshot, 2026-10-14 (a6_churn_snapshot.py, which covers all 50,000 hubs). On the map it
+             still mixes several people.
   notPerson  the name is an organization, team, typesetter, editorial office or placeholder
              (a6_nonperson.py's name patterns, people with malformed names left out).
 A profile in several kinds keeps the last of merged, split, notPerson. Uncommon names are left out of
@@ -57,6 +58,25 @@ def author_numbers(release_dir: Path, node_idx: np.ndarray) -> tuple[np.ndarray,
     return numbers.astype(np.int64), want.astype(np.int64)
 
 
+def next_snapshot_splits(release_dir: Path, cache: Path, key_n: pd.DataFrame, exclude: set) -> pd.DataFrame:
+    """Common-name hubs (the 50,000 highest-degree) with under half their works in OpenAlex's next snapshot
+    (cache/snapshot_20261014.parquet, from paper/analysis/a6_churn_snapshot.py): node_idx, works, works_live."""
+    path = cache / "snapshot_20261014.parquet"
+    if not path.exists():
+        return pd.DataFrame({c: pd.Series(dtype="int64") for c in ("node_idx", "works", "works_live")})
+    offsets = np.load(release_dir / "pathgraph" / "offsets.npy", mmap_mode="r")
+    top = np.argsort(-np.diff(offsets), kind="stable")[:50_000]
+    ids = np.load(release_dir / "pathgraph" / "ids.npy", mmap_mode="r")
+    old = pd.read_parquet(release_dir / "nodes.parquet", columns=["id", "works_count"])
+    old = pd.Series(old.works_count.to_numpy(), index=old["id"].str.extract(r"A(\d+)$")[0].astype("int64"))
+    new = pd.read_parquet(path).set_index("id").works_count
+    hub_ids = np.asarray(ids[top]).astype("int64")
+    df = pd.DataFrame({"node_idx": top, "works": old.reindex(hub_ids).to_numpy(), "works_live": new.reindex(hub_ids).to_numpy()})
+    common = key_n.set_index("node_idx").key_n.reindex(top).to_numpy() >= COMMON_NAME
+    df = df[common & (df.works_live < SPLIT_RATIO * df.works) & ~df.node_idx.isin(exclude)]
+    return df.astype({"works": int, "works_live": int})
+
+
 def build(release: str, cache: Path) -> dict:
     release_dir = ROOT / "data" / release
     key_n = pd.read_parquet(release_dir / "pathgraph" / "identity_signals.parquet", columns=["node_idx", "key_n"])
@@ -65,6 +85,8 @@ def build(release: str, cache: Path) -> dict:
               & (aff.full_n >= COMMON_FULL_NAME)]
     live = pd.read_csv(cache / "a6_live_works.csv").merge(key_n, on="node_idx")
     live = live[live.alive & (live.works_ratio < SPLIT_RATIO) & (live.key_n >= COMMON_NAME)]
+    census = next_snapshot_splits(release_dir, cache, key_n, exclude=set(live.node_idx))
+    live = pd.concat([live[["node_idx", "works", "works_live"]], census], ignore_index=True).astype("int64")
     nonperson = np.load(cache / "nonperson_idx.npy")
     kinds = {
         "merged": (aff.node_idx.to_numpy(), {"peak": aff.peak_insts.astype(int), "year": aff.peak_year.astype(int)}),
