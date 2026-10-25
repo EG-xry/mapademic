@@ -602,7 +602,8 @@
              placeholder="Paste your API key">
       <div><button type="submit">Use key</button> <button id="openalex-key-clear" type="button">Clear key</button></div>
       <p id="openalex-key-help">Bring your own key for researcher details, coauthors and paper titles.
-        Kept in this tab until you clear it or close the tab; sent directly to OpenAlex.
+        Remembered in a cookie on this site for 30 days, or until you clear it.
+        Used directly with OpenAlex for lookups.
         <a href="https://openalex.org/settings/api" target="_blank" rel="noopener noreferrer">Get a free key</a>.</p>
       <p id="openalex-key-status" role="status" aria-live="polite"></p>
     </form>
@@ -622,8 +623,9 @@
   </div>
 </div>
 <script>
-// ---- OpenAlex BYOK: tab-scoped credentials, independent of display settings ----
-const OPENALEX_KEY_STORAGE = "mapademic.openalex-key";
+// ---- OpenAlex BYOK: cookie credentials, independent of display settings ----
+const OPENALEX_KEY_COOKIE = "mapademic.openalex-key";
+const OPENALEX_KEY_MAX_AGE = 30 * 24 * 60 * 60;
 const openAlexKeyForm = document.getElementById("openalex-key-form");
 const openAlexKeyInput = document.getElementById("openalex-key");
 const openAlexKeyStatus = document.getElementById("openalex-key-status");
@@ -631,11 +633,29 @@ let openAlexKey = "";
 function validOpenAlexKey(key) {
   return key.length > 0 && key.length <= 512 && /^[\x21-\x7e]+$/.test(key);
 }
+function readOpenAlexKeyCookie() {
+  const prefix = `${OPENALEX_KEY_COOKIE}=`;
+  const entry = document.cookie.split(";").map(cookie => cookie.trim())
+    .find(cookie => cookie.startsWith(prefix));
+  if (!entry) return "";
+  const key = decodeURIComponent(entry.slice(prefix.length));
+  return validOpenAlexKey(key) ? key : "";
+}
+function storeOpenAlexKeyCookie(key) {
+  try {
+    // No Domain attribute: keep the cookie on this host, away from the data
+    // subdomain. HTTPS uses Secure; HTTP localhost remains usable for previews.
+    document.cookie = `${OPENALEX_KEY_COOKIE}=${encodeURIComponent(key)}; ` +
+      `Max-Age=${key ? OPENALEX_KEY_MAX_AGE : 0}; Path=/; SameSite=Strict` +
+      (location.protocol === "https:" ? "; Secure" : "");
+    // Cookie writes can fail silently when the browser blocks persistence.
+    return readOpenAlexKeyCookie() === key;
+  } catch { return false; }
+}
 try {
-  const stored = sessionStorage.getItem(OPENALEX_KEY_STORAGE);
-  if (stored && validOpenAlexKey(stored)) openAlexKey = stored;
-} catch { /* Storage can be disabled; the key still works in memory. */ }
-openAlexKeyStatus.textContent = openAlexKey ? "Using your key for this tab." : "Using OpenAlex without a key.";
+  openAlexKey = readOpenAlexKeyCookie();
+} catch { /* Cookies can be disabled or malformed; a key still works in memory. */ }
+openAlexKeyStatus.textContent = openAlexKey ? "Using your saved key." : "Using OpenAlex without a key.";
 openAlexKeyForm.addEventListener("submit", ev => {
   ev.preventDefault();
   const key = openAlexKeyInput.value.trim();
@@ -645,24 +665,22 @@ openAlexKeyForm.addEventListener("submit", ev => {
   }
   openAlexKey = key;
   openAlexKeyInput.value = "";
-  let saved = true;
-  try { sessionStorage.setItem(OPENALEX_KEY_STORAGE, key); } catch { saved = false; }
+  const saved = storeOpenAlexKeyCookie(key);
   openAlexKeyStatus.textContent = saved
-    ? "Key set for this tab. Retry your lookup to use it."
-    : "Key set until reload (tab storage unavailable). Retry your lookup to use it.";
+    ? "Key saved for 30 days. Retry your lookup to use it."
+    : "Key set until reload (cookies unavailable). Retry your lookup to use it.";
 });
 document.getElementById("openalex-key-clear").addEventListener("click", () => {
   openAlexKey = "";
   openAlexKeyInput.value = "";
-  try {
-    sessionStorage.removeItem(OPENALEX_KEY_STORAGE);
-    openAlexKeyStatus.textContent = "Key cleared. Using OpenAlex without a key.";
-  } catch {
-    openAlexKeyStatus.textContent = "Key cleared for this page; tab storage unavailable.";
-  }
+  const cleared = storeOpenAlexKeyCookie("");
+  openAlexKeyStatus.textContent = cleared
+    ? "Key cleared. Using OpenAlex without a key."
+    : "Key cleared for this page; couldn't remove the cookie. Check your browser's cookie settings.";
 });
 // The one gateway for live OpenAlex requests. Never put a key in a URL,
-// the share hash, displaySettings, a data-host request, or a backend request.
+// the share hash, displaySettings, or headers for a data host or backend.
+// The browser also attaches the host-only cookie to this site's own requests.
 async function fetchOpenAlex(url) {
   const target = new URL(url);
   if (target.origin !== "https://api.openalex.org" || target.username || target.password) {
