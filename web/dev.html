@@ -2262,15 +2262,23 @@ function dataFlags() {
 function flagForId(flags, bareId) {
   return flags.byId.get(Number(String(bareId).replace(/^A/, "")) - FLAG_ID_BASE);
 }
-// The busiest year in a live OpenAlex author record's affiliations: {count, year} or null.
+// The busiest year in a live OpenAlex author record's affiliations, and its
+// steadiest institution: {count, year, home, homeYears, years} or null. A busy
+// clinician keeps one home through most of a career while trial sites come and
+// go; a merged profile has no such home (the paper's "home share": a median of
+// 85% of active years against 64%).
 function peakAffiliations(data) {
   const perYear = new Map();
+  let home = null, homeYears = 0;
   for (const a of (data && data.affiliations) || []) {
-    for (const y of a.years || []) perYear.set(y, (perYear.get(y) || 0) + 1);
+    const years = new Set(a.years || []);
+    for (const y of years) perYear.set(y, (perYear.get(y) || 0) + 1);
+    const name = a.institution && a.institution.display_name;
+    if (name && years.size > homeYears) { home = name; homeYears = years.size; }
   }
   let best = null;
   for (const [year, count] of perYear) if (!best || count > best.count) best = { count, year };
-  return best;
+  return best && { ...best, home, homeYears, years: perYear.size };
 }
 // The info card's note on a profile, or null. A live record with 25+
 // institutions in a year but no flag gets a neutral note: an uncommon name
@@ -2288,8 +2296,9 @@ function profileNote(flag, peak) {
       "people who share this name, so its coauthors and place on the map mix them.";
   }
   if (peak && peak.count >= 25) {
-    return `OpenAlex lists ${peak.count} institutions for this profile in ${peak.year}. That can mean several ` +
-      "people share it, or one researcher credited with many trial or consortium sites.";
+    const steady = peak.home ? ` Its most frequent, ${peak.home}, covers ${peak.homeYears} of its ${peak.years} active years.` : "";
+    return `OpenAlex lists ${peak.count} institutions for this profile in ${peak.year}.${steady} That can mean ` +
+      "several people share the profile, or one researcher credited with many trial or consortium sites (who usually keeps one steady home institution).";
   }
   return null;
 }

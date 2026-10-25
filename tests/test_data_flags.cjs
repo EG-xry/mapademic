@@ -59,7 +59,8 @@ test('the busiest affiliation year comes from the live record', () => {
     { institution: { display_name: 'B' }, years: [2020] },
     { institution: { display_name: 'C' }, years: [2020, 2021] },
   ] };
-  assert.equal(JSON.stringify(context.peakAffiliations(data)), JSON.stringify({ count: 3, year: 2020 }));
+  assert.equal(JSON.stringify(context.peakAffiliations(data)),
+    JSON.stringify({ count: 3, year: 2020, home: 'A', homeYears: 2, years: 3 }));
   assert.equal(context.peakAffiliations({ affiliations: [] }), null);
   assert.equal(context.peakAffiliations(null), null);
 });
@@ -70,7 +71,9 @@ test('card notes: flags first, then a neutral note for a busy live record, else 
   assert.match(note('A5000000101'), /^OpenAlex lists 984 institutions for this profile in 2026\. It probably merges several people/);
   assert.match(note('A5000000201'), /split this profile since the 2026-09-23 snapshot \(11,318 works then, 277 now\)/);
   assert.match(note('A5000000301'), /organization, team or placeholder rather than a person/);
-  assert.match(note('A5000000999', { count: 31, year: 2015 }), /31 institutions .* in 2015\. That can mean several people share it, or one researcher/);
+  assert.match(note('A5000000999', { count: 31, year: 2015 }), /31 institutions .* in 2015\. That can mean several people share the profile, or one researcher/);
+  assert.match(note('A5000000999', { count: 31, year: 2015, home: 'Duke University', homeYears: 18, years: 20 }),
+    /in 2015\. Its most frequent, Duke University, covers 18 of its 20 active years\. That can mean/);
   assert.equal(note('A5000000999', { count: 24, year: 2015 }), null);
   assert.equal(note('A5000000999', null), null);
   assert.match(note('A5000000101', { count: 3, year: 2020 }), /984 institutions/);   // the snapshot's evidence wins
