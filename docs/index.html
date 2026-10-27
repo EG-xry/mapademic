@@ -162,6 +162,17 @@
     .connect-dropdown .row:hover, .connect-dropdown .row.active { background: #ffffff1a; }
     .connect-dropdown .row .n { color: #888; }
     .connect-dropdown .row.empty { color: #888; cursor: default; }
+    /* Issue #4: a researcher row puts the last-known institution and the
+       citation count under the name; a caption above says what that is */
+    #search-dropdown .row.researcher, .connect-dropdown .row.researcher { display: block; }
+    #search-dropdown, .connect-dropdown { color-scheme: dark; }   /* two-line rows scroll more: a dark scrollbar */
+    .row.researcher .name, .row.researcher .inst { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row.researcher .meta { display: flex; justify-content: space-between; gap: 8px;
+                            color: #888; font-size: 11px; margin-top: 1px; }
+    .row.researcher .inst { min-width: 0; }
+    .row.researcher .inst.unknown { color: #666; font-style: italic; }
+    .row.researcher .n { flex: none; }
+    .dd-note { padding: 5px 10px 2px; color: #777; font-size: 11px; }
     .connect-actions { display: flex; gap: 6px; }
     .connect-actions button { flex: 1; background: #0b0b0bd9; color: #ddd;
                                border: 1px solid #333; border-radius: 6px;
@@ -348,6 +359,8 @@
       #search-dropdown { max-height: 45dvh; }
       .connect-dropdown { max-height: 40dvh; }
       #search-dropdown .row, .connect-dropdown .row { padding: 10px 12px; font-size: 14px; }
+      .row.researcher .meta, .dd-note { font-size: 12px; }
+      .dd-note { padding: 6px 12px 2px; }
       #connect-panel { max-height: 58dvh; }
       #path-hops { max-height: 28dvh; }
       #path-hops .hop, #search-status, #connect-status { font-size: 13px; }
@@ -1042,12 +1055,16 @@ function normalize(name) {
   return s;
 }
 
+// Issue #4: v2 shards add each researcher's institution; the new directory
+// keeps browsers' week-cached v1 shards from mixing in. Mirrors
+// pipeline/build_index.py's SEARCH_DIR.
+const SEARCH_DIR = "search-v2";
 const searchShardCache = new Map();  // shard key -> Promise<entries|null>; 404s cache as null; cap 20 FIFO
 async function fetchSearchShard(key) {
   if (searchShardCache.has(key)) return searchShardCache.get(key);
   // R32: 404 (a missing prefix level -- routine) still caches as null; a
   // transient failure is evicted instead -- see fetchJsonOr404.
-  const p = cacheUnlessFailed(searchShardCache, key, fetchJsonOr404(DATA_BASE + `/data/index/search/${key}.json`), null);
+  const p = cacheUnlessFailed(searchShardCache, key, fetchJsonOr404(DATA_BASE + `/data/index/${SEARCH_DIR}/${key}.json`), null);
   if (searchShardCache.size > 20) searchShardCache.delete(searchShardCache.keys().next().value);
   return p;
 }
@@ -1156,7 +1173,7 @@ function tokenMatch(queryTokens, entryTokens) {
   return true;
 }
 
-// entry shape: [norm, display_name, id, xw, yw, cited]
+// entry shape: [norm, display_name, id, xw, yw, cited, institution?]
 // Dedupes by id first -- Task 1's dual first/last-token search shards insert
 // an author under both their first-token and last-token bucket key, and
 // those two keys can collide (e.g. "Anna Anderson" buckets to "an" via
@@ -1313,6 +1330,47 @@ function setSearchHighlight(id, name, xw, yw) {
   highlightLegendForCoords(activeA, xw, yw);
 }
 
+// ---- Search rows (issue #4) ----
+// Search-shard entries are [norm, display_name, id, xw, yw, cited,
+// institution]: the seventh field is the last-known institution in the
+// snapshot (pipeline/build_index.py), absent when OpenAlex has none and in
+// shards built before it. Several researchers often share a name, so each
+// row shows it under the name, beside the labelled citation count.
+function entryInstitution(e) {
+  return typeof e[6] === "string" && e[6] ? e[6] : null;
+}
+function citationsText(n) {
+  return `${n.toLocaleString()} citation${n === 1 ? "" : "s"}`;
+}
+function researcherRow(e, active, onPick) {
+  const row = document.createElement("div");
+  row.className = "row researcher" + (active ? " active" : "");
+  const name = document.createElement("div");
+  name.className = "name"; name.textContent = e[1];
+  const institution = entryInstitution(e);
+  const inst = document.createElement("span");
+  inst.className = institution ? "inst" : "inst unknown";
+  inst.textContent = institution || "institution unknown";
+  if (institution) inst.title = institution;     // the full name when the row cuts it short
+  const n = document.createElement("span");
+  n.className = "n"; n.textContent = citationsText(e[5]);
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.append(inst, n);
+  row.append(name, meta);
+  row.addEventListener("mousedown", ev => { ev.preventDefault(); onPick(e); });
+  return row;
+}
+// Above researcher results: the institution is the last one the snapshot
+// records, not necessarily where the researcher is now.
+function researcherNote() {
+  const note = document.createElement("div");
+  note.className = "dd-note";
+  note.textContent = "Last-known institutions in the snapshot";
+  return note;
+}
+// ---- End search rows ----
+
 function renderSearchDropdown() {
   searchDropdown.innerHTML = "";
   if (searchResults.length === 0) {
@@ -1321,17 +1379,8 @@ function renderSearchDropdown() {
     row.textContent = "no matches";
     searchDropdown.appendChild(row);
   } else {
-    searchResults.forEach((e, i) => {
-      const row = document.createElement("div");
-      row.className = "row" + (i === searchActive ? " active" : "");
-      const name = document.createElement("span");
-      name.textContent = e[1];
-      const n = document.createElement("span");
-      n.className = "n"; n.textContent = e[5].toLocaleString();
-      row.append(name, n);
-      row.addEventListener("mousedown", ev => { ev.preventDefault(); selectSearchEntry(e); });
-      searchDropdown.appendChild(row);
-    });
+    searchDropdown.appendChild(researcherNote());
+    searchResults.forEach((e, i) => searchDropdown.appendChild(researcherRow(e, i === searchActive, selectSearchEntry)));
   }
   searchDropdown.classList.add("open");
 }
@@ -1439,7 +1488,7 @@ searchClearBtn.addEventListener("click", () => {
 // searchInput/searchDropdown/searchResults state above, since Connect needs two
 // independent lookups (A and B) live at once.
 function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
-  let results = [], active = -1, gen = 0, timer = null;
+  let results = [], active = -1, gen = 0, timer = null, institutionResults = false;
 
   function render() {
     dropdownEl.innerHTML = "";
@@ -1448,7 +1497,11 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
       row.className = "row empty";
       row.textContent = "no matches";
       dropdownEl.appendChild(row);
+    } else if (!institutionResults) {
+      dropdownEl.appendChild(researcherNote());
+      results.forEach((e, i) => dropdownEl.appendChild(researcherRow(e, i === active, select)));
     } else {
+      // institutions from OpenAlex autocomplete: name and place hint
       results.forEach((e, i) => {
         const row = document.createElement("div");
         row.className = "row" + (i === active ? " active" : "");
@@ -1471,7 +1524,7 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
   }
 
   function select(e) {
-    const [, name, id, xw, yw] = e;   // entry shape: [norm, display_name, id, xw, yw, cited]
+    const [, name, id, xw, yw] = e;   // entry shape: [norm, display_name, id, xw, yw, cited, institution?]
     clearTimeout(timer);   // R32: same stale-reopen fix as selectSearchEntry
     gen++;
     inputEl.value = name;
@@ -1492,6 +1545,7 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
       const entries = institution ? await fetchInstitutionMatches(query) : await lookupSearchShard(norm);
       if (g !== gen) return;
       results = institution ? entries : rankSearchEntries(entries, norm);
+      institutionResults = !!institution;
       active = -1;
       render();
     } catch {

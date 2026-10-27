@@ -17,6 +17,10 @@ an initial). Both insertions use the same entry (the full
 spaced norm, not a rotated one) -- an entry is just findable via either
 token's shard family. An author's id can therefore appear in up to two
 shard files; the viewer dedupes by id client-side.
+Search shard entry shape: [norm, display_name, id, xw, yw, cited,
+institution]. The seventh field, the last-known institution in the
+snapshot, is left out when OpenAlex has none; readers also accept the
+six-field entries of shards built before it.
 (The docstring doubles as argparse help, so no percent signs here.)
 """
 import json
@@ -37,6 +41,8 @@ LABEL_ZOOMS = {6: 50, 7: 50, 8: 200, 9: 4000}   # zoom -> per-tile capacity
 SHARD_SPLIT_BYTES = 4_000_000                   # shards larger than this split by one more prefix char
 MAX_PREFIX_LEN = 5                              # deepest prefix-shard key length
 CATCHALL_BUCKETS = 128                          # codepoint-modulus for the `_` catch-all split (JS mirror: web/dev.html)
+SEARCH_DIR = "search-v2"                        # v2 entries add the institution; a new name so browsers' week-old
+                                                # six-field shards never mix with v2 ones (JS mirror: web/dev.html)
 
 
 def normalize(name: str) -> str:
@@ -167,19 +173,21 @@ def _split_catchall_shard(items: list, out: dict) -> None:
 
 
 def build_search_shards(web: str, out_dir: Path) -> int:
-    search_dir = out_dir / "search"
+    search_dir = out_dir / SEARCH_DIR
     if search_dir.exists():
         shutil.rmtree(search_dir)
     con = duckdb.connect()
     apply_resource_limits(con)
     shards = defaultdict(list)
     rows = con.execute(
-        f"""SELECT display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count
+        f"""SELECT display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count, institution
             FROM read_parquet('{web}') ORDER BY cited_by_count DESC, id"""
     ).fetchall()
-    for name, aid, xw, yw, cited in rows:
+    for name, aid, xw, yw, cited, institution in rows:
         norm = normalize(name or "")
         entry = [norm, name, aid, round(xw, 6), round(yw, 6), int(cited)]
+        if institution:
+            entry.append(institution)
         tokens = norm.split(" ")
         first_tok, last_tok = tokens[0], tokens[-1]
         shards[_bucket_key(first_tok)].append((first_tok, entry))
@@ -191,10 +199,9 @@ def build_search_shards(web: str, out_dir: Path) -> int:
             _split_catchall_shard(items, final)
         else:
             _split_prefix_shard(key, items, final)
-    sdir = out_dir / "search"
-    sdir.mkdir(parents=True, exist_ok=True)
+    search_dir.mkdir(parents=True, exist_ok=True)
     for key, entries in final.items():
-        _write_json_atomic(sdir / f"{key}.json", entries)
+        _write_json_atomic(search_dir / f"{key}.json", entries)
     return len(rows)
 
 

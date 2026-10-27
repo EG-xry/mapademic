@@ -6,6 +6,7 @@ import pytest
 
 import pipeline.build_index as build_index
 from pipeline.build_index import (
+    SEARCH_DIR,
     build_community_boundaries,
     build_community_shards,
     build_id_shards,
@@ -46,7 +47,7 @@ def assert_search_shards_lossless(out_dir, rows):
     each id appears once (single-token names, or first token == last token)
     or twice (dual first-token/last-token bucketing)."""
     seen = []
-    for p in (out_dir / "search").glob("*.json"):
+    for p in (out_dir / SEARCH_DIR).glob("*.json"):
         for e in json.loads(p.read_text()):
             seen.append(e[2])                    # author id
     counts = Counter(seen)
@@ -124,9 +125,9 @@ def test_search_shards_cover_everyone(tmp_path):
     out = tmp_path / "index"
     n = build_search_shards(str(web), out)
     assert n == 3
-    al = json.loads((out / "search/al.json").read_text())
+    al = json.loads((out / SEARCH_DIR / "al.json").read_text())
     assert [e[1] for e in al] == ["alan turing", "Alice Zhang"]  # cited desc
-    other = json.loads((out / "search/_.json").read_text())
+    other = json.loads((out / SEARCH_DIR / "_.json").read_text())
     assert other[0][1] == "李明"
 
 
@@ -189,6 +190,23 @@ def test_id_shards_clears_stale_dir(tmp_path):
     assert not (ids_dir / "stale.json").exists()
 
 
+def test_search_entries_carry_the_institution(tmp_path):
+    # issue #4: the last-known institution rides along as a seventh field so
+    # same-name results can be told apart; left out when OpenAlex has none
+    web = tmp_path / "w.parquet"
+    duckdb.sql(
+        "COPY (SELECT * FROM (VALUES "
+        "('A1', 'Wei Wang', 0.3, 0.3, 1, 20, 50, 'Nanjing Tech University', 'Chemistry', FALSE), "
+        "('A2', 'Wei Wang', 0.4, 0.4, 1, 20, 40, NULL, 'Physics', FALSE)"
+        ") t(id, display_name, xw, yw, community, works_count, cited_by_count, institution, field, is_ring))"
+        f" TO '{web}' (FORMAT PARQUET)")
+    out = tmp_path / "index"
+    build_search_shards(str(web), out)
+    by_id = {e[2]: e for e in json.loads((out / SEARCH_DIR / "we.json").read_text())}
+    assert by_id["A1"] == ["wei wang", "Wei Wang", "A1", 0.3, 0.3, 50, "Nanjing Tech University"]
+    assert by_id["A2"] == ["wei wang", "Wei Wang", "A2", 0.4, 0.4, 40]
+
+
 def test_search_shards_hot_split(tmp_path, monkeypatch):
     monkeypatch.setattr(build_index, "SHARD_SPLIT_BYTES", 2000)
     rows = []
@@ -202,15 +220,15 @@ def test_search_shards_hot_split(tmp_path, monkeypatch):
     out = tmp_path / "index"
     n = build_search_shards(str(web), out)
     assert n == len(rows)
-    assert (out / "search/abc.json").exists()
-    assert (out / "search/abd.json").exists()
-    assert (out / "search/ab.json").exists()   # 2-char shard always written
-    ab = json.loads((out / "search/ab.json").read_text())
+    assert (out / SEARCH_DIR / "abc.json").exists()
+    assert (out / SEARCH_DIR / "abd.json").exists()
+    assert (out / SEARCH_DIR / "ab.json").exists()   # 2-char shard always written
+    ab = json.loads((out / SEARCH_DIR / "ab.json").read_text())
     assert [e[1] for e in ab] == ["Ab"]         # only the exact-2-char name stays
-    abc = json.loads((out / "search/abc.json").read_text())
+    abc = json.loads((out / SEARCH_DIR / "abc.json").read_text())
     assert len(abc) == 20
     assert all(e[0].startswith("abc") for e in abc)
-    abd = json.loads((out / "search/abd.json").read_text())
+    abd = json.loads((out / SEARCH_DIR / "abd.json").read_text())
     assert len(abd) == 20
     assert all(e[0].startswith("abd") for e in abd)
     assert_search_shards_lossless(out, rows)
@@ -223,8 +241,8 @@ def test_search_shards_hot_split_parent_written_even_when_empty(tmp_path, monkey
     write_web(web, rows)
     out = tmp_path / "index"
     build_search_shards(str(web), out)
-    assert (out / "search/abc.json").exists()
-    ab = json.loads((out / "search/ab.json").read_text())
+    assert (out / SEARCH_DIR / "abc.json").exists()
+    ab = json.loads((out / SEARCH_DIR / "ab.json").read_text())
     assert ab == []                             # no exact-2-char names, but still written
     assert_search_shards_lossless(out, rows)
 
@@ -234,7 +252,7 @@ def test_search_shards_not_split_below_threshold(tmp_path):
     write_web(web, [("A1", "Alice Zhang", 0.3, 0.3, 10)])
     out = tmp_path / "index"
     build_search_shards(str(web), out)
-    assert not (out / "search/ali.json").exists()  # small bucket: no 3-char split
+    assert not (out / SEARCH_DIR / "ali.json").exists()  # small bucket: no 3-char split
 
 
 def test_search_shards_recursive_split_to_max_prefix(tmp_path, monkeypatch):
@@ -249,15 +267,15 @@ def test_search_shards_recursive_split_to_max_prefix(tmp_path, monkeypatch):
     n = build_search_shards(str(web), out)
     assert n == len(rows)
     # every prefix level 2..5 written; exactly-K-char names stay at level K
-    ab = json.loads((out / "search/ab.json").read_text())
+    ab = json.loads((out / SEARCH_DIR / "ab.json").read_text())
     assert [e[1] for e in ab] == ["Ab"]
-    abc = json.loads((out / "search/abc.json").read_text())
+    abc = json.loads((out / SEARCH_DIR / "abc.json").read_text())
     assert [e[1] for e in abc] == ["Abc"]
-    abcd = json.loads((out / "search/abcd.json").read_text())
+    abcd = json.loads((out / SEARCH_DIR / "abcd.json").read_text())
     assert [e[1] for e in abcd] == ["Abcd"]
-    abcde = json.loads((out / "search/abcde.json").read_text())
+    abcde = json.loads((out / SEARCH_DIR / "abcde.json").read_text())
     assert len(abcde) == 40                     # oversized but capped at MAX_PREFIX_LEN
-    assert not (out / "search/abcder.json").exists()
+    assert not (out / SEARCH_DIR / "abcder.json").exists()
     assert_search_shards_lossless(out, rows)
 
 
@@ -271,11 +289,11 @@ def test_search_shards_catchall_codepoint_split(tmp_path, monkeypatch):
     out = tmp_path / "index"
     n = build_search_shards(str(web), out)
     assert n == len(rows)
-    li = json.loads((out / f"search/_{ord('李') % build_index.CATCHALL_BUCKETS}.json").read_text())
+    li = json.loads((out / SEARCH_DIR / f"_{ord('李') % build_index.CATCHALL_BUCKETS}.json").read_text())
     assert len(li) == 20
-    wang = json.loads((out / f"search/_{ord('王') % build_index.CATCHALL_BUCKETS}.json").read_text())
+    wang = json.loads((out / SEARCH_DIR / f"_{ord('王') % build_index.CATCHALL_BUCKETS}.json").read_text())
     assert [e[2] for e in wang] == ["W0"]
-    catch = json.loads((out / "search/_.json").read_text())  # parent always written
+    catch = json.loads((out / SEARCH_DIR / "_.json").read_text())  # parent always written
     assert [e[2] for e in catch] == ["X0"]      # empty-norm entry stays in _
     assert_search_shards_lossless(out, rows)
 
@@ -286,8 +304,8 @@ def test_search_shards_catchall_not_split_below_threshold(tmp_path):
     write_web(web, rows)
     out = tmp_path / "index"
     build_search_shards(str(web), out)
-    assert (out / "search/_.json").exists()
-    assert not (out / f"search/_{ord('李') % build_index.CATCHALL_BUCKETS}.json").exists()
+    assert (out / SEARCH_DIR / "_.json").exists()
+    assert not (out / SEARCH_DIR / f"_{ord('李') % build_index.CATCHALL_BUCKETS}.json").exists()
     assert_search_shards_lossless(out, rows)
 
 
@@ -298,8 +316,8 @@ def test_search_shards_dual_token_family(tmp_path):
     out = tmp_path / "index"
     n = build_search_shards(str(web), out)
     assert n == 1
-    te = json.loads((out / "search/te.json").read_text())
-    se = json.loads((out / "search/se.json").read_text())
+    te = json.loads((out / SEARCH_DIR / "te.json").read_text())
+    se = json.loads((out / SEARCH_DIR / "se.json").read_text())
     assert [e[1] for e in te] == ["Terrence J. Sejnowski"]
     assert [e[1] for e in se] == ["Terrence J. Sejnowski"]
     assert te[0] == se[0]                        # same entry: full spaced norm, not rotated
@@ -314,7 +332,7 @@ def test_search_shards_single_token_not_duplicated(tmp_path):
     out = tmp_path / "index"
     n = build_search_shards(str(web), out)
     assert n == 1
-    pr = json.loads((out / "search/pr.json").read_text())
+    pr = json.loads((out / SEARCH_DIR / "pr.json").read_text())
     assert len(pr) == 1
     assert_search_shards_lossless(out, rows)
 
@@ -325,7 +343,7 @@ def test_search_shards_first_equals_last_not_duplicated(tmp_path):
     write_web(web, rows)
     out = tmp_path / "index"
     build_search_shards(str(web), out)
-    an = json.loads((out / "search/an.json").read_text())
+    an = json.loads((out / SEARCH_DIR / "an.json").read_text())
     assert len(an) == 1
     assert_search_shards_lossless(out, rows)
 
@@ -337,9 +355,9 @@ def test_search_shards_initial_last_token_skipped(tmp_path):
     out = tmp_path / "index"
     n = build_search_shards(str(web), out)
     assert n == 1
-    zh = json.loads((out / "search/zh.json").read_text())
+    zh = json.loads((out / SEARCH_DIR / "zh.json").read_text())
     assert [e[2] for e in zh] == ["Z1"]           # findable via the first-token family
-    assert not (out / "search/_.json").exists()   # last token "y" (1 char) never routes to catch-all
+    assert not (out / SEARCH_DIR / "_.json").exists()   # last token "y" (1 char) never routes to catch-all
     assert_search_shards_lossless(out, rows)       # id appears exactly once
 
 
@@ -352,9 +370,9 @@ def test_search_shards_recursive_split_surname_family(tmp_path, monkeypatch):
     out = tmp_path / "index"
     n = build_search_shards(str(web), out)
     assert n == len(rows)
-    se = json.loads((out / "search/se.json").read_text())
+    se = json.loads((out / SEARCH_DIR / "se.json").read_text())
     assert [e[2] for e in se] == ["SE0"]         # only the exact-2-char surname stays at the parent
-    sejno = json.loads((out / "search/sejno.json").read_text())
+    sejno = json.loads((out / SEARCH_DIR / "sejno.json").read_text())
     assert len(sejno) == 40                      # split key came from the surname, capped at MAX_PREFIX_LEN
     assert all("sejnowski" in e[0] for e in sejno)
     assert_search_shards_lossless(out, rows)
@@ -368,7 +386,7 @@ def test_search_shards_catchall_last_token_nonascii(tmp_path, monkeypatch):
     out = tmp_path / "index"
     n = build_search_shards(str(web), out)
     assert n == len(rows)
-    li = json.loads((out / f"search/_{ord('李') % build_index.CATCHALL_BUCKETS}.json").read_text())
+    li = json.loads((out / SEARCH_DIR / f"_{ord('李') % build_index.CATCHALL_BUCKETS}.json").read_text())
     assert len(li) == 20
     assert {e[2] for e in li} == {f"J{i}" for i in range(20)}
     assert_search_shards_lossless(out, rows)
