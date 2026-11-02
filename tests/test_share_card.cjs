@@ -19,7 +19,7 @@ const people = (...names) => names.map(name => ({ name }));
 test('the card and share text name both ends and count the steps', () => {
   const s = context.shareChainSummary(people('S. R. Hinton', 'J. R. Mould', 'Allan Sandage', 'Edwin Hubble'), 3);
   assert.equal(s.steps, '3 steps');
-  assert.equal(s.text, 'S. R. Hinton is 3 coauthor steps from Edwin Hubble.');
+  assert.equal(s.text, 'S. R. Hinton is 3 OpenAlex profile steps from Edwin Hubble. Researcher identities are unverified.');
   assert.equal(s.fileName, 'mapademic-hinton-to-hubble.png');
   assert.equal(context.shareChainSummary(people('A B', 'C D'), 1).steps, '1 step');
 });
@@ -36,5 +36,5 @@ test('a step shows its paper and year, else its label', () => {
   assert.equal(context.shareStepPaper({ paper: { title: 'Taipan', year: 2017 } }), 'Taipan (2017)');
   assert.equal(context.shareStepPaper({ paper: { title: 'Untitled year' } }), 'Untitled year');
   assert.equal(context.shareStepPaper({ label: 'possible name mix-up in OpenAlex' }), 'possible name mix-up in OpenAlex');
-  assert.equal(context.shareStepPaper({}), '');
+  assert.equal(context.shareStepPaper({}), 'Shared-paper evidence unavailable');
 });

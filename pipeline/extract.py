@@ -54,7 +54,8 @@ def extract_file(con, fs, src_path: str, columns, select_sql: str,
                            buffer_size=BUFFER).read(columns=list(columns))
     con.register("src", table)
     try:
-        out = con.execute(select_sql).to_arrow_table()
+        query = select_sql(table.schema) if callable(select_sql) else select_sql
+        out = con.execute(query).to_arrow_table()
     finally:
         con.unregister("src")
     if expected_rows is not None and out.num_rows != expected_rows:

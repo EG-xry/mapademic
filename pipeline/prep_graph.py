@@ -4,6 +4,7 @@ from pathlib import Path
 import duckdb
 
 from pipeline.config import apply_resource_limits, data_dir, spill_dir
+from pipeline.sql import sql_literal
 
 
 def prep_graph(
@@ -12,19 +13,19 @@ def prep_graph(
     out_dir.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
     apply_resource_limits(con)
-    con.execute(f"SET temp_directory='{spill_dir(out_dir)}'")
+    con.execute(f"SET temp_directory={sql_literal(spill_dir(out_dir))}")
     con.execute("SET preserve_insertion_order=false")
     con.execute(
         f"""
         CREATE VIEW numbered AS
         SELECT CAST(row_number() OVER (ORDER BY id) - 1 AS INTEGER) AS node_idx, *
-        FROM read_parquet('{nodes_path}')
+        FROM read_parquet({sql_literal(nodes_path)})
         """
     )
     n_nodes = con.execute(
         f"""
         COPY (SELECT * FROM numbered ORDER BY node_idx)
-        TO '{out_dir / "nodes_int32.parquet"}' (FORMAT PARQUET)
+        TO {sql_literal(out_dir / "nodes_int32.parquet")} (FORMAT PARQUET)
         """
     ).fetchone()[0]
     n_edges = con.execute(
@@ -32,11 +33,11 @@ def prep_graph(
         COPY (
             SELECT na.node_idx AS src, nb.node_idx AS dst,
                    CAST(e.weight AS FLOAT) AS weight
-            FROM read_parquet('{edges_path}') e
+            FROM read_parquet({sql_literal(edges_path)}) e
             JOIN numbered na ON na.id = e.src
             JOIN numbered nb ON nb.id = e.dst
             WHERE e.weight >= {float(min_weight)}
-        ) TO '{out_dir / "edges_int32.parquet"}' (FORMAT PARQUET)
+        ) TO {sql_literal(out_dir / "edges_int32.parquet")} (FORMAT PARQUET)
         """
     ).fetchone()[0]
     return n_nodes, n_edges

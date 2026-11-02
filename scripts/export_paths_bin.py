@@ -29,6 +29,8 @@ re-export never collides with a cached copy of the last one. The index's id
 shards carry each author's new number (see build_index), which is how the
 browser starts a search.
 """
+
+from pipeline.sql import sql_literal
 import argparse
 import hashlib
 import json
@@ -40,6 +42,8 @@ import numpy as np
 
 from pipeline.config import data_dir
 from pipeline.identity import suspect_links
+from pipeline.identifiers import IDENTITY_TAG, encode_author_id
+from pipeline.sql import sql_literal
 
 ID_BASE = 5_000_000_000      # every author id in the 2026-09-23 graph is A5xxxxxxxxx
 CHUNK_BYTES = 200_000_000
@@ -97,15 +101,18 @@ def export_paths(pathgraph_dir: Path, web_path: str, out_dir: Path,
     neighbors = np.load(pathgraph_dir / "neighbors.npy", mmap_mode="r")
     ids = np.load(pathgraph_dir / "ids.npy")
     n = len(ids)
-    assert int(ids.min()) >= ID_BASE and int(ids.max()) - ID_BASE < 2 ** 32, "ids outside the uint32 window"
+    tagged = bool(np.any(ids & np.uint64(IDENTITY_TAG)))
+    if not tagged:
+        assert int(ids.min()) >= ID_BASE and int(ids.max()) - ID_BASE < 2 ** 32, "ids outside the uint32 window"
     # renumber along a Z-order curve of map position (authors without one go last)
     con = duckdb.connect()
-    pos = con.execute(f"""SELECT CAST(regexp_extract(id, '(\\d+)$', 1) AS UBIGINT) AS k,
+    pos = con.execute(f"""SELECT id,
                                  CAST(round(xw * 65535) AS INTEGER) AS x, CAST(round(yw * 65535) AS INTEGER) AS y
-                          FROM read_parquet('{web_path}')""").fetchnumpy()
-    sk = np.argsort(pos["k"])
-    where = np.searchsorted(pos["k"][sk], ids)
-    found = (where < len(sk)) & (pos["k"][sk][np.minimum(where, len(sk) - 1)] == ids)
+                          FROM read_parquet({sql_literal(web_path)})""").fetchnumpy()
+    position_ids = np.array([encode_author_id(aid) for aid in pos["id"]], dtype=np.uint64)
+    sk = np.argsort(position_ids)
+    where = np.searchsorted(position_ids[sk], ids)
+    found = (where < len(sk)) & (position_ids[sk][np.minimum(where, len(sk) - 1)] == ids)
     code = np.full(n, np.uint64(2 ** 33), np.uint64)
     src = sk[where[found]]
     code[found] = morton16(np.clip(pos["x"][src], 0, 65535), np.clip(pos["y"][src], 0, 65535)).astype(np.uint64)
@@ -144,7 +151,8 @@ def export_paths(pathgraph_dir: Path, web_path: str, out_dir: Path,
         gaps[~first] = (vals[~first] - np.concatenate([[0], vals[:-1]])[~first]).astype(np.uint64)
         keys = np.minimum(rid, vals) * n + np.maximum(rid, vals)
         at = np.searchsorted(suspect_keys, keys)
-        flag = (at < len(suspect_keys)) & (suspect_keys[np.minimum(at, len(suspect_keys) - 1)] == keys)
+        flag = ((at < len(suspect_keys)) & (suspect_keys[np.minimum(at, len(suspect_keys) - 1)] == keys)
+                if len(suspect_keys) else np.zeros(len(keys), dtype=bool))
         gaps = (gaps << np.uint64(1)) | flag.astype(np.uint64)
         n_suspect += int(flag.sum())
         lens = varint_lengths(gaps).astype(np.int64)
@@ -181,11 +189,12 @@ def export_paths(pathgraph_dir: Path, web_path: str, out_dir: Path,
     byte_off = np.zeros(n + 1, np.uint64)
     np.cumsum(row_bytes, out=byte_off[1:])
     assert int(byte_off[-1]) < 2 ** 32
+    id_bytes = ids[order].astype("<u8").tobytes() if tagged else (ids[order] - ID_BASE).astype("<u4").tobytes()
     files = {"offsets": write("offsets", byte_off.astype("<u4").tobytes()),
              "lengths": write("lengths", varint_encode(row_bytes.astype(np.uint64))),
-             "ids": write("ids", (ids[order] - ID_BASE).astype("<u4").tobytes())}
+             "ids": write("ids", id_bytes)}
     np.save(pathgraph_dir / "new_of_old.npy", new_of_old)      # for build_index's id shards
-    meta = {"version": 2, "authors": int(n), "directed_links": int(deg_new.sum()),
+    meta = {"version": 3 if tagged else 2, "authors": int(n), "directed_links": int(deg_new.sum()),
             "suspect_links": n_suspect, "id_base": ID_BASE, "files": files,
             "encoding": "per author: sorted neighbours as varints of (delta << 1 | suspect); the first "
                         "delta is zigzag(neighbour - author), the rest are gaps; varint = 7 bits per byte, "
@@ -194,6 +203,9 @@ def export_paths(pathgraph_dir: Path, web_path: str, out_dir: Path,
             "lengths": "the same as varint byte lengths, one per author (the browser's one-time index)",
             "ids": "uint32 LE OpenAlex id minus id_base, by author number",
             "chunks": table, "seconds": round(time.time() - t0, 1)}
+    if tagged:
+        meta.update({"ids_record_bytes": 8, "id_encoding": "tagged-u64",
+                     "ids": "uint64 LE; bit 63 tags M identities, lower bits give the numeric key; otherwise prepend A"})
     (out_dir / "manifest.json").write_text(json.dumps(meta, indent=1))
     return meta
 

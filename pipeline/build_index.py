@@ -35,7 +35,9 @@ import duckdb
 import numpy as np
 
 from pipeline.config import apply_resource_limits, data_dir
+from pipeline.identifiers import bare_author_id, decode_author_id
 from pipeline.palette import load_community_stats
+from pipeline.sql import sql_literal
 
 LABEL_ZOOMS = {6: 50, 7: 50, 8: 200, 9: 4000}   # zoom -> per-tile capacity
 SHARD_SPLIT_BYTES = 4_000_000                   # shards larger than this split by one more prefix char
@@ -76,7 +78,7 @@ def build_label_tiles(web: str, out_dir: Path) -> int:
                                         least({ntiles - 1}, CAST(floor(CAST(yw AS DOUBLE) * {ntiles}) AS INT))
                            ORDER BY cited_by_count DESC, id
                        ) AS rn
-                FROM read_parquet('{web}') WHERE NOT is_ring
+                FROM read_parquet({sql_literal(web)}) WHERE NOT is_ring
             ) WHERE rn <= {cap}
             ORDER BY tx, ty_up, cited_by_count DESC, id
             """
@@ -181,7 +183,7 @@ def build_search_shards(web: str, out_dir: Path) -> int:
     shards = defaultdict(list)
     rows = con.execute(
         f"""SELECT display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count, institution
-            FROM read_parquet('{web}') ORDER BY cited_by_count DESC, id"""
+            FROM read_parquet({sql_literal(web)}) ORDER BY cited_by_count DESC, id"""
     ).fetchall()
     for name, aid, xw, yw, cited, institution in rows:
         norm = normalize(name or "")
@@ -208,23 +210,29 @@ def build_search_shards(web: str, out_dir: Path) -> int:
 PATH_ID_BASE = 5_000_000_000   # scripts/export_paths_bin.ID_BASE
 
 
-def _path_numbers(paths_dir: Path | None) -> dict[int, int]:
-    """OpenAlex numeric id -> the author's number in the browser path graph
+def _path_numbers(paths_dir: Path | None) -> dict[str, int]:
+    """Normalized A/M id -> the author's number in the browser path graph
     (scripts/export_paths_bin.py's paths/ids.bin), or {} when absent."""
     meta = paths_dir / "manifest.json" if paths_dir else None
     if not meta or not meta.exists():
         return {}
-    f = paths_dir / json.loads(meta.read_text()).get("files", {}).get("ids", "ids.bin")
+    manifest = json.loads(meta.read_text())
+    f = paths_dir / manifest.get("files", {}).get("ids", "ids.bin")
     if not f.exists():
         return {}
-    ids = np.fromfile(f, dtype="<u4").astype(np.int64) + PATH_ID_BASE
-    return dict(zip(ids.tolist(), range(len(ids))))
+    if manifest.get("id_encoding") == "tagged-u64":
+        ids = [decode_author_id(int(i)) for i in np.fromfile(f, dtype="<u8")]
+    else:
+        raw = np.fromfile(f, dtype="<u4").astype(np.int64) + manifest.get("id_base", PATH_ID_BASE)
+        ids = ["A" + str(int(i)) for i in raw]
+    return dict(zip(ids, range(len(ids))))
 
 
 def build_id_shards(web: str, out_dir: Path, paths_dir: Path | None = None) -> int:
     """ids/<bucket>.json: {id: [xw, yw]} plus, when the browser path graph
     exists, a third value: the author's number there, where Connect starts
-    its search."""
+    its search. All 1000 buckets exist, including empty ones, so a missing
+    bucket means unavailable index data rather than an absent researcher."""
     ids_dir = out_dir / "ids"
     if ids_dir.exists():
         shutil.rmtree(ids_dir)
@@ -234,19 +242,20 @@ def build_id_shards(web: str, out_dir: Path, paths_dir: Path | None = None) -> i
     buckets = defaultdict(dict)
     rows = con.execute(
         f"""SELECT id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw
-            FROM read_parquet('{web}')"""
+            FROM read_parquet({sql_literal(web)})"""
     ).fetchall()
     for aid, xw, yw in rows:
         digits = "".join(filter(str.isdigit, aid))
         bucket = int(digits) % 1000 if digits else 0
         entry = [round(xw, 6), round(yw, 6)]
-        node = numbers.get(int(digits)) if digits else None
+        node = numbers.get(bare_author_id(aid)) if numbers else None
         if node is not None:
             entry.append(node)
         buckets[bucket][aid] = entry
     ids_dir.mkdir(parents=True, exist_ok=True)
     total = 0
-    for bucket, entries in buckets.items():
+    for bucket in range(1000):
+        entries = buckets.get(bucket, {})
         _write_json_atomic(ids_dir / f"{bucket}.json", entries)
         total += len(entries)
     return total
@@ -401,7 +410,7 @@ def build_community_boundaries(web: str, out_path: str, grid: int = 512, min_cel
             SELECT least({grid - 1}, CAST(floor(CAST(xw AS DOUBLE) * {grid}) AS INT)) AS cx,
                    least({grid - 1}, CAST(floor(CAST(yw AS DOUBLE) * {grid}) AS INT)) AS cy,
                    community
-            FROM read_parquet('{web}') WHERE NOT is_ring
+            FROM read_parquet({sql_literal(web)}) WHERE NOT is_ring
         ),
         counts AS (
             SELECT cx, cy, community, count(*) AS c FROM pts GROUP BY 1, 2, 3
@@ -447,7 +456,7 @@ def build_community_boundaries(web: str, out_path: str, grid: int = 512, min_cel
 def _sub_sql(con, web: str) -> str:
     """Each row's sub-group (-1 when unsplit, or for coords_web files written
     before sub-groups existed)."""
-    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{web}')").fetchall()}
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({sql_literal(web)})").fetchall()}
     return "coalesce(sub, -1)" if "sub" in cols else "-1"
 
 
@@ -471,7 +480,7 @@ def build_community_shards(web: str, out_dir: Path, top_n: int = 20000, min_memb
         FROM (
             SELECT community, display_name, id, xw, yw, cited_by_count, {_sub_sql(con, web)} AS sub,
                    row_number() OVER (PARTITION BY community ORDER BY cited_by_count DESC, id) AS rn
-            FROM read_parquet('{web}')
+            FROM read_parquet({sql_literal(web)})
             WHERE NOT is_ring AND community IN ({ids_sql})
         ) WHERE rn <= {top_n}
         ORDER BY community, cited_by_count DESC, id
@@ -512,7 +521,7 @@ def build_demo_path(web: str, out_path: str, demo: dict = DEMO_PATH) -> bool:
     found = {row[0].rsplit("/", 1)[-1]: row for row in con.execute(
         f"""SELECT id, display_name, CAST(xw AS DOUBLE), CAST(yw AS DOUBLE), community,
                    {_sub_sql(con, web)}
-            FROM read_parquet('{web}')
+            FROM read_parquet({sql_literal(web)})
             WHERE NOT is_ring AND id IN ({", ".join(f"'https://openalex.org/{i}'" for i in ids)})"""
     ).fetchall()}
     out = Path(out_path)
@@ -547,7 +556,7 @@ def build_top_authors(web: str, out_path: str, top_n: int = None) -> int:
         f"""
         SELECT display_name, id, CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count, community,
                {_sub_sql(con, web)} AS sub
-        FROM read_parquet('{web}')
+        FROM read_parquet({sql_literal(web)})
         WHERE NOT is_ring
         ORDER BY cited_by_count DESC, id
         LIMIT {top_n}

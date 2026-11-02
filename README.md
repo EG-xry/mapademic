@@ -30,6 +30,25 @@ Lall to Amy Dittmar, one shared paper per step.*
 - Continuous zoom z0-11, with native pre-rendered tiles through z10.
 - Author search across all 8.40M names, served from prefix-sharded JSON
   indexed by first and last name token.
+- DOI and ORCID lookup below the main search and both researcher fields in
+  Connect. An ORCID lists matching OpenAlex profiles; a DOI lists the paper's
+  authors with affiliations and identifiers so you can choose the intended
+  person. Accepts bare IDs or DOI/ORCID URLs, and checks ORCID check digits.
+  ORCID results are checked against the release’s ID index before being shown.
+  Off-map matches are rejected; live paper counts do not override release
+  membership. Existing repaired partitions can have fewer than 15 works.
+  Lookup uses the existing optional OpenAlex API key. Only profiles in the
+  published map release can be placed or connected. In repaired releases,
+  DOI lookup selects the publication's identity partition and ORCID lookup
+  selects partitions with deposited authorship support.
+  Supply both an ORCID and a known publication DOI to cross-check the paper's
+  deposited ORCID, Crossref byline, and public ORCID works. Results distinguish
+  corroborated publications, missing evidence, unavailable sources, and conflicts;
+  conflicting candidates cannot be selected. A profile's own ORCID is never
+  treated as publication evidence. Corroboration applies only to that publication.
+  Original releases label profile paths as unverified and identify steps without
+  a shared-paper record. Repaired releases use the rebuilt graph and publication
+  memberships, with uncertain partitions excluded from connections.
 - Hover and click for author details, enriched live from the OpenAlex API.
 - Coauthor rays for a searched author, and a shortest-path overlay between
   two authors that prefers routes avoiding likely name mix-ups in OpenAlex.
@@ -43,6 +62,64 @@ Lall to Amy Dittmar, one shared paper per step.*
 - Community legend with an isolate mode and per-group sub-areas, and
   two-level names (field, then country where it explains the cluster)
   overlaid on the map.
+
+
+## Automatic identity repair
+
+Rebuild a release from publication-level evidence rather than editing every
+researcher manually. The extractor retains raw byline names, deposited ORCIDs,
+affiliations, and fields in `authorship_evidence`. Older extracted Parquet files
+need a fresh extraction into a separate directory; missing evidence fails
+explicitly instead of silently claiming to repair the graph.
+
+```sh
+MAPADEMIC_THREADS=4 python -m scripts.repair_map \
+  --works 'enriched/*/*.parquet' \
+  --nodes data/nodes.parquet \
+  --previous-web data/coords_web.parquet \
+  --flags docs/flags-2026-09-23.json \
+  --out releases/2026-11-02-repaired --zooms 0-10
+```
+
+The output must be new. The command builds repaired memberships, nodes and
+edges, search indexes, path binaries, identity details, raster tiles and vector
+assets together, then publishes the local directory atomically. For a local
+preview, expose this output as the `data` directory below the viewer root.
+The remote uploader adds `/data/` below the release prefix automatically. Use
+the updated viewer; tagged identity binaries require it. The command does not
+upload or replace an existing public release.
+
+Pass the flags file belonging to the original release to preserve its existing
+profile warnings and path-routing preferences. Once the full rebuilt release
+passes its researcher, publication-membership, coordinate, and graph checks,
+upload its complete directory under a new release prefix with
+`MAPADEMIC_DATA=releases/2026-11-02-repaired bash scripts/upload_r2.sh`. The uploader includes the repaired identity metadata and refuses tagged
+graphs whose identity manifests or quarantine flags are missing or mismatched.
+Only then update `DATA_BASE` in `scripts/build_site.py`, regenerate `docs/`, and
+publish the site. Keep the previous prefix available for rollback. The existing
+production prefix is unchanged by this source patch.
+
+Splitting requires repeated, independent publication evidence: contemporaneous,
+disjoint affiliations, fields and coauthor neighborhoods. A topic change, career
+move or missing ORCID alone does not split a person. Duplicate source profiles
+merge only with repeated deposited ORCID support and compatible corroborating
+evidence. Generic collection bylines do not create coauthor shortcuts.
+
+Unchanged researchers keep their source IDs and map positions. Repaired
+identities receive separate `M...` IDs and positions near their supported
+collaborators; original `A...` source links remain in their details. Search,
+DOI/ORCID lookup, coauthor rays, share links and shortest paths use the same
+release. Supported partitions remain visible even below the original 15-work
+threshold. Ambiguous remaining memberships stay visible in quarantined
+partitions that paths cannot traverse. No ORCID registration is required.
+
+`repair_report.json` records the repair counts and limits. Profiles without
+sufficient evidence remain unchanged; profiles above `--max-profile-works`
+(default 50,000) are explicitly counted as skipped. Automatic identity resolution
+cannot guarantee every source error is detected. Keep `identity_registry.json`
+and supply `--registry` on subsequent builds to retain existing assignments where
+the same partition anchors persist. This workflow has been tested on fixtures
+and a representative live sample, not a full 8.4M-researcher rebuild.
 
 ## Bring your own OpenAlex key
 

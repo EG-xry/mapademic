@@ -16,6 +16,8 @@ re-downloading: the extract keeps every work plus the columns this filter
 reads.
 """
 
+from pipeline.sql import sql_literal
+
 # Types excluded from works counts and coauthor edges. Retracted *articles*
 # stay in (the collaboration happened); the retraction notice type does not.
 EXCLUDED_TYPES = (
@@ -41,19 +43,20 @@ EXTRACT_COLUMNS = (
 
 
 def id_key_sql(col: str) -> str:
-    """SQL: numeric part of an OpenAlex id (".../A5023888391" -> 5023888391).
+    """SQL: A/W numeric keys stay positive; M identity author keys are negative.
 
     Integer keys make the billion-row explode/join/aggregate steps far cheaper
     than the 32-byte URL strings, and they are what the extract stores.
     """
-    return f"CAST(regexp_extract({col}, '(\\d+)$', 1) AS BIGINT)"
+    key = f"CAST(regexp_extract({col}, '(\\d+)$', 1) AS BIGINT)"
+    return f"CASE WHEN regexp_matches({col}, '^M[0-9]+$') THEN -({key}) ELSE {key} END"
 
 
 def quality_predicate(all_works: bool = False) -> str:
     """SQL boolean over extract columns: TRUE for works that count."""
     if all_works:
         return "TRUE"
-    types = ", ".join(f"'{t}'" for t in EXCLUDED_TYPES)
+    types = ", ".join(sql_literal(t) for t in EXCLUDED_TYPES)
     return (
         "coalesce(NOT is_xpac, TRUE)"
         " AND coalesce(NOT is_paratext, TRUE)"
@@ -64,7 +67,7 @@ def quality_predicate(all_works: bool = False) -> str:
 def qualifying_works_sql(works_glob: str, all_works: bool = False,
                          min_authors: int | None = None,
                          max_authors: int | None = None,
-                         dedupe: bool = True) -> str:
+                         dedupe: bool = True, author_column: str = "author_ids") -> str:
     """SQL query: one row per qualifying work (work_id, n_authors, author_ids).
 
     Deduped by work_id: a guard against the same work landing in two
@@ -73,14 +76,16 @@ def qualifying_works_sql(works_glob: str, all_works: bool = False,
     materializes every qualifying work, so a caller that has checked the
     extract holds no duplicates may pass dedupe=False.
     """
+    if author_column not in {"author_ids", "edge_author_ids"}:
+        raise ValueError("unsupported authorship column")
     conds = [quality_predicate(all_works)]
     if min_authors is not None:
         conds.append(f"n_authors >= {int(min_authors)}")
     if max_authors is not None:
         conds.append(f"n_authors <= {int(max_authors)}")
     return f"""
-        SELECT work_id, n_authors, author_ids
-        FROM read_parquet('{works_glob}')
+        SELECT work_id, n_authors, {author_column} AS author_ids
+        FROM read_parquet({sql_literal(works_glob)})
         WHERE {' AND '.join(conds)}
         {"QUALIFY row_number() OVER (PARTITION BY work_id) = 1" if dedupe else ""}
     """
@@ -89,7 +94,7 @@ def qualifying_works_sql(works_glob: str, all_works: bool = False,
 def check_extract_schema(con, works_glob: str) -> None:
     """Refuse a pre-filter extract with a message that says what to do."""
     cols = {r[0] for r in con.execute(
-        f"DESCRIBE SELECT * FROM read_parquet('{works_glob}')").fetchall()}
+        f"DESCRIBE SELECT * FROM read_parquet({sql_literal(works_glob)})").fetchall()}
     missing = [c for c in EXTRACT_COLUMNS if c not in cols]
     if missing:
         raise SystemExit(

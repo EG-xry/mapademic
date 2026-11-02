@@ -179,6 +179,19 @@ def test_id_shards_include_ring_nodes(tmp_path):
     assert "https://openalex.org/A1" in ring_bucket
 
 
+def test_sparse_id_shards_publish_empty_buckets_for_authoritative_absence(tmp_path):
+    web = tmp_path / "web.parquet"
+    write_web(web, [("A1001", "Mapped researcher", 0.1, 0.2, 20),
+                    ("M1001", "Repaired researcher", 0.3, 0.4, 10)])
+    out = tmp_path / "index"
+    assert build_id_shards(str(web), out) == 2
+    ids = out / "ids"
+    assert {p.name for p in ids.iterdir()} == {f"{bucket}.json" for bucket in range(1000)}
+    assert json.loads((ids / "999.json").read_text()) == {}
+    present = json.loads((ids / "1.json").read_text())
+    assert present == {"A1001": [0.1, 0.2], "M1001": [0.3, 0.4]}
+
+
 def test_id_shards_clears_stale_dir(tmp_path):
     web = tmp_path / "w.parquet"
     write_web(web, [("https://openalex.org/A1", "One", 0.1, 0.1, 1)])

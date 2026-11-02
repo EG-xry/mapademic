@@ -30,6 +30,8 @@ as literal prefixes of the full pair, since the export is already ordered
 heaviest-first; web/dev.html's EDGE_TIERS fetches the smallest tier covering
 its Line count slider (1M is the default first download).
 """
+
+from pipeline.sql import sql_literal
 import argparse
 import json
 import time
@@ -41,6 +43,7 @@ import numpy as np
 from pipeline.config import apply_resource_limits, data_dir
 from pipeline.palette import group_key_expr, group_rgb_u8
 from scripts.export_points_bin import GREY_RGB, SIZE_SCALE, _color_palette
+from pipeline.sql import sql_literal
 
 QUANT = 65535        # xw,yw uint16 quantization scale (round(v * QUANT))
 FINE = 254           # edges_fine.bin: v * QUANT = edges_pos + edges_fine / FINE (254, not 256:
@@ -73,12 +76,12 @@ def export_edges(edges_path: str, web_path: str, out_dir: Path, sample: int | No
                    CAST(p1.xw AS DOUBLE) AS xw1, CAST(p1.yw AS DOUBLE) AS yw1,
                    p0.gkey AS gkey0, p1.gkey AS gkey1,
                    p0.cited_by_count AS cited0, p1.cited_by_count AS cited1
-            FROM read_parquet('{edges_path}') e
+            FROM read_parquet({sql_literal(edges_path)}) e
             JOIN (SELECT id, xw, yw, {gkey} AS gkey, cited_by_count
-                  FROM read_parquet('{web_path}') WHERE NOT is_ring) p0
+                  FROM read_parquet({sql_literal(web_path)}) WHERE NOT is_ring) p0
               ON p0.id = e.src
             JOIN (SELECT id, xw, yw, {gkey} AS gkey, cited_by_count
-                  FROM read_parquet('{web_path}') WHERE NOT is_ring) p1
+                  FROM read_parquet({sql_literal(web_path)}) WHERE NOT is_ring) p1
               ON p1.id = e.dst
             WHERE e.weight >= {MIN_WEIGHT}
             ORDER BY e.weight DESC, e.src, e.dst

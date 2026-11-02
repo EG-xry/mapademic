@@ -3,13 +3,12 @@
 Writes <data>/pathgraph/: offsets.npy (int64, n+1), neighbors.npy (int32,
 both directions of every coauthor link, each author's coauthors ordered by
 link weight, strongest first, so the first k are the coauthor rays),
-ids.npy (uint64 numeric part of each OpenAlex id, by node index) and
+ids.npy (uint64 author keys, bit 63 tags Mapademic-owned M identities) and
 names.bin + names_offsets.npy (UTF-8 display names). About 3.2GB for the
 2026-09-23 release; the server memory-maps it.
 """
 import json
 import os
-import re
 import time
 from pathlib import Path
 
@@ -18,6 +17,8 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from pipeline.config import apply_resource_limits, data_dir, spill_dir
+from pipeline.identifiers import encode_author_id
+from pipeline.sql import sql_literal
 
 
 def build_pathgraph(nodes_path: str, edges_path: str, out_dir: Path) -> dict:
@@ -26,16 +27,16 @@ def build_pathgraph(nodes_path: str, edges_path: str, out_dir: Path) -> dict:
     t0 = time.time()
     con = duckdb.connect()
     apply_resource_limits(con)
-    con.execute(f"SET temp_directory='{spill_dir(out_dir)}'")
-    n = con.execute(f"SELECT max(node_idx) + 1 FROM read_parquet('{nodes_path}')").fetchone()[0]
+    con.execute(f"SET temp_directory={sql_literal(spill_dir(out_dir))}")
+    n = con.execute(f"SELECT max(node_idx) + 1 FROM read_parquet({sql_literal(nodes_path)})").fetchone()[0]
     adj = out_dir / "adjacency.tmp.parquet"
     con.execute(f"""
         COPY (SELECT u, v FROM (
-                SELECT src AS u, dst AS v, weight AS w FROM read_parquet('{edges_path}')
+                SELECT src AS u, dst AS v, weight AS w FROM read_parquet({sql_literal(edges_path)})
                 UNION ALL
-                SELECT dst, src, weight FROM read_parquet('{edges_path}'))
+                SELECT dst, src, weight FROM read_parquet({sql_literal(edges_path)}))
               ORDER BY u, w DESC, v)
-        TO '{adj}' (FORMAT PARQUET, ROW_GROUP_SIZE 4000000)""")
+        TO {sql_literal(adj)} (FORMAT PARQUET, ROW_GROUP_SIZE 4000000)""")
     m = pq.ParquetFile(adj).metadata.num_rows
     counts = np.zeros(n, np.int64)
     neighbors = np.lib.format.open_memmap(out_dir / "neighbors.npy", mode="w+", dtype=np.int32, shape=(m,))
@@ -51,10 +52,10 @@ def build_pathgraph(nodes_path: str, edges_path: str, out_dir: Path) -> dict:
     offsets = np.zeros(n + 1, np.int64)
     np.cumsum(counts, out=offsets[1:])
     np.save(out_dir / "offsets.npy", offsets)
-    t = con.execute(f"""SELECT node_idx, id, display_name FROM read_parquet('{nodes_path}')
+    t = con.execute(f"""SELECT node_idx, id, display_name FROM read_parquet({sql_literal(nodes_path)})
                         ORDER BY node_idx""").fetchnumpy()
     assert len(t["node_idx"]) == n and int(t["node_idx"][-1]) == n - 1, "node_idx must be dense"
-    np.save(out_dir / "ids.npy", np.array([int(re.search(r"(\d+)$", s).group(1)) for s in t["id"]], np.uint64))
+    np.save(out_dir / "ids.npy", np.array([encode_author_id(s) for s in t["id"]], np.uint64))
     blobs = [(s or "").encode("utf-8") for s in t["display_name"]]
     name_offsets = np.zeros(n + 1, np.int64)
     np.cumsum([len(b) for b in blobs], out=name_offsets[1:])

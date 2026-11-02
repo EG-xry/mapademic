@@ -4,16 +4,18 @@ Standalone experiment script, mirrors export_points_bin.py exactly in source
 table, dust filter (palette.not_dust_sql), and cited_by_count DESC, id ordering, so row
 i here lines up with row i of positions.bin / attrs.bin. Writes a single flat
 little-endian uint64 array under data/vector_experiment/ids.bin -- the
-numeric part of each row's OpenAlex author id (the "A" + digits after
-"https://openalex.org/") -- plus id-specific fields merged into meta.json.
+numeric part of each row's OpenAlex author id. When repaired M identities
+are present, bit 63 tags those records; all A records stay byte-compatible.
+ID-specific fields are merged into meta.json.
 
 Used by the viewer's cloud-on hover fallback: nearest-neighbor over the
 in-memory point cloud resolves to a row index, and an HTTP Range request
 against ids.bin at offset index*8 recovers that row's author id without
 downloading the whole 67MB file.
 """
+
+from pipeline.sql import sql_literal
 import json
-import re
 import time
 from pathlib import Path
 
@@ -21,18 +23,12 @@ import duckdb
 import numpy as np
 
 from pipeline.config import apply_resource_limits, data_dir
+from pipeline.identifiers import IDENTITY_TAG, encode_author_id
 from pipeline.palette import not_dust_sql
-
-# Matches both the real data's full "https://openalex.org/A<digits>" ids and
-# bare "A<digits>" ids (used by tests), by taking the trailing A<digits> run.
-_ID_RE = re.compile(r"A(\d+)$")
-
+from pipeline.sql import sql_literal
 
 def _id_to_u64(raw_id: str) -> int:
-    m = _ID_RE.search(raw_id)
-    if not m:
-        raise ValueError(f"id does not match expected OpenAlex author id shape: {raw_id!r}")
-    return int(m.group(1))
+    return encode_author_id(raw_id)
 
 
 def export_ids(web_path: str, out_dir: Path, sample: int | None = None) -> dict:
@@ -51,7 +47,7 @@ def export_ids(web_path: str, out_dir: Path, sample: int | None = None) -> dict:
     limit_clause = f"LIMIT {int(sample)}" if sample else ""
     rows = con.execute(
         f"""SELECT id
-            FROM read_parquet('{web_path}')
+            FROM read_parquet({sql_literal(web_path)})
             WHERE {not_dust_sql(con, web_path)}
             ORDER BY cited_by_count DESC, id
             {limit_clause}"""
@@ -75,6 +71,12 @@ def export_ids(web_path: str, out_dir: Path, sample: int | None = None) -> dict:
                           "attrs.bin row i -- prepend 'A' to reconstruct the id)",
         "id_prefix": "A",
     }
+    if np.any(ids_u64 & np.uint64(IDENTITY_TAG)):
+        meta["ids"].update({
+            "id_encoding": "tagged-u64", "id_prefix": "tagged",
+            "record_layout": "little-endian uint64 per row; bit 63 tags M identities, "
+                             "remaining bits give the numeric key; otherwise prepend A",
+        })
     meta_path.write_text(json.dumps(meta, indent=2))
     return meta
 
