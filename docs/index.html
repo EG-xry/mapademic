@@ -144,7 +144,7 @@
     #connect-panel.open { display: flex; }
     .connect-row { position: relative; }
     .connect-row > label { display: block; color: #bbb; font: 12px system-ui; margin-bottom: 4px; }
-    #connect-from-kind { background: #111; color: #ddd; border: 1px solid #555;
+    .connect-kind, #connect-from-kind { background: #111; color: #ddd; border: 1px solid #555;
                          border-radius: 4px; padding: 3px; font: inherit; }
     #connect-scope, #connect-affiliation { margin: 0; color: #bbb; background: #0b0b0bf2;
                                           font: 12px/1.4 system-ui; padding: 4px 10px; border-radius: 6px; }
@@ -178,6 +178,43 @@
                                border: 1px solid #333; border-radius: 6px;
                                padding: 6px 10px; font: 12px system-ui; cursor: pointer; }
     .connect-actions button:hover { border-color: #7fae8e; }
+    #connect-inputs { margin: 0; }
+    #connect-inputs > summary { display: none; color: #c9dfd1; cursor: pointer; padding: 8px;
+                                background: #18241f; border-radius: 6px; }
+    #connect-inputs.group-inputs > summary { display: list-item; margin-bottom: 8px; }
+    #connect-inputs .connect-row { margin-bottom: 8px; }
+    #connect-extra-rows { display: contents; }
+    .connect-row-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 4px; }
+    .connect-remove { background: transparent; color: #bbb; border: 0; cursor: pointer; font: 20px system-ui;
+                      width: 30px; height: 30px; border-radius: 4px; }
+    .connect-remove:hover { background: #ffffff1a; }
+    #connect-add { flex: none; padding: 6px 10px; margin: 0; background: #0b0b0bd9; border: 1px solid #333;
+                   color: #ddd; border-radius: 6px; font: 12px system-ui; cursor: pointer; }
+    #connect-add:disabled { opacity: .55; cursor: default; }
+    #connect-stop[hidden], #connect-group-results[hidden] { display: none; }
+    #connect-group-results { display: flex; flex-direction: column; gap: 5px; }
+    .connect-group-tools { display: flex; justify-content: space-between; align-items: center; gap: 5px; }
+    .connect-group-tools button { color: #c6e4d1; background: #16241d; border: 1px solid #43634f;
+                                  border-radius: 5px; padding: 5px 8px; cursor: pointer; }
+    .connect-group-note { color: #a6b8ad; font: 11px/1.4 system-ui; margin: 4px 0; }
+    .connect-pair-list { display: grid; gap: 4px; max-height: 240px; overflow-y: auto; }
+    .connect-pair { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+                    text-align: left; padding: 8px; color: #c9d2cd; background: #111a15;
+                    border: 1px solid #29392f; border-radius: 6px; font: 12px/1.4 system-ui; cursor: pointer; }
+    .connect-pair[aria-pressed="true"] { border-color: #99c5a8; background: #20372a; }
+    .connect-pair:disabled { cursor: default; opacity: .8; }
+    .connect-pair .pair-count { flex: none; color: #9ac6aa; font-size: 11px; }
+    #connect-panel :focus-visible { outline: 2px solid #a6dfbb; outline-offset: 2px; }
+    .path-node.group-intermediate .path-dot { width: 6px; height: 6px; border-width: 1px; }
+    .path-node.group-intermediate { pointer-events: auto; cursor: help; }
+    .path-node.group-intermediate .path-label { display: none; }
+    .path-node.group-intermediate:hover .path-label, .path-node.group-intermediate:focus .path-label { display: block; }
+    @media (max-width: 640px) {
+      .connect-kind { font-size: 16px; }
+      #connect-add, .connect-remove, .connect-group-tools button { min-height: 40px; }
+      .connect-pair-list { max-height: 22dvh; }
+
+    }
     /* R31: startup demo caption -- same pill language, one step louder since
        it is the first thing a visitor reads. */
     #connect-status { font: 12px system-ui; color: #9ab; background: #0b0b0bd9;
@@ -404,6 +441,8 @@
   <div id="search-dropdown"></div>
   <div id="search-status"></div>
   <div id="connect-panel">
+    <details id="connect-inputs" open>
+    <summary id="connect-inputs-summary">Selections</summary>
     <div class="connect-row">
       <label for="connect-from-kind">From <select id="connect-from-kind">
         <option value="researcher">Researcher</option><option value="institution">Institution</option>
@@ -412,19 +451,26 @@
       <div id="connect-a-dropdown" class="connect-dropdown"></div>
     </div>
     <div class="connect-row">
-      <label for="connect-b-input">To researcher</label>
+      <label for="connect-to-kind">To <select id="connect-to-kind" class="connect-kind">
+        <option value="researcher">Researcher</option><option value="institution">Institution</option>
+      </select></label>
       <input id="connect-b-input" type="text" placeholder="Author B…" autocomplete="off">
       <div id="connect-b-dropdown" class="connect-dropdown"></div>
     </div>
+    <div id="connect-extra-rows"></div>
     <p id="connect-scope" hidden>Uses up to 50 most-cited researchers with 15+ works and a last-known
       OpenAlex affiliation. Searches mapped candidates only; affiliations may not be current.</p>
+    </details>
     <div class="connect-actions">
       <button id="connect-go" type="button">Go</button>
+      <button id="connect-add" type="button" aria-label="Add researcher or institution" title="Add researcher or institution">+ Add</button>
+      <button id="connect-stop" type="button" hidden>Stop</button>
       <button id="connect-clear" type="button">Clear</button>
       <button id="connect-share" type="button" hidden>Share chain</button>
     </div>
     <div id="connect-status" role="status" aria-live="polite"></div>
     <p id="connect-affiliation"></p>
+    <div id="connect-group-results" hidden></div>
     <div id="path-hops"></div>
   </div>
 </div>
@@ -477,6 +523,13 @@
             50 most-cited researchers with an OpenAlex last-known affiliation.
             The result is the shortest among those mapped candidates, subject to
             the same search limits, not necessarily the whole institution.</li>
+          <li>Use + Add for up to eight researchers or institutions, then
+            Connect all to search every pair on this map. Shared researchers
+            and links appear once. Select a pair for its steps and papers;
+            Show all paths returns to the group. Stop keeps completed results.
+            Group searches skip flagged intermediate profiles and suspect links.
+            Share includes the group selections. Live institution candidates
+            may change between visits.</li>
           <li>Hover a dot at deep zoom to see the author's name and
             citations; click it for full details.</li>
           <li>Share copies a link to the exact view.</li>
@@ -807,6 +860,8 @@ function backendOfflineMessage(what) {
 // path endpoints). MapLibre's own `hash` option is NOT used -- this codec
 // owns location.hash exclusively so the extra a=/p= params survive.
 let activeA = null;         // bare id of the active search highlight, or null
+let activeG = null;         // group endpoint IDs, mutually exclusive with p=
+let pendingG = null;
 let activeP = null;         // [bareA, bareB] of the active path, or null
 // a=/p= from the initial hash, carried by writeHash until the real state
 // takes over (highlight placed / path drawn) or the user discards it
@@ -848,6 +903,11 @@ function parseHash() {
     if (eq < 0) continue;
     const key = parts[i].slice(0, eq), val = parts[i].slice(eq + 1);
     if (key === "a" && val) out.a = val;
+    if (key === "g" && val) {
+      const ids = val.split(",").map(stripId);
+      if (ids.length >= 2 && ids.length <= 8 && ids.every(id => /^[AI]\d+$/.test(id)) &&
+          new Set(ids).size === ids.length) out.g = ids;
+    }
     if (key === "p" && val) {
       const ids = val.split(",").map(stripId);
       if (ids.length === 2 && /^[AI]\d+$/.test(ids[0]) && /^A\d+$/.test(ids[1])) out.p = ids;
@@ -861,13 +921,16 @@ function writeHash() {
   let h = `#${map.getZoom().toFixed(2)}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`;
   const a = activeA || pendingA;
   const p = activeP || pendingP;
-  if (a) h += `&a=${a}`;
-  if (p) h += `&p=${p[0]},${p[1]}`;
+  const g = activeG || pendingG;
+  if (g) h += `&g=${g.join(",")}`;
+  else if (a) h += `&a=${a}`;
+  if (p && !g) h += `&p=${p[0]},${p[1]}`;
   history.replaceState(null, "", h);
 }
 
 const initialHash = parseHash();
 if (initialHash) {
+  if (initialHash.g) pendingG = initialHash.g.map(stripId);
   if (initialHash.a) pendingA = stripId(initialHash.a);
   if (initialHash.p) pendingP = initialHash.p.map(stripId);
 }
@@ -1305,6 +1368,10 @@ function markerOnDot(el, dot, lngLat) {
   return marker.setOffset([0, -dot.offsetHeight / 2]);
 }
 function setSearchHighlight(id, name, xw, yw) {
+  if (activeG || pendingG || activeConnectGroup) {
+    pendingG = null;
+    clearPath();
+  }
   clearSearchHighlight();
   const el = document.createElement("div");
   el.className = "search-highlight-node";
@@ -1601,8 +1668,179 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
     close();
     onSelect(null);
   }
-  return { isOpen, escape };
+  function pause() { clearTimeout(timer); gen++; close(); }
+  return { isOpen, escape, pause, select };
 }
+
+// ---- Multi-endpoint Connect engine ----
+const MULTI_CONNECT_LIMIT = 8;
+function multiConnectCheck(isStale) {
+  if (isStale()) throw new DOMException('Search cancelled', 'AbortError');
+}
+async function resolveConnectEndpoint(meta, endpoint, isStale = () => false) {
+  multiConnectCheck(isStale);
+  if (!endpoint || !/^[AI]\d+$/.test(stripId(endpoint.id || ''))) {
+    throw new Error('Choose a researcher or institution from the search results.');
+  }
+  const selected = { ...endpoint, id: stripId(endpoint.id) };
+  let resolved;
+  if (/^I/.test(selected.id)) {
+    resolved = await resolveInstitutionStart(meta, selected, isStale);
+  } else {
+    const node = await authorPathNumber(selected.id);
+    resolved = { nodes: node == null ? [] : [node],
+      names: new Map([[selected.id, selected.name || selected.id]]), considered: 1 };
+  }
+  multiConnectCheck(isStale);
+  if (!resolved) throw new Error("Couldn't resolve this endpoint. Retry the search.");
+  const nodes = [...new Set(resolved.nodes || [])]
+    .filter(node => Number.isInteger(node) && node >= 0 && node < meta.authors).sort((a, b) => a - b);
+  return { endpoint: selected, nodes, names: resolved.names || new Map(),
+    considered: Number.isFinite(resolved.considered) ? resolved.considered : nodes.length };
+}
+async function searchConnectGroup(meta, endpoints, { isStale = () => false, onProgress, onResult } = {}) {
+  multiConnectCheck(isStale);
+  if (!Array.isArray(endpoints) || endpoints.length < 2 || endpoints.length > MULTI_CONNECT_LIMIT) {
+    throw new Error(`Choose between 2 and ${MULTI_CONNECT_LIMIT} endpoints.`);
+  }
+  const selected = endpoints.map(endpoint => ({ ...endpoint, id: stripId(endpoint && endpoint.id || '') }));
+  if (new Set(selected.map(endpoint => endpoint.id)).size !== selected.length) {
+    throw new Error('Duplicate endpoints: each researcher or institution can be selected only once.');
+  }
+  const total = selected.length * (selected.length - 1) / 2, results = [];
+  const progress = (phase, source = null, target = null, details = {}) => {
+    multiConnectCheck(isStale);
+    if (onProgress) onProgress({ phase, source, target, completed: results.length, total, ...details });
+  };
+  let flags = null, flagsError = null;
+  try { flags = await dataFlags(); }
+  catch (error) { flagsError = error; }
+  multiConnectCheck(isStale);
+  const blocked = flags && flags.byNumber instanceof Map ? flags.byNumber : new Map();
+  if (!flagsError && (!flags || !(flags.byNumber instanceof Map))) {
+    flagsError = new Error("Couldn't load this release's identity flags. Retry the search.");
+  }
+  const resolved = [], seedNames = new Map();
+  // Resolve pools once, even if one endpoint fails. Its other pairs can still
+  // complete, and no live name lookup can substitute a different researcher.
+  for (let index = 0; index < selected.length; index++) {
+    progress('resolve', index, null);
+    try {
+      const value = await resolveConnectEndpoint(meta, selected[index], isStale);
+      const before = value.nodes.length;
+      const institution = /^I/.test(value.endpoint.id);
+      const allQuarantined = before > 0 && value.nodes.every(node => blocked.get(node)?.kind === 'quarantined');
+      value.profileWarning = !institution && value.nodes.some(node => blocked.has(node));
+      // A university pool is selected automatically: never make a known
+      // flagged profile its representative. An explicitly chosen researcher
+      // retains the existing policy of excluding quarantine only.
+      value.nodes = value.nodes.filter(node => institution
+        ? !blocked.has(node) : blocked.get(node)?.kind !== 'quarantined');
+      value.quarantined = allQuarantined;
+      value.flaggedInstitution = institution && before > 0 && !value.nodes.length && !value.quarantined;
+      resolved.push(value);
+      for (const [id, name] of value.names) if (!seedNames.has(id) && name) seedNames.set(id, name);
+    } catch (error) {
+      multiConnectCheck(isStale);
+      if (error && error.name === 'AbortError') throw error;
+      resolved.push({ endpoint: selected[index], nodes: [], names: new Map(), considered: 0, error });
+    }
+  }
+  const nameCache = new Map(), paperCache = new Map();
+  const cachedName = (id, preferred) => {
+    if (preferred || seedNames.has(id)) return Promise.resolve(preferred || seedNames.get(id));
+    if (!nameCache.has(id)) nameCache.set(id, Promise.resolve().then(() => fetchDisplayName(id)).then(name => name || id, () => id));
+    return nameCache.get(id);
+  };
+  const cachedPaper = (left, right) => {
+    const ids = [left, right].sort(), key = ids.join('|');
+    if (!paperCache.has(key)) paperCache.set(key, Promise.resolve().then(() => sharedPaper(ids[0], ids[1])).then(paper => paper || null, () => null));
+    return paperCache.get(key);
+  };
+  const hydrate = async (ids, source, target) => {
+    const names = new Array(ids.length), papers = new Array(Math.max(0, ids.length - 1));
+    const tasks = ids.map((id, index) => async () => {
+      names[index] = await cachedName(id, source.names.get(id) || target.names.get(id));
+    }).concat(ids.slice(0, -1).map((id, index) => async () => { papers[index] = await cachedPaper(id, ids[index + 1]); }));
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(6, tasks.length) }, async () => {
+      while (next < tasks.length) { multiConnectCheck(isStale); await tasks[next++](); }
+    }));
+    multiConnectCheck(isStale);
+    return { steps: ids.map((id, index) => ({ id, name: names[index] || id,
+      label: papers[index]?.title || null, paper: papers[index] || null })),
+      missing: papers.some(paper => !paper) };
+  };
+  const endpointNotes = (source, target) => {
+    const notes = [];
+    for (const value of [source, target]) {
+      if (/^I/.test(value.endpoint.id)) {
+        notes.push(`Among ${value.nodes.length} mapped candidates from ${value.considered} considered for ${value.endpoint.name || value.endpoint.id}; affiliations may not be current.`);
+      }
+      if (value.profileWarning) {
+        notes.push(`${value.endpoint.name || value.endpoint.id} has a source-profile identity warning; choosing it explicitly does not verify its identity.`);
+      }
+    }
+    return [...new Set(notes)];
+  };
+  for (let source = 0; source < resolved.length; source++) {
+    for (let target = source + 1; target < resolved.length; target++) {
+      multiConnectCheck(isStale);
+      const a = resolved[source], b = resolved[target];
+      const result = { source, target, status: 'error', steps: [], hops: null, note: '' };
+      try {
+        const error = a.error || b.error || flagsError;
+        if (error) throw error;
+        const notes = endpointNotes(a, b);
+        if (!a.nodes.length || !b.nodes.length) {
+          result.status = 'unavailable';
+          notes.unshift(a.quarantined || b.quarantined
+            ? 'An endpoint identity is unresolved or quarantined and cannot be used in paths.'
+            : a.flaggedInstitution || b.flaggedInstitution
+            ? 'All mapped candidates for an institution were excluded by profile identity flags. Choose a specific researcher or another institution.'
+            : 'An endpoint has no mapped coauthor-graph candidates. This does not establish that no real-world connection exists.');
+        } else {
+          progress('search', source, target);
+          const path = await browserShortestPath(meta, a.nodes, b.nodes,
+            (hops, seen) => progress('search', source, target, { hops, seen }),
+            { avoidSuspect: true, avoidNodes: blocked, isStale });
+          multiConnectCheck(isStale);
+          if (path && path.tooFar) {
+            result.status = 'limit'; notes.unshift('Search limit reached; a connection may still exist.');
+          } else if (path === null) {
+            result.status = 'not-found'; notes.unshift('No path found within the configured hop limit while excluding flagged intermediates and suspect links.');
+          } else {
+            if (!Array.isArray(path) || !path.length) throw new Error('The graph returned an invalid path. Retry the search.');
+            const ids = await pathAuthorIds(meta, path);
+            multiConnectCheck(isStale);
+            if (ids.length !== path.length || ids.some(id => !/^A\d+$/.test(id))) {
+              throw new Error("Couldn't read this graph's researcher IDs. Retry the search.");
+            }
+            progress('evidence', source, target);
+            const evidence = await hydrate(ids, a, b);
+            result.status = 'found'; result.steps = evidence.steps; result.hops = path.length - 1;
+            notes.unshift('OpenAlex profile path; identities unverified. Flagged intermediates and suspect links excluded.');
+            if (result.hops === 0) notes.push('These selections share the same mapped researcher; this is a zero-hop match.');
+            if (evidence.missing) notes.push('Some steps have no shared-paper evidence; those connections remain unconfirmed.');
+          }
+        }
+        result.note = notes.join(' ');
+      } catch (error) {
+        multiConnectCheck(isStale);
+        if (error && error.name === 'AbortError') throw error;
+        result.status = 'error';
+        result.note = [error && error.message || 'Could not complete this pair. Retry the search.', ...endpointNotes(a, b)].join(' ');
+      }
+      multiConnectCheck(isStale);
+      results.push(result);
+      if (onResult) await onResult(result);
+      multiConnectCheck(isStale);
+      progress('complete', source, target);
+    }
+  }
+  return results;
+}
+// ---- End multi-endpoint Connect engine ----
 
 const connectToggle = document.getElementById("connect-toggle");
 const connectPanel = document.getElementById("connect-panel");
@@ -1622,14 +1860,15 @@ let connectA = null, connectB = null;    // {id, name, xw, yw} once selected
 // Editing either Connect input discards any not-yet-run p= from the hash:
 // the shared pair no longer matches what the user is about to run.
 const connectALookup = createAuthorLookup(connectAInput, connectADropdown, sel => {
-  connectA = sel; pendingP = null; clearPath();
+  connectA = sel; invalidateConnectSelections();
 }, connectFromKind);
 const connectBLookup = createAuthorLookup(connectBInput, connectBDropdown, sel => {
-  connectB = sel; pendingP = null; clearPath();
-});
+  connectB = sel; invalidateConnectSelections();
+}, document.getElementById("connect-to-kind"));
 function syncConnectStartUI() {
   const institution = connectFromKind.value === "institution";
   connectScope.hidden = !institution;
+  syncConnectGroupUI();
   connectAInput.placeholder = institution ? "Institution name…" : "Author A…";
   connectAInput.setAttribute("aria-label", institution ? "Starting institution" : "Starting researcher");
 }
@@ -1637,6 +1876,256 @@ connectFromKind.addEventListener("change", () => {
   connectALookup.escape();
   syncConnectStartUI();
 });
+
+// ---- Multi-connect selection helpers ----
+function validateConnectSelections(selections) {
+  if (selections.length < 2 || selections.length > MULTI_CONNECT_LIMIT) {
+    return { error: `Choose between 2 and ${MULTI_CONNECT_LIMIT} researchers or institutions.` };
+  }
+  const endpoints = [], seen = new Set();
+  for (let i = 0; i < selections.length; i++) {
+    const selection = selections[i];
+    if (!selection) return { error: `Select a researcher or institution for entry ${i + 1}, or remove that entry.` };
+    const id = stripId(selection.id);
+    if (!/^[AI]\d+$/.test(id)) return { error: `Choose entry ${i + 1} from the researcher or institution results.` };
+    if (seen.has(id)) return { error: `${selection.name} is already selected. Choose a different entry.` };
+    seen.add(id);
+    endpoints.push({ ...selection, id, kind: id.startsWith("I") ? "institution" : "researcher" });
+  }
+  return { endpoints, error: null };
+}
+// ---- End multi-connect selection helpers ----
+
+// ---- Multi-connect controls ----
+const connectToKind = document.getElementById("connect-to-kind");
+const connectAdd = document.getElementById("connect-add");
+const connectStop = document.getElementById("connect-stop");
+const connectInputs = document.getElementById("connect-inputs");
+const connectInputsSummary = document.getElementById("connect-inputs-summary");
+const connectGroupResults = document.getElementById("connect-group-results");
+const extraConnectRows = [];
+let nextConnectRow = 3;
+let activeConnectGroup = null;
+
+function discardConnectGroup() {
+  activeConnectGroup = null;
+  activeG = null;
+  pendingG = null;
+  connectStop.hidden = true;
+  connectGroupResults.hidden = true;
+  connectGroupResults.replaceChildren();
+}
+function invalidateConnectSelections() {
+  pendingP = null;
+  pendingG = null;
+  clearPath();
+  syncConnectGroupUI();
+}
+function syncConnectGroupUI() {
+  const kinds = [connectFromKind, connectToKind, ...extraConnectRows.map(row => row.kind)];
+  connectScope.hidden = !kinds.some(kind => kind.value === "institution");
+  const targetInstitution = connectToKind.value === "institution";
+  connectBInput.placeholder = targetInstitution ? "Institution name…" : "Author B…";
+  connectBInput.setAttribute("aria-label", targetInstitution ? "Destination institution" : "Destination researcher");
+  connectAdd.disabled = extraConnectRows.length + 2 >= MULTI_CONNECT_LIMIT;
+  connectAdd.title = connectAdd.disabled ? `Up to ${MULTI_CONNECT_LIMIT} entries per group` : "";
+  const group = extraConnectRows.length > 0 || targetInstitution;
+  connectInputs.classList.toggle("group-inputs", group);
+  if (!group) connectInputs.open = true;
+  const selected = [connectA, connectB, ...extraConnectRows.map(row => row.selection)].filter(Boolean).length;
+  const total = extraConnectRows.length + 2;
+  connectInputsSummary.textContent = selected === total ? `${total} selected · Edit` : `${selected}/${total} selected`;
+  connectGo.textContent = group ? "Connect all" : "Go";
+}
+connectToKind.addEventListener("change", () => {
+  connectBLookup.escape();
+  syncConnectGroupUI();
+});
+function addConnectRow() {
+  if (extraConnectRows.length + 2 >= MULTI_CONNECT_LIMIT) return null;
+  invalidateConnectSelections();
+  const key = nextConnectRow++;
+  const row = { selection: null, removed: false };
+  row.element = document.createElement("div");
+  row.element.className = "connect-row";
+  const head = document.createElement("div");
+  head.className = "connect-row-head";
+  const label = document.createElement("label");
+  label.htmlFor = `connect-extra-${key}-kind`;
+  label.append("Add ");
+  row.kind = document.createElement("select");
+  row.kind.id = `connect-extra-${key}-kind`;
+  row.kind.className = "connect-kind";
+  for (const [value, title] of [["researcher", "Researcher"], ["institution", "Institution"]]) {
+    const option = document.createElement("option"); option.value = value; option.textContent = title; row.kind.append(option);
+  }
+  label.append(row.kind);
+  const remove = document.createElement("button");
+  remove.type = "button"; remove.className = "connect-remove"; remove.textContent = "×";
+  remove.setAttribute("aria-label", `Remove entry ${extraConnectRows.length + 3}`);
+  head.append(label, remove);
+  row.input = document.createElement("input");
+  row.input.id = `connect-extra-${key}-input`; row.input.type = "text"; row.input.autocomplete = "off";
+  const dropdown = document.createElement("div"); dropdown.className = "connect-dropdown";
+  row.element.append(head, row.input, dropdown);
+  row.lookup = createAuthorLookup(row.input, dropdown, selection => {
+    if (row.removed) return;
+    row.selection = selection;
+    invalidateConnectSelections();
+  }, row.kind);
+  function sync() {
+    const institution = row.kind.value === "institution";
+    row.input.placeholder = institution ? "Institution name…" : "Researcher name…";
+    row.input.setAttribute("aria-label", `Additional ${institution ? "institution" : "researcher"}`);
+    syncConnectGroupUI();
+  }
+  row.kind.addEventListener("change", () => { row.lookup.escape(); sync(); });
+  remove.addEventListener("click", () => {
+    row.removed = true;
+    row.lookup.pause();
+    extraConnectRows.splice(extraConnectRows.indexOf(row), 1);
+    row.element.remove();
+    invalidateConnectSelections();
+    syncConnectGroupUI();
+    connectAdd.focus();
+  });
+  extraConnectRows.push(row);
+  document.getElementById("connect-extra-rows").append(row.element);
+  connectInputs.open = true;
+  sync();
+  row.input.focus();
+  return row;
+}
+connectAdd.addEventListener("click", addConnectRow);
+connectStop.addEventListener("click", () => {
+  if (!activeConnectGroup) return;
+  pathGen++;
+  activeConnectGroup.gen = pathGen;
+  activeConnectGroup.running = false;
+  activeConnectGroup.stopped = true;
+  connectStop.hidden = true;
+  refreshConnectGroupResults();
+  renderConnectGroup(activeConnectGroup.results, activeConnectGroup.endpoints, pathGen, activeConnectGroup.focused);
+  setPathStatus("Stopped. Completed pairs remain available; other pairs have not been checked.");
+});
+function groupPairKey(result) { return `${result.source}:${result.target}`; }
+function refreshConnectGroupResults() {
+  const group = activeConnectGroup;
+  if (!group) return;
+  const focusedControl = connectGroupResults.contains(document.activeElement)
+    ? document.activeElement.getAttribute("data-connect-control") : null;
+  connectGroupResults.replaceChildren();
+  connectGroupResults.hidden = false;
+  const tools = document.createElement("div"); tools.className = "connect-group-tools";
+  const all = document.createElement("button"); all.type = "button"; all.textContent = "Show all paths";
+  all.setAttribute("data-connect-control", "all");
+  all.setAttribute("aria-pressed", String(group.focused === null));
+  all.addEventListener("click", () => focusConnectPair(null));
+  const count = document.createElement("span"); count.className = "connect-group-note";
+  const total = group.endpoints.length * (group.endpoints.length - 1) / 2;
+  count.textContent = `${group.results.length}/${total} pairs checked`;
+  tools.append(all, count);
+  const note = document.createElement("p"); note.className = "connect-group-note";
+  note.textContent = "Shared lines are drawn once. Select a pair to see its steps.";
+  const list = document.createElement("div"); list.className = "connect-pair-list";
+  const byKey = new Map(group.results.map(result => [groupPairKey(result), result]));
+  for (let source = 0; source < group.endpoints.length; source++) {
+    for (let target = source + 1; target < group.endpoints.length; target++) {
+      const key = `${source}:${target}`, result = byKey.get(key);
+      const button = document.createElement("button"); button.type = "button"; button.className = "connect-pair";
+      button.setAttribute("data-connect-control", `pair-${key}`);
+      button.setAttribute("aria-pressed", String(group.focused === key));
+      const name = document.createElement("span");
+      name.textContent = `${group.endpoints[source].name} ↔ ${group.endpoints[target].name}`;
+      const status = document.createElement("span"); status.className = "pair-count";
+      status.textContent = !result ? group.running ? "Waiting" : "Not checked"
+        : result.status === "found" ? hopsText(result.hops)
+        : ({ unavailable: "Unavailable", limit: "Search limit", "not-found": "No route found", error: "Unavailable" })[result.status] || result.status;
+      button.append(name, status);
+      button.disabled = !result || result.status !== "found";
+      button.title = result?.note || (result?.status === "not-found" ? "No route found within the search limits." : "");
+      button.addEventListener("click", () => focusConnectPair(key));
+      list.append(button);
+      if (result && result.status !== "found" && result.note) {
+        const reason = document.createElement("p"); reason.className = "connect-group-note";
+        reason.textContent = result.note; list.append(reason);
+      }
+    }
+  }
+  connectGroupResults.append(tools, note, list);
+  if (focusedControl) connectGroupResults.querySelector(`[data-connect-control="${focusedControl}"]`)?.focus({ preventScroll: true });
+}
+async function focusConnectPair(key) {
+  const group = activeConnectGroup;
+  if (!group) return;
+  group.focused = key;
+  refreshConnectGroupResults();
+  clearHopList();
+  const result = group.results.find(result => groupPairKey(result) === key);
+  if (result) {
+    const coords = await resolvePathCoords(result.steps).catch(() => result.steps.map(() => null));
+    if (group !== activeConnectGroup || group.focused !== key) return;
+    const points = result.steps.map((step, index) => coords[index] || { ...step, unmapped: true });
+    const colors = await Promise.all(points.map(point => point.unmapped || point.ghost ? null
+      : resolveCommunityColor(stripId(point.id), point.xw, point.yw).catch(() => null)));
+    if (group !== activeConnectGroup || group.focused !== key) return;
+    renderHopList(points, colors.map(color => color || VECTOR_POINT_FALLBACK_COLOR));
+    // Report institution representatives separately from the institution selections.
+    connectAffiliation.textContent = [result.steps[0]?.name, result.steps.at(-1)?.name].filter(Boolean).join(" ↔ ") +
+      (result.note ? ` — ${result.note}` : "");
+  } else connectAffiliation.textContent = "";
+  await renderConnectGroup(group.results, group.endpoints, group.gen, key);
+  if (group === activeConnectGroup && group.focused === key) frameConnectGroup();
+}
+function frameConnectGroup() {
+  if (!activePath?.group || !activePath.points.length) return;
+  const coords = activePath.points.map(point => toLngLat(point.xw, point.yw).toArray());
+  const bounds = coords.reduce((bounds, coord) => bounds.extend(coord), new maplibregl.LngLatBounds(coords[0], coords[0]));
+  map.fitBounds(bounds, { padding: fitPadding(), maxZoom: 11 });
+}
+async function connectGroupInBrowser(meta, endpoints, gen) {
+  clearSearchAndRays();
+  const group = { endpoints, results: [], focused: null, gen, running: true };
+  activeConnectGroup = group;
+  activeG = endpoints.map(endpoint => endpoint.id);
+  pendingG = null; pendingP = null; activeP = null;
+  writeHash();
+  connectInputs.open = false;
+  connectStop.hidden = false;
+  refreshConnectGroupResults();
+  const stale = () => gen !== pathGen || activeConnectGroup !== group;
+  try {
+    await searchConnectGroup(meta, endpoints, {
+      isStale: stale,
+      onProgress(progress) {
+        if (!stale()) setPathStatus(`Connecting pairs… ${progress.completed}/${progress.total} checked` +
+          (progress.seen ? ` · ${progress.seen.toLocaleString()} researchers explored` : ""));
+      },
+      async onResult(result) {
+        if (stale()) return;
+        group.results.push(result);
+        refreshConnectGroupResults();
+        await renderConnectGroup(group.results, endpoints, gen, group.focused);
+      }
+    });
+    if (stale()) return;
+    if (group.focused === null) frameConnectGroup();
+    group.running = false;
+    connectStop.hidden = true;
+    refreshConnectGroupResults();
+    const found = group.results.filter(result => result.status === "found").length;
+    setPathStatus(`${found} of ${group.results.length} pairs connected · profile identities unverified`);
+  } catch (error) {
+    if (!stale()) {
+      group.running = false;
+      connectStop.hidden = true;
+      refreshConnectGroupResults();
+      setPathStatus(error.message.startsWith("OpenAlex ") || error.message.startsWith("Couldn't ")
+        ? error.message : "Couldn't finish the group. Completed pairs remain available; retry to search again.");
+    }
+  }
+}
+// ---- End multi-connect controls ----
 
 function setPathStatus(text) { connectStatus.textContent = text || ""; }
 
@@ -1778,12 +2267,13 @@ function renderHopList(points, hopColors) {
       }
     }
     row.append(idx, sw, name);
-    if (p.ghost) {
+    if (p.ghost || p.unmapped) {
       const ghost = document.createElement("span");
-      ghost.className = "hop-ghost"; ghost.textContent = "ghost";
+      ghost.className = "hop-ghost"; ghost.textContent = p.unmapped ? "not mapped" : "ghost";
       row.append(ghost);
     }
     row.addEventListener("click", () => {
+      if (p.unmapped) return;
       map.flyTo({ center: toLngLat(p.xw, p.yw), zoom: 10.5 });
     });
     pathHopsEl.appendChild(row);
@@ -1791,6 +2281,7 @@ function renderHopList(points, hopColors) {
 }
 
 function clearPath() {
+  discardConnectGroup();
   pathGen++;                         // any in-flight renderPath is now stale
   connectAffiliation.textContent = "";
   if (pathEventSource) { pathEventSource.close(); pathEventSource = null; }
@@ -1816,7 +2307,7 @@ function clearPath() {
 }
 // pendingP is only discarded on an explicit user Clear -- Go's internal
 // clearPath keeps it, so a failed run still leaves p= in the URL.
-connectClear.addEventListener("click", () => { pendingP = null; clearPath(); });
+connectClear.addEventListener("click", () => { pendingP = null; pendingG = null; clearPath(); });
 
 async function renderPath(pathSteps, hops, idA, idB) {
   const gen = pathGen;               // stale once clearPath / a newer Go bumps it
@@ -1930,6 +2421,241 @@ function drawResolvedPath(points, hopColors, hops, idA, idB, { writeUrl = true }
   }
   setPathStatus(hopsText(hops));
 }
+
+// ---- Multi-connect network renderer ----
+// Root owns activeConnectGroup, pathGen, pair searches and result-card UI.
+// Keep these markers when embedding this fragment: tests extract this block.
+function connectGroupBareId(value) {
+  const match = /^(?:https?:\/\/(?:www\.)?openalex\.org\/)?(A\d+)$/.exec(String(value ?? ""));
+  return match ? match[1] : null;
+}
+
+// Pure topology: retain aligned gaps, merge only original adjacent author
+// pairs, and label actual researcher endpoints rather than institution names.
+function buildConnectNetwork(results, focusKey = null) {
+  const nodes = [], edges = [], routes = [], byId = new Map(), byEdge = new Map();
+  const edgeRouteKeys = [];
+  for (const result of results || []) {
+    if (!result || result.status !== "found" || !Array.isArray(result.steps)) continue;
+    const key = `${result.source}:${result.target}`;
+    if (focusKey !== null && key !== focusKey) continue;
+    const steps = result.steps.map(step => {
+      const id = connectGroupBareId(step?.id ?? step?.author_id);
+      return id ? { ...step, id, name: step.name || step.author_name || id } : null;
+    });
+    const nodeIndexes = steps.map((step, i) => {
+      if (!step) return null;
+      let index = byId.get(step.id);
+      if (index === undefined) {
+        index = nodes.length; byId.set(step.id, index);
+        nodes.push({ ...step, endpoint: false, endpointIndexes: [], routeKeys: [] });
+      }
+      const node = nodes[index];
+      if (!node.routeKeys.includes(key)) node.routeKeys.push(key);
+      if (i === 0 || i === steps.length - 1) {
+        node.endpoint = true;
+        const endpointIndexes = [];
+        if (i === 0) endpointIndexes.push(result.source);
+        if (i === steps.length - 1) endpointIndexes.push(result.target);
+        for (const endpointIndex of endpointIndexes) {
+          if (!node.endpointIndexes.includes(endpointIndex)) node.endpointIndexes.push(endpointIndex);
+        }
+      }
+      return index;
+    });
+    for (let i = 1; i < nodeIndexes.length; i++) {
+      const a = nodeIndexes[i - 1], b = nodeIndexes[i];
+      if (a === null || b === null || a === b) continue;
+      const pair = [Math.min(a, b), Math.max(a, b)], edgeKey = pair.join(":");
+      if (!byEdge.has(edgeKey)) {
+        byEdge.set(edgeKey, edges.length); edges.push(pair); edgeRouteKeys.push([]);
+      }
+      const owners = edgeRouteKeys[byEdge.get(edgeKey)];
+      if (!owners.includes(key)) owners.push(key);
+    }
+    routes.push({ key, source: result.source, target: result.target, steps, nodeIndexes });
+  }
+  return { nodes, edges, routes, edgeRouteKeys };
+}
+
+let connectGroupRenderSequence = 0;
+let connectGroupFramedGeneration = null;
+let connectGroupLabelListenerInstalled = false;
+
+function removeConnectGroupOverlay({ invalidate = true, resetFraming = true, keepDim = false } = {}) {
+  if (invalidate) connectGroupRenderSequence++;
+  if (resetFraming) connectGroupFramedGeneration = null;
+  pathMarkers.forEach(marker => marker.remove());
+  pathMarkers = [];
+  activePath = null;
+  if (pathOverlayIds.length) {
+    overlayLabelClear("path", pathOverlayIds);
+    pathOverlayIds = [];
+    drawLabels();
+  }
+  if (map.getLayer("path-line")) map.removeLayer("path-line");
+  if (map.getLayer("path-line-casing")) map.removeLayer("path-line-casing");
+  if (map.getSource("path")) map.removeSource("path");
+  const share = document.getElementById("connect-share");
+  if (share) share.hidden = true;
+  if (!keepDim) {
+    pathDimActive = false;
+    updateRasterOpacity();
+    updateVectorPoints();
+  }
+}
+
+function connectGroupValidPoint(point) {
+  return point && Number.isFinite(point.xw) && Number.isFinite(point.yw)
+    && point.xw >= 0 && point.xw <= 1 && point.yw >= 0 && point.yw <= 1;
+}
+
+// resolvePathCoords preserves its existing explicit ghost-position behavior.
+// Invalid/missing author steps separate runs and cannot become a shortcut.
+async function resolveConnectGroupRoute(route) {
+  const coords = Array(route.steps.length).fill(null), chunks = [];
+  for (let start = 0; start < route.steps.length;) {
+    if (!route.steps[start]) { start++; continue; }
+    let end = start + 1;
+    while (end < route.steps.length && route.steps[end]) end++;
+    chunks.push({ start, steps: route.steps.slice(start, end) }); start = end;
+  }
+  await Promise.all(chunks.map(async chunk => {
+    try {
+      const resolved = await resolvePathCoords(chunk.steps);
+      chunk.steps.forEach((_, i) => {
+        if (connectGroupValidPoint(resolved[i])) coords[chunk.start + i] = resolved[i];
+      });
+    } catch {
+      // A failed coordinate request leaves this run unresolved, never bridged.
+    }
+  }));
+  return { route, coords };
+}
+
+function connectGroupResearcherName(point, endpoints) {
+  // An institution endpoint may choose different real representatives in
+  // different pair routes. Its institution name must not replace a person.
+  for (const index of point.endpointIndexes) {
+    const endpoint = endpoints?.[index];
+    for (const candidate of [endpoint?.representative, endpoint?.author, endpoint]) {
+      if (connectGroupBareId(candidate?.id ?? candidate?.author_id) === point.id) {
+        const name = candidate.author_name || candidate.display_name || candidate.name;
+        if (name) return name;
+      }
+    }
+  }
+  return point.name || point.id;
+}
+
+// Hide colliding endpoint tags by priority; every point retains an accessible
+// name and tooltip. The pair list remains the complete readable roster.
+function layoutConnectGroupLabels() {
+  if (!activePath?.group) return;
+  const labels = [];
+  pathMarkers.forEach((marker, i) => {
+    if (!activePath.points[i]?.endpoint) return;
+    const element = marker.getElement();
+    const label = element.querySelector?.(".path-label")
+      || Array.from(element.children || []).find(child => child.className === "path-label");
+    if (label) { label.style.visibility = ""; labels.push(label); }
+  });
+  const occupied = [];
+  labels.forEach(label => {
+    const rect = label.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const collision = occupied.some(other => rect.left < other.right + 6 && rect.right > other.left - 6
+      && rect.top < other.bottom + 4 && rect.bottom > other.top - 4);
+    label.style.visibility = collision ? "hidden" : "";
+    if (!collision) occupied.push(rect);
+  });
+}
+
+async function renderConnectGroup(results, endpoints, gen, focusKey = null) {
+  const group = activeConnectGroup;
+  const request = ++connectGroupRenderSequence;
+  const current = () => gen === pathGen && request === connectGroupRenderSequence
+    && group !== null && activeConnectGroup === group;
+  if (!current()) return false;
+  const network = buildConnectNetwork(results, focusKey);
+  const resolvedRoutes = await Promise.all(network.routes.map(resolveConnectGroupRoute));
+  if (!current()) return false;
+
+  const resolvedByNode = new Map(), allowedEdges = new Set();
+  resolvedRoutes.forEach(({ route, coords }) => {
+    coords.forEach((point, i) => {
+      if (!point) return;
+      const index = route.nodeIndexes[i], previous = resolvedByNode.get(index);
+      if (!previous || (previous.ghost && !point.ghost)) resolvedByNode.set(index, point);
+    });
+    for (let i = 1; i < coords.length; i++) {
+      if (!coords[i - 1] || !coords[i]) continue;
+      const a = route.nodeIndexes[i - 1], b = route.nodeIndexes[i];
+      if (a !== b) allowedEdges.add([Math.min(a, b), Math.max(a, b)].join(":"));
+    }
+  });
+  const points = [], toPointIndex = new Map();
+  network.nodes.forEach((node, index) => {
+    const resolved = resolvedByNode.get(index);
+    if (!resolved) return;
+    toPointIndex.set(index, points.length);
+    points.push({ ...resolved, ...node, xw: resolved.xw, yw: resolved.yw, ghost: !!resolved.ghost });
+  });
+  const edges = network.edges.filter(pair => allowedEdges.has(pair.join(":")))
+    .map(pair => pair.map(index => toPointIndex.get(index)));
+  const hopColors = await Promise.all(points.map(async point => {
+    if (point.ghost) return VECTOR_POINT_FALLBACK_COLOR;
+    try { return await resolveCommunityColor(point.id, point.xw, point.yw) || VECTOR_POINT_FALLBACK_COLOR; }
+    catch { return VECTOR_POINT_FALLBACK_COLOR; }
+  }));
+  if (!current()) return false;
+
+  // All asynchronous work is complete before touching the current overlay.
+  removeConnectGroupOverlay({ invalidate: false, resetFraming: false, keepDim: points.length > 0 });
+  if (!points.length) return { nodes: 0, edges: 0, unresolved: network.nodes.length, focused: focusKey };
+  const coords = points.map(point => toLngLat(point.xw, point.yw).toArray()), features = [];
+  edges.forEach(([a, b]) => features.push(...gradientSegmentFeatures(coords[a], coords[b], hopColors[a], hopColors[b])));
+  map.addSource("path", { type: "geojson", data: { type: "FeatureCollection", features } });
+  map.addLayer({ id: "path-line-casing", type: "line", source: "path",
+    paint: { "line-color": "#0a0a0c", "line-width": 5, "line-opacity": 0.5 } });
+  map.addLayer({ id: "path-line", type: "line", source: "path",
+    paint: { "line-color": ["get", "color"], "line-width": 3, "line-blur": 1.5, "line-opacity": 0.9 } });
+  pathMarkers = points.map((point, i) => {
+    const element = document.createElement("div"), dot = document.createElement("div");
+    element.className = "path-node " + (point.endpoint ? "group-endpoint" : "group-intermediate") + (point.ghost ? " ghost" : "");
+    element.title = point.name + (point.ghost ? " (interpolated position)" : "");
+    element.setAttribute("aria-label", element.title);
+    dot.className = "path-dot";
+    if (!point.ghost) { dot.style.background = hopColors[i]; dot.style.borderColor = hopColors[i]; }
+    if (!point.endpoint) {
+      dot.style.width = "6px"; dot.style.height = "6px"; dot.style.borderWidth = "1px";
+      element.style.pointerEvents = "auto"; element.tabIndex = 0;
+    }
+    element.append(dot);
+    if (point.endpoint) {
+      const label = document.createElement("div"); label.className = "path-label";
+      label.textContent = connectGroupResearcherName(point, endpoints);
+      element.append(label);
+    }
+    return markerOnDot(element, dot, toLngLat(point.xw, point.yw));
+  });
+  activePath = { points, hopColors, edges, group: true };
+  pathOverlayIds = points.map(point => stripId(point.id));
+  overlayLabelAdd("path", pathOverlayIds);
+  drawLabels();
+  pathDimActive = true; updateRasterOpacity(); updateVectorPoints();
+  if (!connectGroupLabelListenerInstalled && map.on) {
+    map.on("moveend", layoutConnectGroupLabels); connectGroupLabelListenerInstalled = true;
+  }
+  layoutConnectGroupLabels();
+  if (focusKey === null && connectGroupFramedGeneration !== gen) {
+    const bounds = coords.reduce((b, coord) => b.extend(coord), new maplibregl.LngLatBounds(coords[0], coords[0]));
+    map.fitBounds(bounds, { padding: fitPadding(), maxZoom: 11 });
+    connectGroupFramedGeneration = gen;
+  }
+  return { nodes: points.length, edges: edges.length, unresolved: network.nodes.length - points.length, focused: focusKey };
+}
+// ---- End multi-connect network renderer ----
 
 // ---- R35c: Connect searched in the visitor's browser ----
 // Eric (2026-10-11): Connect must work with no server and no bill. The hosted
@@ -2483,16 +3209,24 @@ async function connectInBrowser(meta, idA, idB, gen) {
 function hopsText(n) { return `${n} hop${n === 1 ? "" : "s"}`; }
 
 connectGo.addEventListener("click", async () => {
-  if (!connectA || !connectB) { setPathStatus("select a starting researcher or institution and a destination researcher"); return; }
+  const selection = validateConnectSelections([connectA, connectB, ...extraConnectRows.map(row => row.selection)]);
+  if (selection.error) { setPathStatus(selection.error); return; }
+  const groupMode = extraConnectRows.length > 0 || connectToKind.value === "institution";
   clearRays();    // a path replaces any coauthor rays from a prior search
   clearPath();    // starting a new Go clears any previous path first
   const gen = ++pathGen;   // this Go owns the overlay from here (clearPath also bumps)
+  pendingG = null;
   const idA = stripId(connectA.id), idB = stripId(connectB.id);
   setPathStatus("searching…");
   // R35c: the browser searches the map's own coauthor graph when the data
   // host has it; the path backend is only a fallback for older data.
   const meta = await pathsMeta();
   if (gen !== pathGen) return;
+  if (groupMode) {
+    if (!meta) { setPathStatus("Group connections need the browser coauthor map. Reload the map and retry."); return; }
+    await connectGroupInBrowser(meta, selection.endpoints, gen);
+    return;
+  }
   if (meta) {
     try { await connectInBrowser(meta, idA, idB, gen); }
     catch { if (gen === pathGen) setPathStatus("Couldn't finish the connection. Check your connection and retry."); }
@@ -2909,8 +3643,9 @@ function repositionActiveOverlays() {
     const { points, hopColors } = activePath;
     const coords = points.map(p => toLngLat(p.xw, p.yw).toArray());
     const features = [];
-    for (let i = 0; i < coords.length - 1; i++) {
-      features.push(...gradientSegmentFeatures(coords[i], coords[i + 1], hopColors[i], hopColors[i + 1]));
+    const edges = activePath.edges || points.slice(1).map((_, i) => [i, i + 1]);
+    for (const [a, b] of edges) {
+      features.push(...gradientSegmentFeatures(coords[a], coords[b], hopColors[a], hopColors[b]));
     }
     const src = map.getSource("path");
     if (src) src.setData({ type: "FeatureCollection", features });
@@ -2980,8 +3715,49 @@ async function wakeBackend(onStatus, isStale = () => false) {
 
 // Applies a= and/or p= from the initial hash, once, at startup. View (zoom/
 // lat/lng) is handled separately in the map "load" handler via jumpTo.
+// Restoring a group uses the same selection controls as a new search. Resolve
+// names before mutating controls, so a user edit always cancels restore.
+async function restoreConnectGroup(ids) {
+  const pending = pendingG;
+  const generation = pathGen;
+  const stale = () => pendingG !== pending || pathGen !== generation || activeA != null || activePath != null;
+  let restoring = false;
+  try {
+    const endpoints = await Promise.all(ids.map(async id => ({ id, name: await fetchConnectStartName(id) })));
+    if (stale()) return;
+    const selection = validateConnectSelections(endpoints);
+    if (selection.error) { pendingG = null; writeHash(); setPathStatus(selection.error); return; }
+    restoring = true;
+    pendingG = null;
+    pendingA = null;
+    pendingP = null;
+    connectPanel.classList.add("open");
+    connectToggle.classList.add("active");
+    // No awaits inside this transaction: each normal select invalidates older work.
+    while (extraConnectRows.length) {
+      const row = extraConnectRows.pop(); row.removed = true; row.lookup.pause(); row.element.remove();
+    }
+    const apply = (endpoint, kind, lookup) => {
+      kind.value = endpoint.id.startsWith("I") ? "institution" : "researcher";
+      lookup.select([normalize(endpoint.name), endpoint.name, endpoint.id, null, null, 0]);
+    };
+    apply(selection.endpoints[0], connectFromKind, connectALookup);
+    apply(selection.endpoints[1], connectToKind, connectBLookup);
+    for (const endpoint of selection.endpoints.slice(2)) {
+      const row = addConnectRow(); apply(endpoint, row.kind, row.lookup);
+    }
+    syncConnectStartUI();
+    syncConnectGroupUI();
+    connectGo.click();
+  } catch (error) {
+    if (restoring || !stale()) setPathStatus(error.message.startsWith("OpenAlex ") || error.message.startsWith("Choose ")
+      ? error.message : "Couldn't restore this group. Retry the selections in Connect.");
+  }
+}
+
 async function restoreFromHash(parsed) {
   if (!parsed) return;
+  if (parsed.g) { await restoreConnectGroup(parsed.g); return; }
   // p= wins outright when both are present: skip the a= highlight/rays
   // entirely rather than placing them and immediately clearing them once
   // the path is drawn (path-clears-highlight rule, applied here without the
@@ -3430,7 +4206,7 @@ function drawRegions() {
   // R44: area names keep clear of the side panels, as author names do (a name
   // under the Connect list showed through it once a step was opened)
   const box = map.getContainer().getBoundingClientRect();
-  document.querySelectorAll("#search, #legend, #display-panel").forEach(el => {
+  document.querySelectorAll("#search, #legend, #display-panel, .path-node.group-endpoint .path-label").forEach(el => {
     const r = el.getBoundingClientRect();
     if (r.width) placed.push({ x: r.left - box.left + r.width / 2, y: r.top - box.top + r.height / 2, w: r.width + 8, h: r.height + 4 });
   });
@@ -6126,7 +6902,9 @@ infoCardCopyBtn.addEventListener("click", async () => {
   // Rays belonging to a DIFFERENT author are dropped too (rays always belong
   // to activeA now -- see the Coauthors handler above); the recipient's a=
   // restore draws this author's own rays.
-  if (activePath || pathEventSource || pendingP) { pendingP = null; clearPath(); }
+  if (activePath || pathEventSource || pendingP || activeG || pendingG || activeConnectGroup) {
+    pendingP = null; pendingG = null; clearPath();
+  }
   if (activeA !== bareId) clearRays();
   setSearchHighlight(bareId, name, xw, yw);   // sets activeA and writes the hash, like a search select
   const url = location.href;
@@ -6627,7 +7405,7 @@ function closeShare() {
 }
 document.getElementById("connect-share").addEventListener("click", async ev => {
   const btn = ev.currentTarget;
-  if (!activePath || btn.disabled) return;
+  if (!activePath || activePath.group || btn.disabled) return;
   btn.disabled = true; btn.textContent = "Making image…";
   try {
     const { blob, summary } = await renderShareCard();
@@ -6743,6 +7521,11 @@ document.addEventListener("keydown", ev => {
     } else if (connectBLookup.isOpen()) {
       ev.preventDefault(); ev.stopPropagation();
       connectBLookup.escape();
+    } else if (extraConnectRows.some(row => row.lookup.isOpen() ||
+        (document.activeElement === row.input && (row.selection || row.input.value)))) {
+      ev.preventDefault(); ev.stopPropagation();
+      extraConnectRows.find(row => row.lookup.isOpen() ||
+        (document.activeElement === row.input && (row.selection || row.input.value))).lookup.escape();
     } else if (document.activeElement === connectAInput && (connectA || connectAInput.value)) {
       // Dropdown-closed Escape in a Connect input still clears a selected
       // author (or leftover text), matching the pre-Task-4 per-input
@@ -6752,6 +7535,10 @@ document.addEventListener("keydown", ev => {
     } else if (document.activeElement === connectBInput && (connectB || connectBInput.value)) {
       ev.preventDefault(); ev.stopPropagation();
       connectBLookup.escape();
+    } else if (pendingG || activeConnectGroup) {
+      ev.preventDefault(); ev.stopPropagation();
+      if (activeConnectGroup?.running) connectStop.click();
+      else { pendingG = null; clearPath(); }
     } else if (activeA || rayMarkers.length || map.getSource("coauthor-rays")) {
       // R32: the info card's Coauthors button now sets activeA too (see its
       // handler), so rays always come with a highlight; the ray checks stay

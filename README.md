@@ -35,7 +35,17 @@ Lall to Amy Dittmar, one shared paper per step.*
   two authors that prefers routes avoiding likely name mix-ups in OpenAlex.
 - Institution-to-researcher connections using a bounded pool of researchers
   with an OpenAlex last-known affiliation, searched over the same map graph.
-- Shareable URLs that encode view, active search, and active path.
+- Add up to eight researchers or institutions with the + button, then search
+  every pair (at most 28 searches, processed sequentially). Institution targets
+  use the same bounded candidate pool as institution starts. Group searches
+  exclude flagged intermediate profiles and suspect links without falling back
+  to them; this does not establish that every remaining profile is one person.
+  The existing map draws shared researchers and links once, labels the
+  endpoints, and lets users select a pair to inspect its steps and papers.
+  Stop preserves completed results; unavailable, bounded, and failed searches
+  retain distinct statuses. The existing map controls and positions are used.
+- Shareable URLs encode the view, active search, path, or group selections.
+  Group links retain endpoint IDs, not a frozen set of live institution members.
 - Display settings: brightness, contrast, saturation, label density, author
   label modes (normal / faint / hover-only), point rendering modes (raster,
   vector, or both), and a switch for the faint dust of loosely connected
