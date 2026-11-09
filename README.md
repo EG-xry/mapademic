@@ -321,7 +321,18 @@ with many trial sites. Also flagged: common-name profiles that OpenAlex has
 broken up since the snapshot, and records that are not people
 (organizations, teams, typesetters, placeholders). Connect routes around
 flagged profiles under the same one-step rule, and their cards carry a note.
-The inputs come from the analysis in `paper/`.
+The site's inputs come from the paper's analysis of the 15-work network, which
+is not part of this repository.
+
+### The paper's network
+
+The paper *The shape of science: distances, clusters, hubs and an uncited
+periphery in the coauthorship network of 19.8 million researchers* (Gao, Wen
+and Chen) studies a larger network built with this pipeline from the same
+snapshot: the 19,848,920 author records with at least five qualifying works
+(`pipeline/filter_authors.py --min-works 5`, the default) and their 525,109,095
+coauthor links from works with at most 50 authors. The map shows the 15-work
+core, 8,396,458 of these researchers.
 
 ### Publishing data (free tier)
 
@@ -407,7 +418,7 @@ Run frontend regression tests with Node.js 18+:
 Mapademic was created and is maintained by
 [Eric Gao](https://github.com/EG-xry), a student at UC San Diego.
 
-[Bruce Wen](https://github.com/owlsowo) contributed Connect from an
+[Boming Wen](https://github.com/owlsowo) contributed Connect from an
 institution and the optional personal OpenAlex API key (pull requests #1 and #2).
 
 [Xingrui Chen](https://github.com/riptideiv) wrote the early implementation of
