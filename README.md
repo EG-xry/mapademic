@@ -332,7 +332,9 @@ and Chen) studies a larger network built with this pipeline from the same
 snapshot: the 19,848,920 author records with at least five qualifying works
 (`pipeline/filter_authors.py --min-works 5`, the default) and their 525,109,095
 coauthor links from works with at most 50 authors. The map shows the 15-work
-core, 8,396,458 of these researchers.
+core, 8,396,458 of these researchers. The network, its communities, flags and
+the candidate pairs that rebuild the paper's repaired network are on Zenodo
+under CC0 1.0: [10.5281/zenodo.23681522](https://doi.org/10.5281/zenodo.23681522).
 
 ### Publishing data (free tier)
 
