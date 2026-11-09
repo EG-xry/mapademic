@@ -418,7 +418,7 @@ Run frontend regression tests with Node.js 18+:
 Mapademic was created and is maintained by
 [Eric Gao](https://github.com/EG-xry), a student at UC San Diego.
 
-[Boming Wen](https://github.com/owlsowo) contributed Connect from an
+[Bruce Wen](https://github.com/owlsowo) contributed Connect from an
 institution and the optional personal OpenAlex API key (pull requests #1 and #2).
 
 [Xingrui Chen](https://github.com/riptideiv) wrote the early implementation of
