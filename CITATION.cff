@@ -5,7 +5,11 @@ title: "Mapademic: an interactive map of researchers placed by coauthorship"
 abstract: >-
   A zoomable map of the 8.4 million researchers in OpenAlex with 15 or more
   works, placed by who they write papers with, and an in-browser search for
-  the shortest chain of coauthors between any two of them.
+  the shortest chain of coauthors between any two of them. The repository
+  also holds the analysis code of the paper "The shape of science"
+  (paper/analysis/), which studies the coauthorship network of the 19.8
+  million OpenAlex author profiles with at least five qualifying works,
+  deposited at 10.5281/zenodo.23681522.
 authors:
   - given-names: Zhou Quan Eric
     family-names: Gao
@@ -23,8 +27,8 @@ doi: 10.5281/zenodo.23629696
 repository-code: "https://github.com/EG-xry/mapademic"
 url: "https://mapademic.app"
 license: MIT
-version: 1.0.1
-date-released: "2026-10-24"
+version: 1.1.0
+date-released: "2026-11-08"
 keywords:
   - science of science
   - coauthorship network

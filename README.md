@@ -321,8 +321,8 @@ with many trial sites. Also flagged: common-name profiles that OpenAlex has
 broken up since the snapshot, and records that are not people
 (organizations, teams, typesetters, placeholders). Connect routes around
 flagged profiles under the same one-step rule, and their cards carry a note.
-The site's inputs come from the paper's analysis of the 15-work network, which
-is not part of this repository.
+The site's inputs come from the paper's analysis of the 15-work network, whose
+outputs are not part of this repository.
 
 ### The paper's network
 
@@ -335,6 +335,8 @@ coauthor links from works with at most 50 authors. The map shows the 15-work
 core, 8,396,458 of these researchers. The network, its communities, flags and
 the candidate pairs that rebuild the paper's repaired network are on Zenodo
 under CC0 1.0: [10.5281/zenodo.23681522](https://doi.org/10.5281/zenodo.23681522).
+The paper's analysis scripts, reproduction notes and tests are in
+[paper/analysis](paper/analysis/README.md).
 
 ### Publishing data (free tier)
 
