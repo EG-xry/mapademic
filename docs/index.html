@@ -905,7 +905,7 @@ function parseHash() {
     if (key === "a" && val) out.a = val;
     if (key === "g" && val) {
       const ids = val.split(",").map(stripId);
-      if (ids.length >= 2 && ids.length <= 8 && ids.every(id => /^[AI]\d+$/.test(id)) &&
+      if (ids.length >= 2 && ids.length <= 8 && ids.every(id => /^[AMI]\d+$/.test(id)) &&
           new Set(ids).size === ids.length) out.g = ids;
     }
     if (key === "p" && val) {
@@ -1679,7 +1679,7 @@ function multiConnectCheck(isStale) {
 }
 async function resolveConnectEndpoint(meta, endpoint, isStale = () => false) {
   multiConnectCheck(isStale);
-  if (!endpoint || !/^[AI]\d+$/.test(stripId(endpoint.id || ''))) {
+  if (!endpoint || !/^[AMI]\d+$/.test(stripId(endpoint.id || ''))) {
     throw new Error('Choose a researcher or institution from the search results.');
   }
   const selected = { ...endpoint, id: stripId(endpoint.id) };
@@ -1813,7 +1813,7 @@ async function searchConnectGroup(meta, endpoints, { isStale = () => false, onPr
             if (!Array.isArray(path) || !path.length) throw new Error('The graph returned an invalid path. Retry the search.');
             const ids = await pathAuthorIds(meta, path);
             multiConnectCheck(isStale);
-            if (ids.length !== path.length || ids.some(id => !/^A\d+$/.test(id))) {
+            if (ids.length !== path.length || ids.some(id => !/^[AM]\d+$/.test(id))) {
               throw new Error("Couldn't read this graph's researcher IDs. Retry the search.");
             }
             progress('evidence', source, target);
@@ -1887,7 +1887,7 @@ function validateConnectSelections(selections) {
     const selection = selections[i];
     if (!selection) return { error: `Select a researcher or institution for entry ${i + 1}, or remove that entry.` };
     const id = stripId(selection.id);
-    if (!/^[AI]\d+$/.test(id)) return { error: `Choose entry ${i + 1} from the researcher or institution results.` };
+    if (!/^[AMI]\d+$/.test(id)) return { error: `Choose entry ${i + 1} from the researcher or institution results.` };
     if (seen.has(id)) return { error: `${selection.name} is already selected. Choose a different entry.` };
     seen.add(id);
     endpoints.push({ ...selection, id, kind: id.startsWith("I") ? "institution" : "researcher" });
@@ -2426,7 +2426,7 @@ function drawResolvedPath(points, hopColors, hops, idA, idB, { writeUrl = true }
 // Root owns activeConnectGroup, pathGen, pair searches and result-card UI.
 // Keep these markers when embedding this fragment: tests extract this block.
 function connectGroupBareId(value) {
-  const match = /^(?:https?:\/\/(?:www\.)?openalex\.org\/)?(A\d+)$/.exec(String(value ?? ""));
+  const match = /^(?:https?:\/\/(?:www\.)?openalex\.org\/)?([AM]\d+)$/.exec(String(value ?? ""));
   return match ? match[1] : null;
 }
 

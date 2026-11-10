@@ -14,7 +14,7 @@ test('all visible selections are required and duplicates normalize complete Open
  assert.match(c.validateConnectSelections([researcher('A1'),null]).error,/select/i);
  assert.match(c.validateConnectSelections([researcher('A1'),researcher('A2'),null]).error,/3/);
  assert.match(c.validateConnectSelections([researcher('A1'),researcher('https://openalex.org/A1')]).error,/already/i);
- assert.equal(c.validateConnectSelections([researcher('A1'),researcher('A2'),researcher('I1')]).error,null);
+ assert.equal(c.validateConnectSelections([researcher('A1'),researcher('M1'),researcher('I1')]).error,null);
  assert.match(c.validateConnectSelections(Array.from({length:9},(_,i)=>researcher('A'+i))).error,/8/);
 });
 test('selection validation rejects non-author/non-institution IDs without changing caller objects',()=>{
@@ -30,7 +30,7 @@ function parse(hash) {
  return JSON.parse(JSON.stringify(c.parseHash()));
 }
 test('group links accept two to eight mixed endpoints and reject malformed or duplicate groups',()=>{
- assert.deepEqual(parse('#1/0/0&g=A1,I2,A3').g,['A1','I2','A3']);
+ assert.deepEqual(parse('#1/0/0&g=A1,I2,M3').g,['A1','I2','M3']);
  for(const ids of ['A1','A1,A1','A1,W2','A1,garbage','A1,I2,','A1,A2,A3,A4,A5,A6,A7,A8,A9']) assert.equal(parse('#1/0/0&g='+ids).g,undefined);
  assert.deepEqual(parse('#1/0/0&p=I1,A2').p,['I1','A2']);
 });
