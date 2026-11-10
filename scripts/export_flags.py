@@ -1,6 +1,7 @@
 """Write docs/flags-<release>.json: profiles the site warns about and Connect routes around (R46).
 
-Three kinds, from the paper's analysis of the 2026-09-23 snapshot (paper/analysis, outputs in paper/cache):
+Three kinds, from the paper's analysis of the map's 15-work network (paper/analysis with NET=min15, outputs in
+paper/cache_min15):
   merged     25+ institutions in a single year in OpenAlex's own affiliation list (a6_affiliations.py,
              the 50,000 highest-degree profiles), a common name (200+ OpenAlex records share its initial
              and surname, pipeline/identity.py) and a common full name (10+ mapped profiles carry it):
@@ -108,7 +109,7 @@ def build(release: str, cache: Path) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--release", default="2026-09-23")
-    ap.add_argument("--cache", type=Path, default=ROOT / "paper" / "cache")
+    ap.add_argument("--cache", type=Path, default=ROOT / "paper" / "cache_min15")
     args = ap.parse_args()
     out = build(args.release, args.cache)
     path = ROOT / "docs" / f"flags-{args.release}.json"
