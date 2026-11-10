@@ -17,6 +17,8 @@ grey rather than each getting its own tiny per-community jitter, so the
 tail reads as a single consistent dust color (close to the viewer's
 #565660).
 """
+
+from pipeline.sql import sql_literal
 import argparse
 import json
 import time
@@ -74,7 +76,7 @@ def export_points(web_path: str, out_dir: Path, sample: int | None = None) -> di
     cols = con.execute(
         f"""SELECT CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw,
                    cited_by_count, {group_key_expr(con, web_path)} AS gkey, community
-            FROM read_parquet('{web_path}')
+            FROM read_parquet({sql_literal(web_path)})
             WHERE {not_dust_sql(con, web_path)}
             ORDER BY cited_by_count DESC, id
             {limit_clause}"""
@@ -160,14 +162,14 @@ def _write_dust_bin(con, web_path: str, path: Path, pal: dict) -> int:
     and near-empty communities), which tiles and the point cloud leave out,
     for the viewer's switchable dust layer. Same 8-byte records as
     communities/<c>.bin."""
-    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{web_path}')").fetchall()}
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({sql_literal(web_path)})").fetchall()}
     if "is_dust" not in cols:
         path.unlink(missing_ok=True)
         return 0
     d = con.execute(
         f"""SELECT CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw, cited_by_count,
                    {group_key_expr(con, web_path)} AS gkey
-            FROM read_parquet('{web_path}') WHERE is_dust
+            FROM read_parquet({sql_literal(web_path)}) WHERE is_dust
             ORDER BY cited_by_count DESC, id"""
     ).fetchnumpy()
     n = len(d["xw"])

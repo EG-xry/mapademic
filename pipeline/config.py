@@ -22,6 +22,9 @@ def authors_glob() -> str:
 
 def works_glob() -> str:
     """The works extract: one file per snapshot file, grouped by partition."""
+    repaired = data_dir() / "works.parquet"
+    if repaired.exists():
+        return str(repaired)
     return str(data_dir() / "works_authorships" / "*" / "*.parquet")
 
 

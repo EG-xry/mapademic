@@ -11,6 +11,7 @@ from pipeline import sizing
 from pipeline.config import apply_resource_limits, data_dir
 from pipeline.palette import (build_group_palette, community_rgb, group_key, group_key_expr,
                               load_community_stats, not_dust_sql, sparse_communities)
+from pipeline.sql import sql_literal
 
 MAXZ = 10
 TILE = 256
@@ -31,7 +32,7 @@ def aggregate_maxz(webcoords_path: str, out_path: str, con) -> int:
                 SELECT least({PIX - 1}, CAST(floor(CAST(xw AS DOUBLE) * {PIX}) AS INT)) AS px,
                        least({PIX - 1}, CAST(floor(CAST(yw AS DOUBLE) * {PIX}) AS INT)) AS py,
                        {gkey} AS gkey
-                FROM read_parquet('{webcoords_path}') WHERE {not_dust_sql(con, webcoords_path)}
+                FROM read_parquet({sql_literal(webcoords_path)}) WHERE {not_dust_sql(con, webcoords_path)}
             ),
             grouped AS (
                 SELECT px, py, gkey, count(*) AS c
@@ -46,7 +47,7 @@ def aggregate_maxz(webcoords_path: str, out_path: str, con) -> int:
             )
             SELECT px, py, CAST(cnt AS BIGINT) AS cnt, gkey
             FROM ranked WHERE rn = 1
-        ) TO '{out_path}' (FORMAT PARQUET)
+        ) TO {sql_literal(out_path)} (FORMAT PARQUET)
         """
     ).fetchone()[0]
 
@@ -54,7 +55,7 @@ def aggregate_maxz(webcoords_path: str, out_path: str, con) -> int:
 def load_level9(pixels_path: str, palette: dict[int, tuple]) -> dict:
     con = duckdb.connect()
     t = con.execute(
-        f"SELECT px, py, cnt, gkey FROM read_parquet('{pixels_path}')"
+        f"SELECT px, py, cnt, gkey FROM read_parquet({sql_literal(pixels_path)})"
         " ORDER BY py, px").fetchnumpy()
     comm = t["gkey"].astype(np.int64)
     uniq, inv = np.unique(comm, return_inverse=True)
@@ -73,7 +74,7 @@ def load_markers(con, web_path: str, palette: dict) -> dict:
     t = con.execute(
         f"""SELECT CAST(xw AS DOUBLE) AS xw, CAST(yw AS DOUBLE) AS yw,
                    cited_by_count, {group_key_expr(con, web_path)} AS gkey
-            FROM read_parquet('{web_path}') WHERE {not_dust_sql(con, web_path)}"""
+            FROM read_parquet({sql_literal(web_path)}) WHERE {not_dust_sql(con, web_path)}"""
     ).fetchnumpy()
     st = sizing.size_t(t["cited_by_count"])
     keep = st >= t_min
@@ -175,7 +176,7 @@ def legend_inputs(con, web_path: str, stats) -> tuple[dict, set[int], dict]:
     faded = sparse_communities(con, web_path)
     subs: dict[int, list] = {}
     if "sub" in group_key_expr(con, web_path):
-        for c, s_, m in con.execute(f"""SELECT community, sub, count(*) FROM read_parquet('{web_path}')
+        for c, s_, m in con.execute(f"""SELECT community, sub, count(*) FROM read_parquet({sql_literal(web_path)})
                                         WHERE sub >= 0 GROUP BY 1, 2 ORDER BY 1, 2""").fetchall():
             subs.setdefault(int(c), []).append((int(s_), int(m)))
     return pal, faded, subs
@@ -310,7 +311,7 @@ def run(args) -> int:
     )
     if Path(pixels).exists() and not stale:
         cols = {r[0] for r in duckdb.connect().execute(
-            f"DESCRIBE SELECT * FROM read_parquet('{pixels}')").fetchall()}
+            f"DESCRIBE SELECT * FROM read_parquet({sql_literal(pixels)})").fetchall()}
         if "field" in cols or "gkey" not in cols:   # cached before Task 4 / sub-groups
             stale = True
     if args.force_aggregate or not Path(pixels).exists() or stale:

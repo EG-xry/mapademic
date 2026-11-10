@@ -9,6 +9,7 @@ import pyarrow as pa
 
 from pipeline.config import apply_resource_limits, data_dir, spill_dir, works_glob
 from pipeline.works import check_extract_schema, id_key_sql, qualifying_works_sql
+from pipeline.sql import sql_literal
 
 # Spec-locked: works with more than 50 authors are excluded from edge building
 # (a 3,000-author CERN paper would otherwise contribute ~4.5M clique edges).
@@ -31,7 +32,7 @@ BATCH_ROWS = 2_000_000
 def _node_keys(con, nodes_path: str) -> np.ndarray:
     """Sorted numeric keys of the selected nodes; position = node index."""
     keys = con.execute(
-        f"SELECT k FROM (SELECT {id_key_sql('id')} AS k FROM read_parquet('{nodes_path}')) "
+        f"SELECT k FROM (SELECT {id_key_sql('id', repaired=True)} AS k FROM read_parquet({sql_literal(nodes_path)})) "
         "WHERE k IS NOT NULL ORDER BY k"
     ).fetchnumpy()["k"]
     return np.asarray(keys, dtype=np.int64)
@@ -95,16 +96,18 @@ def build_edges(
 ) -> int:
     con = duckdb.connect()
     apply_resource_limits(con)
-    con.execute(f"SET temp_directory='{spill_dir(Path(out_path).parent)}'")
+    con.execute(f"SET temp_directory={sql_literal(spill_dir(Path(out_path).parent))}")
     con.execute("SET preserve_insertion_order=false")
     check_extract_schema(con, works_glob)
+    columns = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({sql_literal(works_glob)})").fetchall()}
     # A release-pinned extract holds each work once (checked in seconds); the
     # dedupe window, which materializes every work, runs only if it doesn't.
     dupes = con.execute(
-        f"SELECT count(*) - count(DISTINCT work_id) FROM read_parquet('{works_glob}')"
+        f"SELECT count(*) - count(DISTINCT work_id) FROM read_parquet({sql_literal(works_glob)})"
     ).fetchone()[0]
     works_sql = qualifying_works_sql(works_glob, all_works, min_authors=2,
-                                     max_authors=max_authors, dedupe=dupes > 0)
+                                     max_authors=max_authors, dedupe=dupes > 0,
+                                     author_column="edge_author_ids" if "edge_author_ids" in columns else "author_ids")
     rows = _kept_rows(con, works_sql, _node_keys(con, nodes_path))
     total = sum(len(m) * kk * (kk - 1) // 2 for kk, (m, _) in rows.items())
     buckets = buckets or max(1, math.ceil(total / PAIRS_PER_BUCKET))
@@ -118,9 +121,10 @@ def build_edges(
             if pairs is None:
                 continue
             con.register("pairs", pairs)
+            part_path = parts_dir / f"part_{b:04d}.parquet"
             con.execute(
                 f"COPY (SELECT s, d, sum(w) AS weight FROM pairs GROUP BY s, d) "
-                f"TO '{parts_dir / f'part_{b:04d}.parquet'}' (FORMAT PARQUET)"
+                f"TO {sql_literal(part_path)} (FORMAT PARQUET)"
             )
             con.unregister("pairs")
             del pairs
@@ -129,10 +133,10 @@ def build_edges(
         con.execute(
             f"""CREATE TEMP TABLE node_idx AS
                 SELECT id, CAST(row_number() OVER (ORDER BY k) - 1 AS INTEGER) AS idx
-                FROM (SELECT id, {id_key_sql('id')} AS k FROM read_parquet('{nodes_path}'))
+                FROM (SELECT id, {id_key_sql('id', repaired=True)} AS k FROM read_parquet({sql_literal(nodes_path)}))
                 WHERE k IS NOT NULL"""
         )
-        src = (f"read_parquet('{parts_dir}/*.parquet')" if any(parts_dir.iterdir()) else
+        src = (f"read_parquet({sql_literal(parts_dir / '*.parquet')})" if any(parts_dir.iterdir()) else
                "(SELECT 0::INTEGER AS s, 0::INTEGER AS d, 0.0::DOUBLE AS weight LIMIT 0)")
         return con.execute(
             f"""COPY (
@@ -140,7 +144,7 @@ def build_edges(
                     FROM {src} p
                     JOIN node_idx ns ON ns.idx = p.s
                     JOIN node_idx nd ON nd.idx = p.d
-                ) TO '{out_path}' (FORMAT PARQUET)"""
+                ) TO {sql_literal(out_path)} (FORMAT PARQUET)"""
         ).fetchone()[0]
     finally:
         shutil.rmtree(parts_dir, ignore_errors=True)

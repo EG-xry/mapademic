@@ -3,6 +3,8 @@ import json
 
 import duckdb
 import pyarrow.fs as pafs
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from pipeline import extract_works
@@ -61,6 +63,40 @@ def test_existing_checkpoint_is_skipped(tmp_path):
     out = tmp_path / "out.parquet"
     assert extract_one(src, out) is True
     assert extract_one(src, out) is False
+
+
+def test_extract_retains_deposited_authorship_evidence_not_profile_orcid(tmp_path):
+    src = tmp_path / "enriched.parquet"
+    pq.write_table(pa.Table.from_pylist([{
+        "id": "https://openalex.org/W1", "authors_count": 2, "publication_year": 2022,
+        "type": "article", "is_xpac": False, "is_paratext": False, "is_retracted": False,
+        "cited_by_count": 5, "doi": "https://doi.org/10.1234/test", "title": "A real collaboration",
+        "primary_topic": {"field": {"id": "https://openalex.org/fields/33"}},
+        "authorships": [{"author": {"id": A[1], "orcid": "wrong-profile-value"},
+                         "raw_author_name": "Paul Miller", "raw_orcid": "0000-0003-0443-3957",
+                         "institutions": [{"id": "https://openalex.org/I1"}]},
+                        {"author": {"id": A[2], "orcid": None}, "raw_author_name": "Another Person",
+                         "raw_orcid": None, "institutions": []}],
+    }]), src)
+    out = tmp_path / "out.parquet"
+    extract_works.extract_file(duckdb.connect(), pafs.LocalFileSystem(), str(src), out, 1)
+    row = pq.read_table(out).to_pylist()[0]
+    assert row["doi"] == "https://doi.org/10.1234/test"
+    assert row["title"] == "A real collaboration"
+    assert row["authorship_evidence"][0] == {
+        "author_id": 1, "raw_name": "Paul Miller", "raw_orcid": "0000-0003-0443-3957",
+        "institution_ids": ["https://openalex.org/I1"], "field_id": "https://openalex.org/fields/33",
+        "institution_names": [], "field_name": None,
+    }
+    assert row["authorship_evidence"][1]["raw_orcid"] is None
+
+
+def test_sparse_snapshot_still_extracts_without_inventing_identity_evidence(tmp_path):
+    src = make_src(tmp_path)
+    out = tmp_path / "out.parquet"
+    extract_one(src, out)
+    evidence = pq.read_table(out).to_pylist()[0]["authorship_evidence"]
+    assert all(e["raw_name"] is None and e["raw_orcid"] is None for e in evidence)
 
 
 def test_row_count_mismatch_fails_without_a_checkpoint(tmp_path):

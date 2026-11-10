@@ -138,6 +138,39 @@
                   border-radius: 6px; padding: 6px 10px; font: 12px system-ui;
                   cursor: pointer; white-space: nowrap; }
     #share-btn:hover { border-color: #7fae8e; }
+    .identifier-open { display: block; border: 0; background: #0b0b0bd9; color: #a9cbb5;
+                       padding: 5px 8px; border-radius: 4px; font: 11px/1.4 system-ui;
+                       cursor: pointer; text-align: left; margin-top: 4px; }
+    .identifier-open:hover { text-decoration: underline; }
+    .identifier-open[hidden] { display: none; }
+    #identifier-dialog { color-scheme: dark; color: #ddd; background: #11161b;
+                         border: 1px solid #42564b; border-radius: 12px; padding: 20px;
+                         width: min(520px, calc(100vw - 56px)); max-height: calc(100dvh - 64px);
+                         overflow-y: auto; font: 13px/1.5 system-ui; }
+    #identifier-dialog::backdrop { background: #000a; }
+    #identifier-dialog h2 { font-size: 18px; margin: 0; }
+    #identifier-dialog .identifier-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    #identifier-dialog button, #identifier-dialog select, #identifier-dialog input {
+      color: #ddd; background: #19221e; border: 1px solid #526b5c; border-radius: 5px;
+      padding: 8px 10px; font: inherit; }
+    #identifier-dialog button { cursor: pointer; }
+    #identifier-dialog button:disabled { opacity: .55; cursor: default; }
+    #identifier-dialog :focus-visible, .identifier-open:focus-visible { outline: 2px solid #a6dfbb; outline-offset: 3px; }
+    #identifier-dialog label { display: block; margin: 12px 0 4px; }
+    #identifier-dialog input { box-sizing: border-box; width: 100%; font-size: 16px; }
+    #identifier-dialog .identifier-submit { margin-top: 12px; }
+    #identifier-dialog a { color: #a6dfbb; }
+    #identifier-status { color: #c7d9ce; margin: 12px 0; overflow-wrap: anywhere; }
+    #identifier-results { display: grid; gap: 10px; }
+    .identifier-result { border: 1px solid #34433b; padding: 12px; border-radius: 7px; overflow-wrap: anywhere; }
+    .identifier-result p { margin: 4px 0 8px; color: #aab8af; }
+    .identifier-result a { display: inline-block; margin: 0 12px 8px 0; }
+    .identifier-result .identity-evidence { border-left: 3px solid #b5ad78; padding-left: 8px; }
+    .identifier-result .identity-evidence.corroborated { border-color: #87c69b; }
+    .identifier-result .identity-evidence.conflict { border-color: #df9d8b; }
+    .selection-evidence { margin: 4px 0; padding: 6px 8px; color: #c6c9b7; background: #111c;
+                          font: 11px/1.4 system-ui; border-radius: 4px; }
+    .selection-evidence:empty { display: none; }
     #connect-panel { margin-top: 6px; display: none; flex-direction: column; gap: 6px;
                      max-height: calc(100dvh - 60px); overflow-y: auto; }
     #connect-panel > * { flex-shrink: 0; }
@@ -400,6 +433,7 @@
     <button id="connect-toggle" type="button">Connect</button>
     <button id="share-btn" type="button" aria-label="Copy share link">Share</button>
   </div>
+  <button id="search-identifier" class="identifier-open" type="button" aria-haspopup="dialog">Can't find someone? Try DOI or ORCID</button>
   <div id="search-dropdown"></div>
   <div id="search-status"></div>
   <div id="connect-panel">
@@ -409,11 +443,15 @@
       </select></label>
       <input id="connect-a-input" type="text" placeholder="Author A…" autocomplete="off" aria-label="Starting researcher">
       <div id="connect-a-dropdown" class="connect-dropdown"></div>
+      <button id="connect-a-identifier" class="identifier-open" type="button" aria-haspopup="dialog">Find researcher by DOI or ORCID</button>
+      <p id="connect-a-evidence" class="selection-evidence"></p>
     </div>
     <div class="connect-row">
       <label for="connect-b-input">To researcher</label>
       <input id="connect-b-input" type="text" placeholder="Author B…" autocomplete="off">
       <div id="connect-b-dropdown" class="connect-dropdown"></div>
+      <button id="connect-b-identifier" class="identifier-open" type="button" aria-haspopup="dialog">Find researcher by DOI or ORCID</button>
+      <p id="connect-b-evidence" class="selection-evidence"></p>
     </div>
     <p id="connect-scope" hidden>Uses up to 50 most-cited researchers with 15+ works and a last-known
       OpenAlex affiliation. Searches mapped candidates only; affiliations may not be current.</p>
@@ -423,10 +461,31 @@
       <button id="connect-share" type="button" hidden>Share chain</button>
     </div>
     <div id="connect-status" role="status" aria-live="polite"></div>
+    <p class="selection-evidence">Connections follow this map release’s coauthor graph. Identity assignments can be incomplete; check the papers shown for each step.</p>
     <p id="connect-affiliation"></p>
     <div id="path-hops"></div>
   </div>
 </div>
+<dialog id="identifier-dialog" aria-labelledby="identifier-title" aria-describedby="identifier-help">
+  <div class="identifier-head">
+    <h2 id="identifier-title">Find a researcher by identifier</h2>
+    <button id="identifier-close" type="button" aria-label="Close identifier lookup">&times;</button>
+  </div>
+  <p id="identifier-help">Duplicate names or no match? Use an ORCID iD, or a paper's DOI and choose its author.</p>
+  <form id="identifier-form">
+    <label for="identifier-kind">Look up by</label>
+    <select id="identifier-kind"><option value="orcid">ORCID iD</option><option value="doi">Paper DOI</option></select>
+    <label id="identifier-query-label" for="identifier-query">ORCID iD or URL</label>
+    <input id="identifier-query" type="text" placeholder="0000-0002-1825-0097" autocomplete="off" spellcheck="false" required>
+    <label id="identifier-check-label" for="identifier-check">Known publication DOI (optional cross-check)</label>
+    <input id="identifier-check" type="text" placeholder="DOI of a publication you know is theirs" autocomplete="off" spellcheck="false" aria-describedby="identifier-check-help">
+    <p id="identifier-check-help">Adding both identifiers checks the publication's authorship evidence in Crossref and the public ORCID record. Missing evidence stays unconfirmed.</p>
+    <button class="identifier-submit" type="submit">Find researcher</button>
+  </form>
+  <p id="identifier-status" role="status" aria-live="polite" aria-atomic="true"></p>
+  <div id="identifier-results"></div>
+  <p>Check the publication and affiliation before choosing. Source metadata can still contain incorrect identity links.</p>
+</dialog>
 <button id="help-btn" type="button" aria-label="Help">?</button>
 <details id="legend"><summary>Legend</summary><div id="legend-isolate-pill"></div><div id="legend-rows"></div></details>
 <div id="help-overlay" role="dialog" aria-modal="true" aria-labelledby="help-title">
@@ -469,6 +528,11 @@
             coauthorships, colored by community membership - a ray's
             gradient means it crosses between fields. Rays work standalone,
             straight from OpenAlex, with no companion server required.</li>
+          <li>For duplicate names or missing search results, choose DOI or ORCID
+            below a researcher search. A DOI lists the paper's authors; an ORCID
+            lists matching OpenAlex profiles. Check affiliations and identifiers
+            before choosing. Only profiles included in this map can be placed;
+            identifier lookup cannot repair merged OpenAlex profiles.</li>
           <li>Connect finds the shortest coauthor path between two
             researchers, searched right in your browser over the map's whole
             coauthor network, colored the same way hop to hop, with the paper
@@ -842,7 +906,7 @@ function parseHash() {
     if (key === "a" && val) out.a = val;
     if (key === "p" && val) {
       const ids = val.split(",").map(stripId);
-      if (ids.length === 2 && /^[AI]\d+$/.test(ids[0]) && /^A\d+$/.test(ids[1])) out.p = ids;
+      if (ids.length === 2 && /^[AMI]\d+$/.test(ids[0]) && /^[AM]\d+$/.test(ids[1])) out.p = ids;
     }
   }
   return out;
@@ -1322,6 +1386,374 @@ function setSearchHighlight(id, name, xw, yw) {
   highlightLegendForCoords(activeA, xw, yw);
 }
 
+// ---- Identifier lookup helpers ----
+// Resolve identifiers only on explicit submit, through the existing OpenAlex
+// gateway. Never fall back to a name: that would reintroduce the ambiguity.
+function parseResearchIdentifier(value, kind) {
+  let text = value.trim();
+  if (/^https?:\/\//i.test(text)) {
+    let url;
+    try { url = new URL(text); } catch { throw new Error("Enter a valid identifier URL."); }
+    const hosts = kind === "doi" ? ["doi.org", "dx.doi.org"] : ["orcid.org", "www.orcid.org"];
+    if (!hosts.includes(url.hostname.toLowerCase()) || url.username || url.password || url.port) {
+      throw new Error(kind === "doi" ? "Use a DOI or a doi.org URL." : "Use an ORCID iD or an orcid.org URL.");
+    }
+    try { text = decodeURIComponent(url.pathname.slice(1)); }
+    catch { throw new Error("The identifier URL contains invalid encoding."); }
+  }
+  if (kind === "doi") {
+    text = text.replace(/^doi:\s*/i, "");
+    if (!/^10\.\d{4,9}\/\S+$/i.test(text)) throw new Error("Enter a DOI such as 10.1016/j.orbis.2022.02.007.");
+    return text;
+  }
+  text = text.replace(/^orcid:\s*/i, "").toUpperCase();
+  if (/^\d{15}[\dX]$/.test(text)) text = text.match(/.{4}/g).join("-");
+  if (!/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(text)) {
+    throw new Error("Enter a 16-character ORCID iD such as 0000-0002-1825-0097.");
+  }
+  const digits = text.replace(/-/g, "");
+  let total = 0;
+  for (const digit of digits.slice(0, -1)) total = (total + Number(digit)) * 2;
+  const check = (12 - total % 11) % 11;
+  if (digits.at(-1) !== (check === 10 ? "X" : String(check))) {
+    throw new Error("The ORCID check digit is invalid. Check the iD and try again.");
+  }
+  return text;
+}
+function identifierAuthorId(value) {
+  const match = /^(?:https?:\/\/openalex\.org\/)?(A\d+)$/.exec(value || "");
+  return match ? match[1] : null;
+}
+function identifierCandidate(author, byline = null) {
+  const institutions = byline ? byline.institutions : author.last_known_institutions;
+  const affiliation = (institutions || []).map(i => i.display_name).filter(Boolean).join("; ") ||
+    (byline && (byline.raw_affiliation_strings || []).join("; ")) || "Affiliation unavailable";
+  return {
+    id: identifierAuthorId(author.id),
+    name: byline && byline.raw_author_name || author.display_name || "Unnamed author",
+    profileName: author.display_name || "",
+    orcid: author.orcid || null,
+    paperOrcid: byline && byline.raw_orcid || null,
+    affiliation,
+    citations: Number.isFinite(author.cited_by_count) ? author.cited_by_count : 0,
+  };
+}
+async function fetchIdentifierMatches(query, kind) {
+  const value = parseResearchIdentifier(query, kind);
+  if (kind === "doi") {
+    const work = await fetchJsonOr404(`https://api.openalex.org/works/doi:${encodeURIComponent(value)}` +
+      "?select=id,doi,title,publication_year,authorships,is_authors_truncated");
+    if (!work) return { candidates: [], message: "No paper with this DOI was found in OpenAlex." };
+    if (!Array.isArray(work.authorships)) throw new Error("Couldn't load the paper's authors. Try again.");
+    const candidates = work.authorships.map((a, i) => ({ ...identifierCandidate(a.author || {}, a), paperIndex: i }));
+    return {
+      candidates, paper: work,
+      message: `${work.title || "Untitled paper"}${work.publication_year ? ` (${work.publication_year})` : ""}. ` +
+        (candidates.length ? "Choose the author you mean." : "No authors are listed in OpenAlex.") +
+        (work.is_authors_truncated ? " OpenAlex returned an incomplete author list; try the researcher's ORCID if missing." : ""),
+    };
+  }
+  // Singleton ORCID lookup chooses one record when several share an ORCID.
+  // The filter returns all matches, including observed ORCIDs: let the user decide.
+  const params = new URLSearchParams({ filter: `orcid:${value}`, per_page: "100",
+    select: "id,display_name,orcid,last_known_institutions,cited_by_count" });
+  const data = await fetchJsonOr404(`https://api.openalex.org/authors?${params}`);
+  if (!data || !Array.isArray(data.results)) throw new Error("Couldn't load ORCID matches. Try again.");
+  const candidates = data.results.map(a => identifierCandidate(a));
+  return {
+    candidates,
+    message: candidates.length === 0 ? "No OpenAlex profile matches this ORCID. Try a DOI from one of their papers."
+      : `${candidates.length} profile${candidates.length === 1 ? "" : "s"} found for ${value}. Check the details before choosing.` +
+        (data.meta && data.meta.count > candidates.length ? ` Showing the first ${candidates.length} of ${data.meta.count} matches.` : ""),
+  };
+}
+async function identifierMapEntry(candidate) {
+  if (candidate.evidence && candidate.evidence.state === "conflict") {
+    throw new Error("Conflicting publication evidence must be resolved before selecting this profile.");
+  }
+  if (!candidate.id) throw new Error("This byline has no OpenAlex author ID. Try the researcher's ORCID.");
+  if (candidate.repairStatus === "quarantined") throw new Error("This publication's author identity is unresolved. Choose a different paper; the ambiguous profile cannot be used as a path endpoint.");
+  const bucket = await fetchIdBucket(idBucketNum(candidate.id));
+  // A missing bucket signals unavailable map data; a missing entry in a loaded
+  // bucket means this exact live profile is absent from the snapshot.
+  if (!bucket) throw new Error("Couldn't load map positions. Please retry.");
+  const hit = bucket.get(candidate.id);
+  if (!hit) throw new Error("This researcher is not in the map's published release (original selection: 15+ qualifying works). " +
+    "It may be newer, below the threshold, or changed since the snapshot. Try another paper or profile.");
+  const entry = [normalize(candidate.name), candidate.name, candidate.id, hit[0], hit[1], candidate.citations, candidate.affiliation];
+  if (candidate.evidence) entry.push(candidate.evidence);
+  return entry;
+}
+// ---- Publication identity evidence ----
+function evidenceOrcid(value) {
+  try { return parseResearchIdentifier(value || "", "orcid"); } catch { return null; }
+}
+function evidenceDoi(value) {
+  try { return parseResearchIdentifier(value || "", "doi").toLowerCase(); } catch { return null; }
+}
+function evidenceNameMatch(a, b) {
+  const tokens = value => normalize(value || "").split(" ").filter(Boolean);
+  const x = tokens(a), y = tokens(b);
+  if (x.length < 2 || y.length < 2 || x[0] !== y[0] || x.at(-1) !== y.at(-1)) return false;
+  // Missing middle names are compatible, contradictory middle initials aren't.
+  return x.length < 3 || y.length < 3 || x[1][0] === y[1][0];
+}
+async function fetchIdentitySource(url) {
+  const target = new URL(url);
+  if (!["https://api.crossref.org", "https://pub.orcid.org"].includes(target.origin) || target.username || target.password) {
+    throw new Error("Unsupported identity evidence source.");
+  }
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    // These public sources never receive the user's OpenAlex key or cookies.
+    const response = await fetch(target.href, { headers: { Accept: "application/json" },
+      credentials: "omit", referrerPolicy: "no-referrer", redirect: "error", signal: controller.signal });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error("Identity evidence source unavailable.");
+    return await response.json();
+  } finally { clearTimeout(timer); }
+}
+function publicationIdentityEvidence(candidate, doi, orcid, paper, crossref, registry, unavailable = []) {
+  const sources = [], positive = [], conflicts = [];
+  const result = (state, message) => ({ state, message, doi, orcid, sources });
+  if (!paper || evidenceDoi(paper.doi) !== evidenceDoi(doi)) {
+    return result("unavailable", "Publication check unavailable: the exact DOI record could not be read.");
+  }
+  const bylines = paper.authorships || [];
+  const seats = Number.isInteger(candidate.paperIndex) ? [bylines[candidate.paperIndex]].filter(Boolean)
+    : bylines.filter(a => identifierAuthorId(a.author && a.author.id) === candidate.id);
+  if (seats.length !== 1) return result("unconfirmed", "Publication identity unconfirmed: this profile does not identify one unique byline on that paper.");
+  const seat = seats[0], name = seat.raw_author_name || seat.author && seat.author.display_name || "";
+  if (identifierAuthorId(seat.author && seat.author.id) !== candidate.id) {
+    return result("unconfirmed", "Publication identity unconfirmed: the selected byline belongs to a different OpenAlex profile.");
+  }
+  const raw = evidenceOrcid(seat.raw_orcid);
+  if (raw) {
+    sources.push({ label: "Deposited paper authorship", url: `https://doi.org/${doi}` });
+    if (raw === orcid) positive.push("The deposited paper authorship carries this ORCID.");
+    else conflicts.push("The deposited paper authorship carries a different ORCID.");
+    if (bylines.filter(a => evidenceOrcid(a.raw_orcid) === raw).length > 1) {
+      conflicts.push("The deposited ORCID is repeated on multiple authors of this paper.");
+    }
+  }
+  // The profile's primary ORCID is deliberately never used as evidence.
+  const authors = crossref && evidenceDoi(crossref.DOI) === evidenceDoi(doi) && Array.isArray(crossref.author)
+    ? crossref.author : [];
+  const authorName = a => `${a.given || ""} ${a.family || ""}`.trim();
+  const named = authors.filter(a => evidenceNameMatch(name, authorName(a)));
+  const uniqueName = bylines.filter(a => evidenceNameMatch(name, a.raw_author_name || a.author && a.author.display_name)).length === 1;
+  const explicit = authors.filter(a => evidenceOrcid(a.ORCID) === orcid);
+  if (authors.length) sources.push({ label: "Crossref publisher metadata", url: `https://api.crossref.org/works/${encodeURIComponent(doi)}` });
+  if (explicit.length > 1) conflicts.push("Publisher metadata repeats this ORCID on multiple authors.");
+  if (explicit.length === 1 && !evidenceNameMatch(name, authorName(explicit[0]))) {
+    conflicts.push("Publisher metadata assigns this ORCID to a different byline name; manual review is needed.");
+  }
+  if (named.length === 1 && uniqueName) {
+    const deposited = evidenceOrcid(named[0].ORCID);
+    if (deposited && deposited !== orcid) conflicts.push("Publisher metadata gives this byline a different ORCID.");
+    else if (deposited === orcid) positive.push(named[0]["authenticated-orcid"] === true
+      ? "Publisher metadata reports an authenticated ORCID on the matching byline."
+      : "Publisher metadata places this ORCID on the matching byline.");
+  }
+  const registryId = registry && registry["orcid-identifier"] && registry["orcid-identifier"].path;
+  if (evidenceOrcid(registryId) === orcid) {
+    sources.push({ label: "Public ORCID record", url: `https://orcid.org/${orcid}` });
+    const person = registry.person && registry.person.name || {};
+    const registryName = person["credit-name"] && person["credit-name"].value ||
+      `${person["given-names"] && person["given-names"].value || ""} ${person["family-name"] && person["family-name"].value || ""}`;
+    const summary = registry["activities-summary"], works = summary && summary.works;
+    const listed = (works && works.group || []).some(g => (g["work-summary"] || []).some(w =>
+      (w["external-ids"] && w["external-ids"]["external-id"] || []).some(id =>
+        id["external-id-type"] === "doi" && id["external-id-relationship"] === "self" &&
+        evidenceDoi(id["external-id-value"]) === evidenceDoi(doi))));
+    if (listed && uniqueName && named.length === 1 && evidenceNameMatch(name, registryName)) {
+      positive.push("The public ORCID record lists this DOI, and the publisher byline name is compatible.");
+    }
+  }
+  if (conflicts.length) return result("conflict", "Conflicting publication evidence: " + conflicts.join(" "));
+  if (positive.length) return result("corroborated", "Publication corroborated: " + positive.join(" ") +
+    (unavailable.length ? ` ${unavailable.join(" and ")} could not be checked.` : "") +
+    " This supports this publication only; the OpenAlex profile and its other links may still mix people.");
+  return result(unavailable.length ? "unavailable" : "unconfirmed",
+    unavailable.length ? `Publication check incomplete: ${unavailable.join(" and ")} could not be read. Identity remains unconfirmed.`
+      : "Publication identity unconfirmed: no byline ORCID or matching public ORCID work corroborates this pair. Missing or private data is not a contradiction.");
+}
+async function filterIdentifierMapCandidates(result, kind) {
+  if (kind !== "orcid" || !result.candidates.length) return result;
+  // Membership in the published release is authoritative. A live works
+  // count can change, and repaired partitions retain their source's map
+  // eligibility even when an individual partition has fewer than 15 works.
+  const candidates = result.candidates.filter(c => /^[AM]\d+$/.test(c.id || ""));
+  const buckets = [...new Set(candidates.map(c => idBucketNum(c.id)))];
+  const positions = new Map(await pooled(buckets.map(bucket => async () => {
+    const entries = await fetchIdBucket(bucket);
+    if (!entries) throw new Error("Couldn't load map positions. Please retry the ORCID lookup.");
+    return [bucket, entries];
+  }), 8));
+  const seen = new Set();
+  const mapped = candidates.filter(c => {
+    if (seen.has(c.id) || !positions.get(idBucketNum(c.id)).has(c.id)) return false;
+    seen.add(c.id);
+    return true;
+  });
+  return { ...result, candidates: mapped, message: mapped.length
+    ? `${mapped.length} mapped profile${mapped.length === 1 ? "" : "s"} found. Check the details before choosing.`
+    : "This ORCID's matching profiles are not in the published map (15+ qualifying works at build time). Try another ORCID or a paper DOI." };
+}
+async function fetchIdentifierCandidates(query, kind, crossCheck = "") {
+  // Validate both fields before making requests.
+  const primary = parseResearchIdentifier(query, kind);
+  const other = crossCheck.trim() ? parseResearchIdentifier(crossCheck, kind === "doi" ? "orcid" : "doi") : null;
+  const result = await fetchIdentifierMatches(query, kind);
+  if (!other || !result.candidates.length) {
+    return filterIdentifierMapCandidates(await expandRepairedCandidates(result, kind, primary), kind);
+  }
+  const doi = kind === "doi" ? primary : other, orcid = kind === "orcid" ? primary : other;
+  const settled = await Promise.allSettled([
+    fetchIdentitySource(`https://api.crossref.org/works/${encodeURIComponent(doi)}`),
+    fetchIdentitySource(`https://pub.orcid.org/v3.0/${orcid}/record`),
+    kind === "doi" ? Promise.resolve(result.paper)
+      : fetchJsonOr404(`https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?select=id,doi,authorships`),
+  ]);
+  const unavailable = ["Crossref", "ORCID", "OpenAlex publication"].filter((_, i) => settled[i].status === "rejected");
+  const values = settled.map(s => s.status === "fulfilled" ? s.value : null);
+  result.candidates = result.candidates.map(c => ({ ...c,
+    evidence: publicationIdentityEvidence(c, doi, orcid, values[2], values[0] && values[0].message, values[1], unavailable),
+  }));
+  return filterIdentifierMapCandidates(await expandRepairedCandidates(result, kind, primary), kind);
+}
+// ---- End publication identity evidence ----
+// ---- End identifier lookup helpers ----
+
+// ---- Repaired graph identities ----
+// M IDs identify application-owned person/work partitions, never OpenAlex
+// profiles. All their details and collaborations come from this graph release.
+const REPAIR_BASE = DATA_BASE + "/data/identities";
+let repairManifestPromise = null;
+const repairProfileCache = new Map(), repairAliasCache = new Map();
+async function repairedIdentityBase() {
+  const generation = (await pathsMeta())?.identity_generation;
+  if (generation === undefined) return REPAIR_BASE;
+  if (typeof generation !== "string" || !/^[a-f0-9]{64}$/.test(generation)) {
+    throw new Error("Invalid identity metadata generation for this graph release.");
+  }
+  return REPAIR_BASE + "/" + generation;
+}
+function repairedIdentityManifest() {
+  if (!repairManifestPromise) {
+    repairManifestPromise = repairedIdentityBase().then(base => fetchJsonOr404(base + "/manifest.json")).then(async m => {
+      if (!m) {
+        const meta = await pathsMeta();
+        if (meta?.version === 3 || meta?.identity_generation !== undefined) throw new Error("Repaired identity metadata is missing for this graph release.");
+        return null; // An existing, A-only release has no repair metadata.
+      }
+      if (m.version !== 1 || !m.graph_repaired) throw new Error("Unsupported repaired identity metadata.");
+      return m;
+    }).catch(error => { repairManifestPromise = null; throw error; });
+  }
+  return repairManifestPromise;
+}
+function validMapIdentity(id) { return /^[AM]\d+$/.test(id) && (id[0] !== "M" || (Number.isSafeInteger(Number(id.slice(1))) && Number(id.slice(1)) > 0)); }
+function decodeMapIdentity(view, byteOffset = 0) {
+  const value = view.getBigUint64(byteOffset, true), tag = 1n << 63n;
+  return value & tag ? "M" + (value ^ tag).toString() : "A" + value.toString();
+}
+async function repairedProfile(id) {
+  id = stripId(id);
+  if (!validMapIdentity(id)) return null;
+  const manifest = await repairedIdentityManifest();
+  if (!manifest) {
+    if (id[0] === "M") throw new Error("Repaired identity details are unavailable for this map release.");
+    return null;
+  }
+  if (!repairProfileCache.has(id)) {
+    const promise = fetchJsonOr404(`${await repairedIdentityBase()}/profiles/${id}.json`).then(p => {
+      if (p && p.id !== id) throw new Error("Repaired identity record does not match the selected researcher.");
+      if (!p && id[0] === "M") throw new Error("Couldn't load this repaired identity. Retry the lookup.");
+      return p;
+    }).catch(error => { repairProfileCache.delete(id); throw error; });
+    repairProfileCache.set(id, promise);
+    if (repairProfileCache.size > 100) repairProfileCache.delete(repairProfileCache.keys().next().value);
+  }
+  return repairProfileCache.get(id);
+}
+async function repairedAliases(id) {
+  id = stripId(id);
+  if (!/^A\d+$/.test(id) || !(await repairedIdentityManifest())) return [id];
+  const bucket = idBucketNum(id);
+  if (!repairAliasCache.has(bucket)) {
+    const promise = fetchJsonOr404(`${await repairedIdentityBase()}/aliases/${bucket}.json`)
+      .then(x => x || {}).catch(error => { repairAliasCache.delete(bucket); throw error; });
+    repairAliasCache.set(bucket, promise);
+  }
+  const aliases = await repairAliasCache.get(bucket);
+  return Object.hasOwn(aliases, id) ? aliases[id].filter(validMapIdentity) : [id];
+}
+async function resolveMapAlias(id) {
+  const aliases = await repairedAliases(id);
+  if (aliases.length !== 1) throw new Error("This source profile contains several identities. Search by name or publication DOI to choose the researcher.");
+  return aliases[0];
+}
+async function expandRepairedCandidates(result, kind, primary) {
+  if (!(await repairedIdentityManifest())) return result;
+  const candidates = [];
+  const workId = result.paper && stripId(result.paper.id);
+  for (const candidate of result.candidates) {
+    if (!candidate.id) { candidates.push(candidate); continue; }
+    const aliases = await repairedAliases(candidate.id);
+    if (aliases.length === 1 && aliases[0] === candidate.id) {
+      const profile = await repairedProfile(candidate.id);
+      if (profile?.status !== "retained") { candidates.push(candidate); continue; }
+    }
+    for (const id of aliases) {
+      const profile = await repairedProfile(id);
+      // A DOI selects the original work's partition. ORCID selects only
+      // partitions carrying deposited support for the submitted identifier.
+      if (kind === "doi" ? !workId || !(profile.work_ids || []).includes(workId)
+        : evidenceOrcid(profile.orcid) !== primary) continue;
+      candidates.push({ ...candidate, id, sourceId: candidate.id,
+        name: profile.display_name || candidate.name, profileName: profile.display_name || candidate.name,
+        affiliation: profile.institution || candidate.affiliation, orcid: profile.orcid || null,
+        citations: profile.cited_by_count || 0, repairStatus: profile.identity_status || profile.status });
+    }
+  }
+  return { ...result, candidates,
+    message: result.message + (candidates.length ? " Repaired identities use this release's publication memberships."
+      : " No repaired identity has evidence for this identifier. Try a known publication DOI.") };
+}
+async function repairedAuthorDetails(id) {
+  const p = await repairedProfile(id);
+  if (!p) return null;
+  return { ...p, last_known_institutions: p.institution ? [{ display_name: p.institution }] : [],
+    summary_stats: null, topics: p.field ? [{ display_name: p.field }] : [] };
+}
+async function repairedInstitutionCandidates(id) {
+  if (!(await repairedIdentityManifest())) return [];
+  const rows = await fetchJsonOr404(`${await repairedIdentityBase()}/institutions/${stripId(id)}.json`);
+  return (rows || []).filter(p => p.identity_status !== "quarantined" && p.status !== "quarantined");
+}
+async function repairedGraphFlags() {
+  const meta = await pathsMeta();
+  const manifest = await repairedIdentityManifest();
+  if (!manifest) {
+    if (meta && meta.version === 3) throw new Error("Repaired identity metadata is missing for this graph release.");
+    return null;
+  }
+  const raw = await fetchJsonOr404((await repairedIdentityBase()) + "/flags.json");
+  if (!meta || !raw || raw.paths_ids_file !== meta.files.ids || manifest.paths_ids_file !== meta.files.ids) {
+    throw new Error("Repaired identity flags do not match this graph release. Reload the map before searching.");
+  }
+  const byNumber = new Map(), byId = new Map();
+  for (const flag of raw.entries || []) {
+    if (!validMapIdentity(flag.id) || !Number.isInteger(flag.n) || flag.n < 0 || flag.n >= meta.authors) {
+      throw new Error("Invalid repaired graph identity flags.");
+    }
+    byNumber.set(flag.n, flag); byId.set(flag.id, flag);
+  }
+  return { byNumber, byId };
+}
+// ---- End repaired graph identities ----
+
 // ---- Search rows (issue #4) ----
 // Search-shard entries are [norm, display_name, id, xw, yw, cited,
 // institution]: the seventh field is the last-known institution in the
@@ -1515,6 +1947,14 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
     results = []; active = -1;
   }
 
+  function publishSelection(selection) {
+    const evidence = inputEl.id && document.getElementById(inputEl.id.replace(/-input$/, "-evidence"));
+    if (evidence) evidence.textContent = selection?.identity?.message || "";
+    const identifier = inputEl.id && document.getElementById(inputEl.id.replace(/-input$/, "-identifier"));
+    if (identifier) identifier.hidden = kindEl?.value === "institution";
+    onSelect(selection);
+  }
+
   function select(e) {
     const [, name, id, xw, yw] = e;   // entry shape: [norm, display_name, id, xw, yw, cited, institution?]
     clearTimeout(timer);   // R32: same stale-reopen fix as selectSearchEntry
@@ -1525,7 +1965,7 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
     // stripId so every connect selection stores a bare id, same as infoCard's
     // "Connect from here" and the hash-restore path -- keeps connectA/connectB
     // uniform no matter which route filled them.
-    onSelect({ id: stripId(id), name, xw, yw });
+    publishSelection({ id: stripId(id), name, xw, yw, identity: e[7] || null });
   }
 
   async function run(query) {
@@ -1553,7 +1993,7 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
 
   inputEl.addEventListener("input", () => {
     gen++;                    // invalidate an older request during the debounce
-    onSelect(null);            // typing invalidates any prior selection
+    publishSelection(null);            // typing invalidates any prior selection
     // the previous matches stay up until the new ones arrive (closing here
     // made the dropdown blink on every keystroke); gen discards late replies
     clearTimeout(timer);
@@ -1591,9 +2031,10 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
     clearTimeout(timer);
     gen++;
     close();
-    onSelect(null);
+    publishSelection(null);
   }
-  return { isOpen, escape };
+  function pause() { clearTimeout(timer); gen++; close(); }
+  return { isOpen, escape, pause, select };
 }
 
 const connectToggle = document.getElementById("connect-toggle");
@@ -1624,6 +2065,7 @@ function syncConnectStartUI() {
   connectScope.hidden = !institution;
   connectAInput.placeholder = institution ? "Institution name…" : "Author A…";
   connectAInput.setAttribute("aria-label", institution ? "Starting institution" : "Starting researcher");
+  document.getElementById("connect-a-identifier").hidden = institution;
 }
 connectFromKind.addEventListener("change", () => {
   connectALookup.escape();
@@ -1637,6 +2079,147 @@ connectToggle.addEventListener("click", () => {
   connectToggle.classList.toggle("active", on);
   if (on) prefetchPathIndex();   // R35d: Connect's one-time ~12MB index, ready by the time names are picked
 });
+
+// ---- Identifier lookup dialog ----
+const identifierDialog = document.getElementById("identifier-dialog");
+const identifierKind = document.getElementById("identifier-kind");
+const identifierQuery = document.getElementById("identifier-query");
+const identifierCheck = document.getElementById("identifier-check");
+const identifierStatus = document.getElementById("identifier-status");
+const identifierResults = document.getElementById("identifier-results");
+let identifierGen = 0, identifierPick = null;
+function resetIdentifierResults() {
+  identifierGen++;
+  identifierResults.replaceChildren();
+  identifierStatus.textContent = "";
+}
+function closeIdentifierLookup() {
+  identifierGen++;
+  identifierPick = null;
+  identifierDialog.close();
+}
+function openIdentifierLookup(onPick) {
+  clearTimeout(searchTimer); searchGen++; closeSearchDropdown();
+  connectALookup.pause(); connectBLookup.pause();
+  resetIdentifierResults();
+  identifierPick = onPick;
+  identifierDialog.showModal();
+  identifierQuery.focus();
+}
+function identifierResultRow(candidate) {
+  const row = document.createElement("div");
+  row.className = "identifier-result";
+  const name = document.createElement("strong");
+  name.textContent = candidate.name;
+  const details = document.createElement("p");
+  details.textContent = (identifierKind.value === "doi" ? "Paper affiliation: " : "OpenAlex last-known affiliation: ") +
+    candidate.affiliation + (candidate.profileName && candidate.profileName !== candidate.name
+      ? ` · OpenAlex name: ${candidate.profileName}` : "");
+  row.append(name, details);
+  if (candidate.id) {
+    const link = document.createElement("a");
+    link.href = candidate.sourceId ? `https://openalex.org/${candidate.sourceId}` : `https://openalex.org/${candidate.id}`;
+    link.textContent = candidate.id;
+    link.target = "_blank"; link.rel = "noopener noreferrer";
+    row.append(link);
+  }
+  if (candidate.orcid) {
+    try {
+      const orcid = parseResearchIdentifier(candidate.orcid, "orcid");
+      const link = document.createElement("a");
+      link.href = `https://orcid.org/${orcid}`;
+      link.textContent = `ORCID reported by OpenAlex: ${orcid}`;
+      link.target = "_blank"; link.rel = "noopener noreferrer";
+      row.append(link);
+    } catch { /* Do not turn malformed external metadata into a link. */ }
+  }
+  if (candidate.paperOrcid) {
+    const note = document.createElement("p");
+    note.textContent = `ORCID deposited on this paper's byline: ${candidate.paperOrcid}`;
+    row.append(note);
+  }
+  if (candidate.evidence) {
+    const note = document.createElement("p");
+    note.className = `identity-evidence ${candidate.evidence.state}`;
+    note.textContent = candidate.evidence.message;
+    row.append(note);
+    for (const source of candidate.evidence.sources) {
+      const link = document.createElement("a");
+      link.href = source.url; link.textContent = source.label;
+      link.target = "_blank"; link.rel = "noopener noreferrer";
+      row.append(link);
+    }
+  }
+  const conflict = candidate.evidence && candidate.evidence.state === "conflict";
+  const quarantined = candidate.repairStatus === "quarantined";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = !candidate.id ? "No linked OpenAlex profile" : quarantined ? "Author identity unresolved" : conflict ? "Resolve conflicting evidence first"
+    : candidate.evidence && candidate.evidence.state !== "corroborated" ? "Use unconfirmed profile" : "Use this researcher";
+  button.disabled = !candidate.id || conflict || quarantined;
+  button.addEventListener("click", async () => {
+    const gen = ++identifierGen, pick = identifierPick;
+    button.disabled = true;
+    identifierStatus.textContent = `Locating ${candidate.name} in the map…`;
+    try {
+      const entry = await identifierMapEntry(candidate);
+      if (gen !== identifierGen || !identifierDialog.open) return;
+      closeIdentifierLookup();
+      pick(entry);
+    } catch (error) {
+      if (gen === identifierGen && identifierDialog.open) identifierStatus.textContent = error.message;
+    } finally { button.disabled = !candidate.id || conflict || quarantined; }
+  });
+  row.append(button);
+  return row;
+}
+document.getElementById("identifier-form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  resetIdentifierResults();
+  const gen = identifierGen;
+  identifierStatus.textContent = "Looking up the identifier in OpenAlex…";
+  try {
+    const result = await fetchIdentifierCandidates(identifierQuery.value, identifierKind.value, identifierCheck.value);
+    if (gen !== identifierGen || !identifierDialog.open) return;
+    identifierStatus.textContent = result.message;
+    result.candidates.forEach(candidate => identifierResults.append(identifierResultRow(candidate)));
+  } catch (error) {
+    if (gen === identifierGen && identifierDialog.open) {
+      identifierStatus.textContent = error.message.startsWith("OpenAlex ") ||
+        /^(Enter|Use|The |No |Couldn't)/.test(error.message) ? error.message
+        : "Couldn't load identifier matches. Check your connection and try again.";
+    }
+  }
+});
+identifierQuery.addEventListener("input", resetIdentifierResults);
+identifierCheck.addEventListener("input", resetIdentifierResults);
+identifierKind.addEventListener("change", () => {
+  resetIdentifierResults();
+  const doi = identifierKind.value === "doi";
+  document.getElementById("identifier-query-label").textContent = doi ? "Paper DOI or URL" : "ORCID iD or URL";
+  identifierQuery.placeholder = doi ? "10.1016/j.orbis.2022.02.007" : "0000-0002-1825-0097";
+  document.getElementById("identifier-check-label").textContent = doi ? "Researcher's ORCID iD (optional cross-check)"
+    : "Known publication DOI (optional cross-check)";
+  identifierCheck.placeholder = doi ? "ORCID belonging to the author you mean" : "DOI of a publication you know is theirs";
+  identifierCheck.value = "";
+  document.querySelector("#identifier-form button[type=submit]").textContent = doi ? "Find paper's authors" : "Find researcher";
+  identifierQuery.value = "";
+  identifierQuery.focus();
+});
+document.getElementById("identifier-close").addEventListener("click", closeIdentifierLookup);
+identifierDialog.addEventListener("cancel", () => { identifierGen++; identifierPick = null; });
+identifierDialog.addEventListener("close", () => {
+  // Native close events are queued. A previous session's event may arrive
+  // after the dialog reopens; it must not invalidate the new lookup or pick.
+  if (!identifierDialog.open) { identifierGen++; identifierPick = null; }
+});
+document.getElementById("search-identifier").addEventListener("click", () => openIdentifierLookup(entry => {
+  searchInput.value = entry[1];
+  selectSearchEntry(entry);
+}));
+document.getElementById("connect-a-identifier").addEventListener("click", () => openIdentifierLookup(connectALookup.select));
+document.getElementById("connect-b-identifier").addEventListener("click", () => openIdentifierLookup(connectBLookup.select));
+// ---- End identifier lookup dialog ----
 
 // /api/path expects the bare OpenAlex id ("A5108093963"); the map's own data
 // (search entries, id-bucket shards) stores the full "https://openalex.org/..."
@@ -1741,6 +2324,12 @@ function renderHopList(points, hopColors) {
     // have been skipped -- both simply render without a subtitle.
     // R44 (Eric, 2026-10-24): a click on the paper opens the step -- full
     // title, year, venue, a link to the paper -- without flying the map there.
+    if (!p.label && i < points.length - 1) {
+      const missing = document.createElement("span");
+      missing.className = "hop-via";
+      missing.textContent = "Shared-paper evidence unavailable; this step is unconfirmed.";
+      name.appendChild(missing);
+    }
     if (p.label && i < points.length - 1) {
       const via = document.createElement("button");
       via.type = "button";
@@ -1920,7 +2509,7 @@ function drawResolvedPath(points, hopColors, hops, idA, idB, { writeUrl = true }
     pendingP = null;             // the drawn path owns p= from here
     writeHash();
   }
-  setPathStatus(hopsText(hops));
+  setPathStatus(`${hopsText(hops)} — OpenAlex profile path; identities unverified`);
 }
 
 // ---- R35c: Connect searched in the visitor's browser ----
@@ -1961,7 +2550,7 @@ function pathsMeta() {
   if (!pathsMetaPromise) {
     // manifest.json is the only fixed name (short cache); data files are content-hashed
     pathsMetaPromise = fetchJsonOr404(PATHS_BASE + "/manifest.json")
-      .then(m => (m && m.version === 2 ? m : null))
+      .then(m => (m && (m.version === 2 || (m.version === 3 && m.id_encoding === "tagged-u64" && m.ids_record_bytes === 8)) ? m : null))
       .catch(() => { pathsMetaPromise = null; return null; });
   }
   return pathsMetaPromise;
@@ -2170,9 +2759,11 @@ async function suspectSteps(meta, path) {
 }
 // OpenAlex ids of author numbers (ids file, 4 bytes each).
 async function pathAuthorIds(meta, nodes) {
+  const bytes = meta.version === 3 ? 8 : 4;
   return Promise.all(nodes.map(async u => {
-    const u8 = await fetchRange(`${PATHS_BASE}/${meta.files.ids}`, u * 4, u * 4 + 4);
-    return "A" + (PATH_ID_BASE + new DataView(u8.buffer, u8.byteOffset, 4).getUint32(0, true));
+    const u8 = await fetchRange(`${PATHS_BASE}/${meta.files.ids}`, u * bytes, u * bytes + bytes);
+    const view = new DataView(u8.buffer, u8.byteOffset, bytes);
+    return bytes === 8 ? decodeMapIdentity(view) : "A" + ((meta.id_base || PATH_ID_BASE) + view.getUint32(0, true));
   }));
 }
 // The paper behind one step: the most-cited work the two wrote together among
@@ -2186,6 +2777,10 @@ const LINK_WORK_FILTER = "authors_count:<51," +
   ["dataset", "software", "other", "paratext", "libguides", "peer-review", "erratum",
    "retraction", "supplementary-materials", "reference-entry", "standard"].map(t => `type:!${t}`).join(",");
 async function sharedPaper(idA, idB) {
+  if (typeof repairedProfile === "function") {
+    const [a, b] = await Promise.all([repairedProfile(idA), repairedProfile(idB)]);
+    if (a || b) return a && a.papers && a.papers[idB] || b && b.papers && b.papers[idA] || null;
+  }
   const q = filter => `https://api.openalex.org/works?filter=authorships.author.id:${idA},authorships.author.id:${idB}` +
     `${filter}&per_page=1&select=id,title,publication_year,doi,primary_location&sort=cited_by_count:desc`;
   try {
@@ -2233,7 +2828,7 @@ async function fetchInstitutionCandidates(id) {
     const q = new URLSearchParams({
       filter: `last_known_institutions.id:${bareId},works_count:>14`,
       sort: "cited_by_count:desc", per_page: String(INSTITUTION_CANDIDATE_LIMIT),
-      select: "id,display_name,last_known_institutions"
+      select: "id,display_name,cited_by_count,last_known_institutions"
     });
     const promise = fetchJsonOr404(`https://api.openalex.org/authors?${q}`).then(data => {
       if (!data || !Array.isArray(data.results)) throw new Error("Couldn't load affiliated researchers from OpenAlex.");
@@ -2257,7 +2852,23 @@ async function fetchInstitutionCandidates(id) {
   return institutionCandidateCache.get(bareId);
 }
 async function resolveInstitutionStart(meta, institution, isStale) {
-  const authors = await fetchInstitutionCandidates(institution.id);
+  let authors = await fetchInstitutionCandidates(institution.id);
+  if (typeof repairedInstitutionCandidates === "function" && await repairedIdentityManifest()) {
+    const pool = new Map();
+    const belongs = p => (p.institution_ids || []).some(id => stripId(id) === stripId(institution.id));
+    for (const author of authors) {
+      for (const id of await repairedAliases(author.id)) {
+        if (id[0] === "M") {
+          const p = await repairedProfile(id);
+          if (p.status === "quarantined" || p.identity_status === "quarantined" || !belongs(p)) continue;
+          pool.set(id, { ...p, id });
+        } else pool.set(id, { ...author, id });
+      }
+    }
+    for (const p of await repairedInstitutionCandidates(institution.id)) if (belongs(p)) pool.set(p.id, p);
+    authors = [...pool.values()].sort((a, b) => (b.cited_by_count || 0) - (a.cited_by_count || 0) || a.id.localeCompare(b.id))
+      .slice(0, INSTITUTION_CANDIDATE_LIMIT);
+  }
   if (isStale()) return null;
   const buckets = [...new Set(authors.map(a => idBucketNum(a.id)))];
   const resolved = await pooled(buckets.map(bucket => async () => {
@@ -2298,7 +2909,16 @@ const FLAG_ID_BASE = 5_000_000_000;   // the paths manifest's id_base; flags sto
 let dataFlagsPromise = null;
 function dataFlags() {
   if (!dataFlagsPromise) {
-    dataFlagsPromise = fetchJsonOr404(FLAGS_URL).then(raw => {
+    let repaired = false;
+    dataFlagsPromise = (async () => {
+      if (typeof repairedGraphFlags === "function") {
+        const meta = await pathsMeta();
+        repaired = meta?.version === 3 || meta?.identity_generation !== undefined;
+        repaired = !!(await repairedIdentityManifest()) || repaired;
+        const flags = await repairedGraphFlags();
+        if (flags) return flags;
+      }
+      return fetchJsonOr404(FLAGS_URL).then(raw => {
       const byNumber = new Map(), byId = new Map();
       for (const [kind, cols] of Object.entries((raw && raw.flags) || {})) {
         for (let i = 0; i < cols.n.length; i++) {
@@ -2308,13 +2928,18 @@ function dataFlags() {
           byId.set(cols.id[i], flag);
         }
       }
-      return { byNumber, byId };
-    }).catch(() => { dataFlagsPromise = null; return { byNumber: new Map(), byId: new Map() }; });
+        return { byNumber, byId };
+      });
+    })().catch(error => {
+      dataFlagsPromise = null;
+      if (repaired) throw error; // Do not route through quarantined identities on metadata failure.
+      return { byNumber: new Map(), byId: new Map() };
+    });
   }
   return dataFlagsPromise;
 }
 function flagForId(flags, bareId) {
-  return flags.byId.get(Number(String(bareId).replace(/^A/, "")) - FLAG_ID_BASE);
+  return flags.byId.get(bareId) || flags.byId.get(Number(String(bareId).replace(/^A/, "")) - FLAG_ID_BASE);
 }
 // The busiest year in a live OpenAlex author record's affiliations, and its
 // steadiest institution: {count, year, home, homeYears, years} or null. A busy
@@ -2402,7 +3027,13 @@ async function connectInBrowser(meta, idA, idB, gen) {
   const flagsReady = dataFlags();       // R46: fetched alongside the first search
   let nodes, note = null, warn = [], warnNodes = [], flags = null;
   try {
-    nodes = await browserShortestPath(meta, a, b, progress, { isStale: stale });
+    flags = await flagsReady;
+    const blocked = new Map([...flags.byNumber].filter(([, flag]) => flag.kind === "quarantined"));
+    if (blocked.has(b) || a.some(n => blocked.has(n))) {
+      setPathStatus("This researcher identity is unresolved. Choose a supported identity or a different publication before connecting.");
+      return;
+    }
+    nodes = await browserShortestPath(meta, a, b, progress, { isStale: stale, avoidNodes: blocked.size ? blocked : null });
     if (stale()) return;
     if (nodes && !nodes.tooFar) {
       flags = await flagsReady;
@@ -2466,7 +3097,9 @@ async function connectInBrowser(meta, idA, idB, gen) {
       connectAffiliation.textContent = `${names[0]} — OpenAlex last-known affiliation: ${start.name}. ` +
         `${source.nodes.length} of ${source.considered} candidates are in the map's coauthor graph.`;
     }
-    setPathStatus([hopsText(nodes.length - 1), institution ? `among ${source.nodes.length} mapped institution candidates` : null, note]
+    setPathStatus([hopsText(nodes.length - 1), ids.some(id => id.startsWith("M")) ? "Repaired identity path; automatic assignments" : "OpenAlex profile path; identities unverified",
+      papers.some(p => !p) ? "some steps have no shared-paper evidence" : null,
+      institution ? `among ${source.nodes.length} mapped institution candidates` : null, note]
       .filter(Boolean).join(" — "));
   }
 }
@@ -2488,6 +3121,10 @@ connectGo.addEventListener("click", async () => {
   if (meta) {
     try { await connectInBrowser(meta, idA, idB, gen); }
     catch { if (gen === pathGen) setPathStatus("Couldn't finish the connection. Check your connection and retry."); }
+    return;
+  }
+  if (/^M\d+$/.test(idA) || /^M\d+$/.test(idB)) {
+    setPathStatus("Repaired identities need this release’s browser graph. Reload the map and retry.");
     return;
   }
   if (/^I\d+$/.test(idA)) {
@@ -2639,6 +3276,8 @@ async function fetchOpenAlexWorksPage(url) {
 // the backend path collects into `coauthors` below, so finishCoauthorRays
 // treats both sources identically.
 async function fetchCoauthorsBrowser(bareId) {
+  const repaired = await repairedProfile(bareId);
+  if (repaired) return repaired.coauthors || [];
   if (coauthorBrowserCache.has(bareId)) return coauthorBrowserCache.get(bareId);
 
   const local = readCoauthorLocalCache(bareId);
@@ -2706,12 +3345,14 @@ async function drawCoauthorRays(bareId, xw, yw) {
   const gen = ++searchRayGen;  // this call owns the overlay from here
 
   setSearchStatus("loading coauthors…");
-  const healthy = await probeBackendHealth();
+  let healthy;
+  try { healthy = /^M\d+$/.test(bareId) || (await repairedIdentityManifest()) ? false : await probeBackendHealth(); }
+  catch { setSearchStatus("Couldn't load this release's identity metadata. Retry the search."); return; }
   if (gen !== searchRayGen) return;
 
   if (!healthy) {
     // R21: no backend reachable -- OpenAlex directly, browser-native.
-    setSearchStatus("loading coauthors from OpenAlex…");
+    setSearchStatus(/^M\d+$/.test(bareId) ? "loading this identity’s coauthors…" : "loading coauthors…");
     let top;
     try {
       top = await fetchCoauthorsBrowser(bareId);
@@ -2930,6 +3571,7 @@ function repositionActiveOverlays() {
 // usable for Connect's Go button.
 const displayNameCache = new Map();  // bare id -> Promise<string>
 function fetchDisplayName(bareId) {
+  if (/^M\d+$/.test(bareId)) return repairedProfile(bareId).then(p => p.display_name || bareId);
   if (!displayNameCache.has(bareId)) {
     cacheUnlessFailed(displayNameCache, bareId,
       fetchJsonOr404(`https://api.openalex.org/people/${bareId}?select=display_name`)
@@ -2991,8 +3633,12 @@ async function restoreFromHash(parsed) {
   // declaration comment), so they double as the staleness check: bail the
   // moment the pending value this restore is applying is no longer pending.
   if (parsed.a && !parsed.p) {
-    const bareA = stripId(parsed.a);
-    const aStale = () => pendingA !== bareA;
+    const originalA = stripId(parsed.a);
+    const aStale = () => pendingA !== originalA;
+    let bareA;
+    try { bareA = typeof resolveMapAlias === "function" ? await resolveMapAlias(originalA) : originalA; }
+    catch (error) { if (!aStale()) setSearchStatus(error.message); return; }
+    if (aStale()) return;
     const bucket = await fetchIdBucket(idBucketNum(bareA));
     if (aStale()) return;
     const hit = bucket ? bucket.get(bareA) : null;
@@ -3004,7 +3650,7 @@ async function restoreFromHash(parsed) {
     }
   }
   if (parsed.p) {
-    const [bareA, bareB] = parsed.p;
+    let [bareA, bareB] = parsed.p;
     // R32: pendingP alone isn't enough here -- a search pick (or the card's
     // Coauthors) deliberately leaves pendingP alone (only an explicit Connect
     // edit/Clear discards it), yet it's still a newer intent this restore's
@@ -3027,6 +3673,11 @@ async function restoreFromHash(parsed) {
     if (pStale()) return;
     connectPanel.classList.add("open");
     connectToggle.classList.add("active");
+    if (typeof resolveMapAlias === "function") {
+      try { [bareA, bareB] = await Promise.all([resolveMapAlias(bareA), resolveMapAlias(bareB)]); }
+      catch (error) { if (!pStale()) setPathStatus(error.message); return; }
+      if (pStale()) return;
+    }
     const [nameA, nameB] = await Promise.all([fetchConnectStartName(bareA), fetchDisplayName(bareB)]);
     if (pStale()) return;
     connectFromKind.value = /^I\d+$/.test(bareA) ? "institution" : "researcher";
@@ -3040,7 +3691,7 @@ async function restoreFromHash(parsed) {
     const meta = await pathsMeta();
     if (pStale()) return;
     const institution = /^I\d+$/.test(bareA);
-    const reachable = Boolean(meta) || (!institution && await wakeBackend(setPathStatus, pStale));
+    const reachable = Boolean(meta) || (!institution && ![bareA, bareB].some(id => /^M\d+$/.test(id)) && await wakeBackend(setPathStatus, pStale));
     if (pStale()) return;
     if (reachable) {
       connectGo.click();
@@ -4558,9 +5209,7 @@ function resolveCloudFallbackHit(idx) {
       if (r.status !== 206) buf = buf.slice(idx * 8, idx * 8 + 8);
       if (buf.byteLength < 8) throw new Error("ids.bin range fetch returned short read");
       const view = new DataView(buf);
-      const lo = view.getUint32(0, true), hi = view.getUint32(4, true);
-      const numeric = hi === 0 ? BigInt(lo) : (BigInt(hi) << 32n) | BigInt(lo);
-      bareId = "A" + numeric.toString();
+      bareId = decodeMapIdentity(view);
     } catch (err) {
       console.warn("cloud hover fallback: ids.bin lookup failed:", err);
       return null;
@@ -5993,6 +6642,7 @@ function closeInfoCard() {
 }
 
 async function fetchAuthorDetails(bareId) {
+  if (/^M\d+$/.test(bareId)) return repairedAuthorDetails(bareId);
   if (!infoCardCache.has(bareId)) {
     // R32: an OpenAlex 429/5xx/network drop is evicted rather than cached as
     // "couldn't load details" for this author -- see fetchJsonOr404.
@@ -6028,7 +6678,7 @@ function openInfoCard(hit) {
   const bareId = stripId(rawId);
   // Same id-normalization as the old click handler: entries may already carry
   // a full "https://openalex.org/..." id or a bare one.
-  const fullUrl = String(rawId).startsWith("http") ? rawId : "https://openalex.org/" + rawId;
+  const fullUrl = /^M\d+$/.test(bareId) ? null : String(rawId).startsWith("http") ? rawId : "https://openalex.org/" + rawId;
   infoCardData = { bareId, fullUrl, name, xw, yw };
   const gen = ++infoCardGen;
 
@@ -6051,10 +6701,27 @@ function openInfoCard(hit) {
     if (gen !== infoCardGen) return;
     const note = profileNote(flagForId(flags, bareId), peakAffiliations(data));
     if (note) addInfoNote(note);
-  });
+  }).catch(error => { if (gen === infoCardGen) addInfoNote(error.message); });
   details.then(data => {
     if (gen !== infoCardGen) return;   // card closed, or replaced, since this fetch started
     if (!data) { addInfoRow("Details", "couldn't load details"); return; }
+    if (/^M\d+$/.test(bareId)) {
+      addInfoNote(data.identity_status === "quarantined"
+        ? "This identity is unresolved and excluded from paths. Its publications remain visible."
+        : "Automatically resolved from publication evidence. This application identity is separate from its source OpenAlex profile.");
+      if (data.source_ids && data.source_ids.length) {
+        const sources = document.createElement("p");
+        sources.className = "note";
+        for (const source of data.source_ids.filter(id => /^A\d+$/.test(id))) {
+          const link = document.createElement("a"); link.href = `https://openalex.org/${source}`;
+          link.textContent = `Source ${source} `; link.target = "_blank"; link.rel = "noopener noreferrer";
+          sources.append(link);
+        }
+        infoCardBody.append(sources);
+        const firstSource = data.source_ids.find(id => /^A\d+$/.test(id));
+        if (firstSource) infoCardData.fullUrl = `https://openalex.org/${firstSource}`;
+      }
+    }
     const inst = data.last_known_institutions && data.last_known_institutions[0];
     addInfoRow("Institution", (inst && inst.display_name) || mostRecentAffiliation(data) || "unknown");
     addInfoRow("Works", (data.works_count || 0).toLocaleString());
@@ -6062,7 +6729,7 @@ function openInfoCard(hit) {
     addInfoRow("h-index", hIndex != null ? hIndex : "-");
     const topics = (data.topics || []).slice(0, 3).map(t => t.display_name).filter(Boolean);
     if (topics.length) addInfoRow("Topics", topics.join(", "));
-  });
+  }).catch(error => { if (gen === infoCardGen) addInfoRow("Details", error.message || "couldn’t load details"); });
 }
 
 infoCardClose.addEventListener("click", closeInfoCard);
@@ -6087,7 +6754,7 @@ infoCardCoauthorsBtn.addEventListener("click", () => {
 
 infoCardOpenBtn.addEventListener("click", () => {
   if (!infoCardData) return;
-  window.open(infoCardData.fullUrl, "_blank", "noopener");
+  if (infoCardData.fullUrl) window.open(infoCardData.fullUrl, "_blank", "noopener");
 });
 
 infoCardConnectBtn.addEventListener("click", () => {
@@ -6418,7 +7085,9 @@ function shareChainSummary(points, hops) {
   return {
     from, to,
     steps: `${hops} step${hops === 1 ? "" : "s"}`,
-    text: `${from} is ${hops} coauthor step${hops === 1 ? "" : "s"} from ${to}.`,
+    text: points.some(p => String(p.id || "").startsWith("M"))
+      ? `${from} is ${hops} coauthor step${hops === 1 ? "" : "s"} from ${to} in the repaired identity graph. Identity assignments are automatic.`
+      : `${from} is ${hops} OpenAlex profile step${hops === 1 ? "" : "s"} from ${to}. Researcher identities are unverified.`,
     fileName: `mapademic-${slug(from)}-to-${slug(to)}.png`,
   };
 }
@@ -6433,7 +7102,7 @@ function elideChain(n, max) {
 // The paper line under step i: the linking paper and its year, else the label.
 function shareStepPaper(point) {
   const p = point.paper;
-  return p && p.title ? p.title + (p.year ? ` (${p.year})` : "") : point.label || "";
+  return p && p.title ? p.title + (p.year ? ` (${p.year})` : "") : point.label || "Shared-paper evidence unavailable";
 }
 
 function fitText(ctx, text, width) {
@@ -6575,6 +7244,8 @@ async function renderShareCard() {
   ctx.font = `400 26px ${SHARE_FONT}`; ctx.fillStyle = "#c9ced6";
   ctx.fillText(fitText(ctx, `from ${summary.from}`, textW), SHARE_PAD, 240);
   ctx.fillText(fitText(ctx, `to ${summary.to}`, textW), SHARE_PAD, 276);
+  ctx.font = `400 14px ${SHARE_FONT}`; ctx.fillStyle = "#b6b99e";
+  ctx.fillText("OpenAlex profile path · identities unverified", SHARE_PAD, 303);
   const withPapers = points.length <= 5;                       // papers fit for up to 4 steps
   let y = 330;
   for (const i of elideChain(points.length, withPapers ? 5 : 8)) {
@@ -6716,6 +7387,9 @@ helpOverlay.addEventListener("click", ev => { if (ev.target === helpOverlay) clo
 // branches that used to live in searchInput's and createAuthorLookup's own
 // keydown handlers.
 document.addEventListener("keydown", ev => {
+  // The native modal owns focus and Escape; do not clear a map selection or
+  // trigger page shortcuts behind it while the user compares identifiers.
+  if (identifierDialog.open) return;
   if (ev.key === "Escape") {
     if (shareOverlay.classList.contains("open")) {
       ev.preventDefault(); ev.stopPropagation();

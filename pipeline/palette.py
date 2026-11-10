@@ -1,6 +1,7 @@
 """Dark-cosmic palette: 26 field hue families, community shade jitter."""
 import colorsys
 import math
+from pipeline.sql import sql_literal
 
 # Hue anchors (degrees) spread around the wheel for perceptual separation on
 # black. The 26 OpenAlex fields (topics[1].field.display_name vocabulary) as
@@ -126,7 +127,7 @@ def group_key_sql(community: str = "community", sub: str = "sub") -> str:
 def not_dust_sql(con, path: str, prefix: str = "") -> str:
     """SQL predicate keeping coloured authors: coords_web's is_dust (outer
     ring, small and near-empty communities) when present, else is_ring."""
-    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{path}')").fetchall()}
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({sql_literal(path)})").fetchall()}
     if "is_dust" in cols:
         return f"NOT {prefix}is_dust"
     return f"NOT {prefix}is_ring" if "is_ring" in cols else "TRUE"
@@ -136,7 +137,7 @@ def group_key_expr(con, path: str, prefix: str = "") -> str:
     """SQL for a row's colour key in `path` (coords_web); files written before
     sub-groups existed have no `sub` column. `prefix` qualifies the columns,
     e.g. "p0." inside a join."""
-    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{path}')").fetchall()}
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({sql_literal(path)})").fetchall()}
     return group_key_sql(f"{prefix}community", f"{prefix}sub" if "sub" in cols else "NULL")
 
 
@@ -154,7 +155,7 @@ def sparse_communities(con, path: str, min_members: int = 1000) -> set[int]:
     `path` is coords.parquet or coords_web.parquet (both carry community,
     institution and cited_by_count)."""
     rows = con.execute(
-        f"""SELECT community FROM read_parquet('{path}')
+        f"""SELECT community FROM read_parquet({sql_literal(path)})
             WHERE community IS NOT NULL
             GROUP BY community
             HAVING count(*) >= {int(min_members)}
@@ -171,7 +172,7 @@ def load_community_stats(con, web_path: str) -> list[tuple[int, str | None, int,
     feeds color."""
     rows = con.execute(
         f"""WITH base AS (SELECT community, field, xw, yw
-                          FROM read_parquet('{web_path}')),
+                          FROM read_parquet({sql_literal(web_path)})),
              fc AS (SELECT community, field, count(*) c FROM base GROUP BY 1, 2),
              tot AS (SELECT community, sum(c) n FROM fc GROUP BY 1),
              cen AS (SELECT community, avg(xw) cx, avg(yw) cy FROM base GROUP BY 1),
@@ -205,8 +206,8 @@ def build_group_palette(con, web_path: str, min_members: int = 1000,
     hls = {c: community_hls(c, n, cx, cy, min_members, faded=c in faded)
            for c, f, n, cx, cy in stats}
     pal = {group_key(c, -1): colorsys.hls_to_rgb(h / 360.0, l, s) for c, (h, l, s) in hls.items()}
-    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{web_path}')").fetchall()}
-    pairs = con.execute(f"""SELECT DISTINCT community, sub FROM read_parquet('{web_path}')
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({sql_literal(web_path)})").fetchall()}
+    pairs = con.execute(f"""SELECT DISTINCT community, sub FROM read_parquet({sql_literal(web_path)})
                             WHERE sub >= 0""").fetchall() if "sub" in cols else []
     for c, sub in pairs:
         h, l, s = shade_hls(*hls[int(c)], int(sub))

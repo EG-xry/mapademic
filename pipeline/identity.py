@@ -20,6 +20,8 @@ record's links). About 4.5% of all links are flagged.
 """
 import numpy as np
 
+from pipeline.sql import sql_literal
+
 COMMON_NAME = 200
 RARE_REGION = 0.05
 LEGEND_MIN = 1000
@@ -30,24 +32,24 @@ def suspect_links(con, nodes_path: str, edges_path: str, web_path: str,
                   legend_min: int = LEGEND_MIN) -> tuple[np.ndarray, np.ndarray]:
     """(src, dst) node indices of suspect links, as edges_path stores them."""
     con.execute(f"""CREATE OR REPLACE TEMP TABLE id_node AS
-        WITH sizes AS (SELECT community, count(*) n FROM read_parquet('{web_path}') GROUP BY 1)
+        WITH sizes AS (SELECT community, count(*) n FROM read_parquet({sql_literal(web_path)}) GROUP BY 1)
         SELECT n.node_idx,
                CASE WHEN s.n >= {int(legend_min)} THEN w.community ELSE -1 END AS comm,
                lower(strip_accents(left(trim(n.display_name), 1) || ' '
                      || regexp_extract(trim(n.display_name), '(\\S+)$', 1))) AS name_key
-        FROM read_parquet('{nodes_path}') n
-        JOIN read_parquet('{web_path}') w ON w.id = n.id
+        FROM read_parquet({sql_literal(nodes_path)}) n
+        JOIN read_parquet({sql_literal(web_path)}) w ON w.id = n.id
         JOIN sizes s ON s.community = w.community""")
     con.execute("""CREATE OR REPLACE TEMP TABLE id_common AS
         SELECT node_idx, comm, count(*) OVER (PARTITION BY name_key) >= ? AS common
         FROM id_node""", [int(common_name)])
     con.execute(f"""CREATE OR REPLACE TEMP TABLE id_share AS
-        WITH d AS (SELECT src AS u, dst AS v, weight AS w FROM read_parquet('{edges_path}')
-                   UNION ALL SELECT dst, src, weight FROM read_parquet('{edges_path}')),
+        WITH d AS (SELECT src AS u, dst AS v, weight AS w FROM read_parquet({sql_literal(edges_path)})
+                   UNION ALL SELECT dst, src, weight FROM read_parquet({sql_literal(edges_path)})),
              uc AS (SELECT d.u, nv.comm AS c, sum(d.w) AS w FROM d JOIN id_common nv ON nv.node_idx = d.v GROUP BY 1, 2)
         SELECT u, c, w / sum(w) OVER (PARTITION BY u) AS share FROM uc""")
     pairs = con.execute(f"""
-        SELECT e.src, e.dst FROM read_parquet('{edges_path}') e
+        SELECT e.src, e.dst FROM read_parquet({sql_literal(edges_path)}) e
         JOIN id_common a ON a.node_idx = e.src JOIN id_common b ON b.node_idx = e.dst
         JOIN id_share sa ON sa.u = e.src AND sa.c = b.comm
         JOIN id_share sb ON sb.u = e.dst AND sb.c = a.comm
