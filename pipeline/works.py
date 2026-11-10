@@ -42,14 +42,16 @@ EXTRACT_COLUMNS = (
 )
 
 
-def id_key_sql(col: str) -> str:
+def id_key_sql(col: str, *, repaired: bool = False) -> str:
     """SQL: A/W numeric keys stay positive; M identity author keys are negative.
 
     Integer keys make the billion-row explode/join/aggregate steps far cheaper
     than the 32-byte URL strings, and they are what the extract stores.
     """
     key = f"CAST(regexp_extract({col}, '(\\d+)$', 1) AS BIGINT)"
-    return f"CASE WHEN regexp_matches({col}, '^M[0-9]+$') THEN -({key}) ELSE {key} END"
+    if not repaired:
+        return key
+    return f"CASE WHEN starts_with({col}, 'M') THEN -({key}) ELSE {key} END"
 
 
 def quality_predicate(all_works: bool = False) -> str:
@@ -83,8 +85,10 @@ def qualifying_works_sql(works_glob: str, all_works: bool = False,
         conds.append(f"n_authors >= {int(min_authors)}")
     if max_authors is not None:
         conds.append(f"n_authors <= {int(max_authors)}")
+    # Paper provenance fingerprints include the exact default SQL text.
+    column = "edge_author_ids AS author_ids" if author_column == "edge_author_ids" else "author_ids"
     return f"""
-        SELECT work_id, n_authors, {author_column} AS author_ids
+        SELECT work_id, n_authors, {column}
         FROM read_parquet({sql_literal(works_glob)})
         WHERE {' AND '.join(conds)}
         {"QUALIFY row_number() OVER (PARTITION BY work_id) = 1" if dedupe else ""}

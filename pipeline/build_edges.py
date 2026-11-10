@@ -32,7 +32,7 @@ BATCH_ROWS = 2_000_000
 def _node_keys(con, nodes_path: str) -> np.ndarray:
     """Sorted numeric keys of the selected nodes; position = node index."""
     keys = con.execute(
-        f"SELECT k FROM (SELECT {id_key_sql('id')} AS k FROM read_parquet({sql_literal(nodes_path)})) "
+        f"SELECT k FROM (SELECT {id_key_sql('id', repaired=True)} AS k FROM read_parquet({sql_literal(nodes_path)})) "
         "WHERE k IS NOT NULL ORDER BY k"
     ).fetchnumpy()["k"]
     return np.asarray(keys, dtype=np.int64)
@@ -133,7 +133,7 @@ def build_edges(
         con.execute(
             f"""CREATE TEMP TABLE node_idx AS
                 SELECT id, CAST(row_number() OVER (ORDER BY k) - 1 AS INTEGER) AS idx
-                FROM (SELECT id, {id_key_sql('id')} AS k FROM read_parquet({sql_literal(nodes_path)}))
+                FROM (SELECT id, {id_key_sql('id', repaired=True)} AS k FROM read_parquet({sql_literal(nodes_path)}))
                 WHERE k IS NOT NULL"""
         )
         src = (f"read_parquet({sql_literal(parts_dir / '*.parquet')})" if any(parts_dir.iterdir()) else

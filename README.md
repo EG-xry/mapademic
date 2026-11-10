@@ -89,13 +89,21 @@ The remote uploader adds `/data/` below the release prefix automatically. Use
 the updated viewer; tagged identity binaries require it. The command does not
 upload or replace an existing public release.
 
-Pass the flags file belonging to the original release to preserve its existing
-profile warnings and path-routing preferences. Once the full rebuilt release
+Pass the flags file belonging to the original release to preserve existing
+profile warnings. The build recomputes suspect namesake links from the
+repaired graph and map communities. Once the full rebuilt release
 passes its researcher, publication-membership, coordinate, and graph checks,
 upload its complete directory under a new release prefix with
-`MAPADEMIC_DATA=releases/2026-11-02-repaired bash scripts/upload_r2.sh`. The uploader includes the repaired identity metadata and refuses tagged
-graphs whose identity manifests or quarantine flags are missing or mismatched.
-Only then update `DATA_BASE` in `scripts/build_site.py`, regenerate `docs/`, and
+`MAPADEMIC_DATA=releases/2026-11-02-repaired bash scripts/upload_r2.sh`.
+The uploader refuses tagged graphs whose identity manifests or quarantine
+flags are missing or mismatched.
+It uploads a versioned copy of the identity metadata, then publishes the graph
+manifest that points to it. Older cached graph manifests can still read their
+matching identity files. Use a new release prefix for changes to tiles and
+search indexes; their URLs are fixed within each prefix. The uploader warns
+if existing bucket storage plus this upload could exceed the storage budget.
+Retire unused release prefixes only after their caches and rollback window
+have expired. After the upload, update `DATA_BASE` in `scripts/build_site.py`, regenerate `docs/`, and
 publish the site. Keep the previous prefix available for rollback. The existing
 production prefix is unchanged by this source patch.
 
@@ -105,16 +113,16 @@ move or missing ORCID alone does not split a person. Duplicate source profiles
 merge only with repeated deposited ORCID support and compatible corroborating
 evidence. Generic collection bylines do not create coauthor shortcuts.
 
-Unchanged researchers keep their source IDs and map positions. Repaired
-identities receive separate `M...` IDs and positions near their supported
-collaborators; original `A...` source links remain in their details. Search,
+Unchanged researchers and profiles retained after excluding ambiguous bylines
+keep their source IDs and map positions. New identities receive separate
+`M...` IDs and positions near their supported collaborators; original `A...` source links remain in their details. Search,
 DOI/ORCID lookup, coauthor rays, share links and shortest paths use the same
 release. Supported partitions remain visible even below the original 15-work
 threshold. Ambiguous remaining memberships stay visible in quarantined
 partitions that paths cannot traverse. No ORCID registration is required.
 
-`repair_report.json` records the repair counts and limits. Profiles without
-sufficient evidence remain unchanged; profiles above `--max-profile-works`
+`repair_report.json` records repair counts, elapsed seconds, and peak process
+memory in bytes. Profiles without sufficient evidence remain unchanged; profiles above `--max-profile-works`
 (default 50,000) are explicitly counted as skipped. Automatic identity resolution
 cannot guarantee every source error is detected. Keep `identity_registry.json`
 and supply `--registry` on subsequent builds to retain existing assignments where
@@ -420,11 +428,11 @@ The paper's analysis scripts, reproduction notes and tests are in
 `MAPADEMIC_DATA=<release> bash scripts/upload_r2.sh` uploads a release to the
 R2 bucket under `<release>/data/`, inside R2's free tier: JSON stored
 gzip-compressed (browsers decompress it), unused line tiers skipped, a hard
-stop above 9.5GB (2026-09-23: 6.93GB, ~515k files), size-only comparisons so
-re-runs upload only what is missing, and a week-long Cache-Control so
-Cloudflare answers repeat reads. It needs an rclone remote named `r2`. Point
-`DATA_BASE` in `scripts/build_site.py` at the release, rebuild `docs/`, and
-delete the previous release's objects once the site has moved.
+stop above 9.5 GB for one release (2026-09-23: 6.93 GB, ~515k files), and a
+week-long Cache-Control for most objects. The script warns if retained objects
+could put the bucket over budget. It needs an rclone remote named `r2`.
+Point `DATA_BASE` in `scripts/build_site.py` at the release and rebuild
+`docs/`. Keep the previous release through the cache and rollback window.
 
 ### Preview
 

@@ -35,7 +35,7 @@ import duckdb
 import numpy as np
 
 from pipeline.config import apply_resource_limits, data_dir
-from pipeline.identifiers import bare_author_id, decode_author_id
+from pipeline.identifiers import IDENTITY_TAG
 from pipeline.palette import load_community_stats
 from pipeline.sql import sql_literal
 
@@ -210,8 +210,8 @@ def build_search_shards(web: str, out_dir: Path) -> int:
 PATH_ID_BASE = 5_000_000_000   # scripts/export_paths_bin.ID_BASE
 
 
-def _path_numbers(paths_dir: Path | None) -> dict[str, int]:
-    """Normalized A/M id -> the author's number in the browser path graph
+def _path_numbers(paths_dir: Path | None) -> dict[int, int]:
+    """Tagged numeric A/M id -> the author's number in the browser path graph
     (scripts/export_paths_bin.py's paths/ids.bin), or {} when absent."""
     meta = paths_dir / "manifest.json" if paths_dir else None
     if not meta or not meta.exists():
@@ -221,11 +221,10 @@ def _path_numbers(paths_dir: Path | None) -> dict[str, int]:
     if not f.exists():
         return {}
     if manifest.get("id_encoding") == "tagged-u64":
-        ids = [decode_author_id(int(i)) for i in np.fromfile(f, dtype="<u8")]
+        ids = np.fromfile(f, dtype="<u8")
     else:
-        raw = np.fromfile(f, dtype="<u4").astype(np.int64) + manifest.get("id_base", PATH_ID_BASE)
-        ids = ["A" + str(int(i)) for i in raw]
-    return dict(zip(ids, range(len(ids))))
+        ids = np.fromfile(f, dtype="<u4").astype(np.uint64) + manifest.get("id_base", PATH_ID_BASE)
+    return dict(zip(ids.tolist(), range(len(ids))))
 
 
 def build_id_shards(web: str, out_dir: Path, paths_dir: Path | None = None) -> int:
@@ -246,9 +245,12 @@ def build_id_shards(web: str, out_dir: Path, paths_dir: Path | None = None) -> i
     ).fetchall()
     for aid, xw, yw in rows:
         digits = "".join(filter(str.isdigit, aid))
-        bucket = int(digits) % 1000 if digits else 0
+        number = int(digits) if digits else 0
+        bucket = number % 1000
         entry = [round(xw, 6), round(yw, 6)]
-        node = numbers.get(bare_author_id(aid)) if numbers else None
+        bare = aid.removeprefix("https://openalex.org/")
+        valid_id = digits and len(bare) == len(digits) + 1 and bare[0] in "AM"
+        node = numbers.get(number | IDENTITY_TAG if bare.startswith("M") else number) if valid_id else None
         if node is not None:
             entry.append(node)
         buckets[bucket][aid] = entry

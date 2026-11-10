@@ -26,7 +26,7 @@ def test_signed_author_keys_preserve_namespace_and_work_ids():
     for aid in ['A0', 'A5000000001', 'M5000000001', 'M9007199254740991']:
         assert decode_author_id(encode_author_id(aid)) == aid
     con = duckdb.connect()
-    sql = id_key_sql('id')
+    sql = id_key_sql('id', repaired=True)
     assert con.execute(f"SELECT {sql} FROM (VALUES ('A5000000001'), ('M5000000001'), ('W42')) t(id)").fetchall() == [
         (5000000001,), (-5000000001,), (42,),
     ]

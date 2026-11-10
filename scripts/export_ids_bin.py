@@ -25,7 +25,6 @@ import numpy as np
 from pipeline.config import apply_resource_limits, data_dir
 from pipeline.identifiers import IDENTITY_TAG, encode_author_id
 from pipeline.palette import not_dust_sql
-from pipeline.sql import sql_literal
 
 def _id_to_u64(raw_id: str) -> int:
     return encode_author_id(raw_id)

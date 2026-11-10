@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -53,7 +54,11 @@ def fixture(tmp_path, *, repaired=True, regions=True):
         "import json, os, sys\n"
         "with open(os.environ['RCLONE_LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
         "if os.environ.get('RCLONE_FAIL_IDENTITIES') and sys.argv[1] == 'copy' and sys.argv[2].endswith('/identities'): sys.exit(3)\n"
-        "if sys.argv[1] == 'listremotes': print('r2:')\n")
+        "if sys.argv[1] == 'listremotes': print('r2:')\n"
+        "if sys.argv[1] == 'size' and '--json' in sys.argv: print(json.dumps({'bytes': int(os.environ.get('BUCKET_BYTES', '0'))}))\n"
+        "if sys.argv[1] == 'copyto' and sys.argv[3].endswith('/paths/manifest.json'):\n"
+        "    from pathlib import Path\n"
+        "    Path(os.environ['RCLONE_LOG']).with_suffix('.manifest').write_bytes(Path(sys.argv[2]).read_bytes())\n")
     binary.chmod(0o755)
     log = root / "rclone.log"
     env = {**os.environ, "PATH": str(binary.parent) + os.pathsep + os.environ["PATH"],
@@ -85,16 +90,26 @@ def test_repaired_json_is_gzipped_and_uploaded_before_graph_manifest_without_del
     assert not any(command[0] in {"sync", "delete", "purge"} for command in commands)
     uploads = [command for command in commands if command[0] in {"copy", "copyto"}]
     final = uploads[-1]
-    assert final[:3] == ["copyto", str(release / "paths/manifest.json"), "r2:mapademic/test-release/data/paths/manifest.json"]
+    assert final[0] == "copyto"
+    assert final[2] == "r2:mapademic/test-release/data/paths/manifest.json"
+    published = json.loads(log.with_suffix(".manifest").read_text())
+    generation = published["identity_generation"]
+    assert re.fullmatch(r"[a-f0-9]{64}", generation)
+    assert "identity_generation" not in json.loads((release / "paths/manifest.json").read_text())
     identity_manifest = next(command for command in uploads if command[0] == "copyto" and command[1] == str(stage_arg / "identities/manifest.json"))
     assert "Content-Encoding: gzip" in identity_manifest
-    assert "Cache-Control: public, max-age=300" in identity_manifest
+    assert identity_manifest[2].endswith(f"/identities/{generation}/manifest.json")
     json_upload = next(command for command in uploads if command[:2] == ["copy", str(stage_arg)])
     assert "Content-Encoding: gzip" in json_upload
     assert "identities/**" in json_upload
     identity_upload = next(command for command in uploads if command[:2] == ["copy", str(stage_arg / "identities")])
     assert "Content-Encoding: gzip" in identity_upload
-    assert "Cache-Control: public, max-age=300" in identity_upload
+    assert "--checksum" in identity_upload and "--size-only" not in identity_upload
+    assert identity_upload[2].endswith(f"/identities/{generation}")
+    graph_upload = next(command for command in uploads if command[0] == "copy" and command[1] == str(release / "paths"))
+    flags_upload = next(command for command in uploads if command[0] == "copyto" and command[2].endswith("/flags.json"))
+    assert flags_upload[2].endswith(f"/identities/{generation}/flags.json")
+    assert uploads.index(graph_upload) < uploads.index(identity_upload) < uploads.index(flags_upload) < uploads.index(identity_manifest)
 
 
 @pytest.mark.parametrize("missing", ["manifest.json", "flags.json"])
@@ -125,7 +140,7 @@ def test_failed_identity_upload_does_not_publish_graph_manifest(tmp_path):
     process, commands = run(root, log, env)
     assert process.returncode != 0
     assert any(command[0] == "copy" and command[1].endswith("/identities") for command in commands)
-    assert not any(command[0] == "copyto" and command[1] == str(release / "paths/manifest.json") for command in commands)
+    assert not any(command[0] == "copyto" and command[2].endswith("/paths/manifest.json") for command in commands)
 
 
 def test_identity_json_bytes_count_towards_upload_budget(tmp_path):
@@ -145,3 +160,28 @@ def test_legacy_release_needs_no_identity_metadata_or_optional_regions(tmp_path)
     assert process.returncode == 0, process.stderr
     assert not (root / ".tmp/r2-stage/test-release/identities").exists()
     assert commands[-1][0] == "size"
+
+
+def test_rebuild_with_same_size_and_timestamp_gets_new_identity_generation(tmp_path):
+    root, release, log, env = fixture(tmp_path)
+    process, _ = run(root, log, env)
+    assert process.returncode == 0, process.stderr
+    first = json.loads(log.with_suffix(".manifest").read_text())["identity_generation"]
+    source = release / "identities/profiles/M1.json"
+    stat = source.stat()
+    source.write_text(source.read_text().replace('"quarantined"', '"replacement"'))
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert source.stat().st_size == stat.st_size
+    process, commands = run(root, log, env)
+    assert process.returncode == 0, process.stderr
+    second = json.loads(log.with_suffix(".manifest").read_text())["identity_generation"]
+    assert second != first
+    assert any(command[0] == "copy" and command[2].endswith(f"/identities/{second}") for command in commands)
+
+
+def test_retained_bucket_storage_is_counted_in_warning(tmp_path):
+    root, _, log, env = fixture(tmp_path)
+    env["BUCKET_BYTES"] = "9500000000"
+    process, _ = run(root, log, env)
+    assert process.returncode == 0, process.stderr
+    assert "existing bucket data" in process.stderr

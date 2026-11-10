@@ -406,15 +406,22 @@ def test_ambiguous_bylines_quarantine_only_the_affected_work_and_preserve_clean_
     pq.write_table(pa.Table.from_pylist(rows), works)
     out = tmp_path / 'resolved'
     resolve_identities(str(works), str(nodes), out)
-    profiles = json.loads((out / 'profiles.json').read_text())['profiles'].values()
+    metadata = json.loads((out / 'profiles.json').read_text())
+    profiles = metadata['profiles'].values()
     ambiguous = next(p for p in profiles if p['status'] == 'quarantined')
     retained = next(p for p in profiles if p['status'] == 'retained')
     assert ambiguous['work_ids'] == ['W1']
+    assert retained['id'] == 'A5023477610'
+    assert retained['id'] not in metadata['aliases']
+    nodes_out = pq.read_table(out / 'nodes.parquet').column('id').to_pylist()
+    assert 'https://openalex.org/A5023477610' in nodes_out
     assert retained['work_ids'] == ['W2', 'W3', 'W4']
     assert sum(p['works_count'] for p in profiles) == 4
     assert sum(p['cited_by_count'] for p in profiles) == 10
     memberships = pq.read_table(out / 'works.parquet').to_pylist()
     assert all(len(w['edge_author_ids']) == 2 for w in memberships)
+    assert 5023477610 not in memberships[0]['edge_author_ids']
+    assert all(5023477610 in work['edge_author_ids'] for work in memberships[1:])
 
 
 def test_name_compatibility_handles_diacritics_and_initials_but_rejects_conflicting_full_names():

@@ -14,8 +14,15 @@ import json
 import os
 from pathlib import Path
 import shutil
+import resource
+import sys
+import time
 import tempfile
 
+import duckdb
+
+from pipeline.config import apply_resource_limits, spill_dir
+from pipeline.identity import suspect_links
 from pipeline.resolve_identities import resolve_identities
 from pipeline.build_edges import build_edges
 from pipeline.prep_graph import prep_graph
@@ -52,6 +59,7 @@ def repair_map(works: str, nodes: str, previous_web: str, out_dir: Path, *,
     published web coordinates. No source API, GPU, or manual per-person edit is
     required. Existing releases and caller environment are never overwritten.
     """
+    started = time.perf_counter()
     output = Path(out_dir).expanduser().resolve()
     if output.exists():
         raise ValueError("repaired release output already exists; choose a new directory")
@@ -90,7 +98,12 @@ def repair_map(works: str, nodes: str, previous_web: str, out_dir: Path, *,
             web = str(stage / "coords_web.parquet")
             report["layout"] = repair_webcoords(previous_web, str(stage / "nodes.parquet"), str(stage / "edges.parquet"), web)
             report["pathgraph"] = build_pathgraph(str(graph / "nodes_int32.parquet"), str(graph / "edges_int32.parquet"), stage / "pathgraph")
-            report["paths"] = export_paths(stage / "pathgraph", web, stage / "paths")
+            with duckdb.connect() as con:
+                apply_resource_limits(con)
+                con.execute("SET temp_directory=?", [str(spill_dir(stage))])
+                suspect = suspect_links(con, str(graph / "nodes_int32.parquet"),
+                                        str(graph / "edges_int32.parquet"), web)
+            report["paths"] = export_paths(stage / "pathgraph", web, stage / "paths", suspect=suspect)
             regions = Path(previous_web).parent / "regions.json"
             if regions.exists():
                 shutil.copy2(regions, stage / "regions.json")
@@ -102,6 +115,10 @@ def repair_map(works: str, nodes: str, previous_web: str, out_dir: Path, *,
             report["point_ids"] = export_ids(web, vectors)
             report["visible_edges"] = export_edges(str(stage / "edges.parquet"), web, vectors)
             report["zooms"] = zooms
+            report["wall_seconds"] = round(time.perf_counter() - started, 3)
+            # Linux reports KiB; macOS reports bytes. This is the process high-water mark.
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            report["peak_rss_bytes"] = rss if sys.platform == "darwin" else rss * 1024
             (stage / "repair_report.json").write_text(json.dumps(report, indent=2))
             source_stamp = Path(previous_web).parent / "RELEASE"
             if source_stamp.exists():

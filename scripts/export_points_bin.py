@@ -31,7 +31,6 @@ from pipeline.config import apply_resource_limits, data_dir
 from pipeline.palette import (build_group_palette, community_rgb, group_key, group_key_expr,
                               group_rgb_u8, load_community_stats, not_dust_sql, sparse_communities)
 from pipeline.sizing import size_byte
-from pipeline.sql import sql_literal
 
 QUANT = 65535       # xw,yw uint16 quantization scale (round(v * QUANT))
 SIZE_SCALE = 700    # sqrt(cited_by_count) scale cap; only edges_attr.bin's s still uses it

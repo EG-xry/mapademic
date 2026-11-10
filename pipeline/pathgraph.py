@@ -17,7 +17,7 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from pipeline.config import apply_resource_limits, data_dir, spill_dir
-from pipeline.identifiers import encode_author_id
+from pipeline.identifiers import tagged_author_id_sql
 from pipeline.sql import sql_literal
 
 
@@ -52,10 +52,10 @@ def build_pathgraph(nodes_path: str, edges_path: str, out_dir: Path) -> dict:
     offsets = np.zeros(n + 1, np.int64)
     np.cumsum(counts, out=offsets[1:])
     np.save(out_dir / "offsets.npy", offsets)
-    t = con.execute(f"""SELECT node_idx, id, display_name FROM read_parquet({sql_literal(nodes_path)})
+    t = con.execute(f"""SELECT node_idx, {tagged_author_id_sql('id')} AS id, display_name FROM read_parquet({sql_literal(nodes_path)})
                         ORDER BY node_idx""").fetchnumpy()
     assert len(t["node_idx"]) == n and int(t["node_idx"][-1]) == n - 1, "node_idx must be dense"
-    np.save(out_dir / "ids.npy", np.array([encode_author_id(s) for s in t["id"]], np.uint64))
+    np.save(out_dir / "ids.npy", t["id"])
     blobs = [(s or "").encode("utf-8") for s in t["display_name"]]
     name_offsets = np.zeros(n + 1, np.int64)
     np.cumsum([len(b) for b in blobs], out=name_offsets[1:])

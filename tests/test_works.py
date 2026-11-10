@@ -1,3 +1,5 @@
+import hashlib
+
 import duckdb
 import pytest
 
@@ -89,3 +91,11 @@ def test_legacy_extract_is_refused_with_a_hint(tmp_path):
     )
     with pytest.raises(SystemExit, match="predates the work-quality filter"):
         check_extract_schema(duckdb.connect(), str(path))
+
+
+def test_legacy_query_text_preserves_paper_provenance():
+    # Captured on data-pipeline before the repaired authorship column existed.
+    query = qualifying_works_sql("paper/works/*/*.parquet", min_authors=2, max_authors=50)
+    assert hashlib.sha256(query.encode()).hexdigest() == (
+        "4ca214af77fd12a6627cab6cc7a4e7295ad9e2da8a3151d83704555bebaef701"
+    )

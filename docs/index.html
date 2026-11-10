@@ -462,8 +462,8 @@
       <button id="connect-share" type="button" hidden>Share chain</button>
     </div>
     <div id="connect-status" role="status" aria-live="polite"></div>
-    <p id="connect-affiliation"></p>
     <p class="selection-evidence">Connections follow this map release’s coauthor graph. Identity assignments can be incomplete; check the papers shown for each step.</p>
+    <p id="connect-affiliation"></p>
     <div id="path-hops"></div>
   </div>
 </div>
@@ -1639,11 +1639,20 @@ async function fetchIdentifierCandidates(query, kind, crossCheck = "") {
 const REPAIR_BASE = DATA_BASE + "/data/identities";
 let repairManifestPromise = null;
 const repairProfileCache = new Map(), repairAliasCache = new Map();
+async function repairedIdentityBase() {
+  const generation = (await pathsMeta())?.identity_generation;
+  if (generation === undefined) return REPAIR_BASE;
+  if (typeof generation !== "string" || !/^[a-f0-9]{64}$/.test(generation)) {
+    throw new Error("Invalid identity metadata generation for this graph release.");
+  }
+  return REPAIR_BASE + "/" + generation;
+}
 function repairedIdentityManifest() {
   if (!repairManifestPromise) {
-    repairManifestPromise = fetchJsonOr404(REPAIR_BASE + "/manifest.json").then(async m => {
+    repairManifestPromise = repairedIdentityBase().then(base => fetchJsonOr404(base + "/manifest.json")).then(async m => {
       if (!m) {
-        if ((await pathsMeta())?.version === 3) throw new Error("Repaired identity metadata is missing for this graph release.");
+        const meta = await pathsMeta();
+        if (meta?.version === 3 || meta?.identity_generation !== undefined) throw new Error("Repaired identity metadata is missing for this graph release.");
         return null; // An existing, A-only release has no repair metadata.
       }
       if (m.version !== 1 || !m.graph_repaired) throw new Error("Unsupported repaired identity metadata.");
@@ -1666,7 +1675,7 @@ async function repairedProfile(id) {
     return null;
   }
   if (!repairProfileCache.has(id)) {
-    const promise = fetchJsonOr404(`${REPAIR_BASE}/profiles/${id}.json`).then(p => {
+    const promise = fetchJsonOr404(`${await repairedIdentityBase()}/profiles/${id}.json`).then(p => {
       if (p && p.id !== id) throw new Error("Repaired identity record does not match the selected researcher.");
       if (!p && id[0] === "M") throw new Error("Couldn't load this repaired identity. Retry the lookup.");
       return p;
@@ -1681,7 +1690,7 @@ async function repairedAliases(id) {
   if (!/^A\d+$/.test(id) || !(await repairedIdentityManifest())) return [id];
   const bucket = idBucketNum(id);
   if (!repairAliasCache.has(bucket)) {
-    const promise = fetchJsonOr404(`${REPAIR_BASE}/aliases/${bucket}.json`)
+    const promise = fetchJsonOr404(`${await repairedIdentityBase()}/aliases/${bucket}.json`)
       .then(x => x || {}).catch(error => { repairAliasCache.delete(bucket); throw error; });
     repairAliasCache.set(bucket, promise);
   }
@@ -1700,7 +1709,10 @@ async function expandRepairedCandidates(result, kind, primary) {
   for (const candidate of result.candidates) {
     if (!candidate.id) { candidates.push(candidate); continue; }
     const aliases = await repairedAliases(candidate.id);
-    if (aliases.length === 1 && aliases[0] === candidate.id) { candidates.push(candidate); continue; }
+    if (aliases.length === 1 && aliases[0] === candidate.id) {
+      const profile = await repairedProfile(candidate.id);
+      if (profile?.status !== "retained") { candidates.push(candidate); continue; }
+    }
     for (const id of aliases) {
       const profile = await repairedProfile(id);
       // A DOI selects the original work's partition. ORCID selects only
@@ -1725,7 +1737,7 @@ async function repairedAuthorDetails(id) {
 }
 async function repairedInstitutionCandidates(id) {
   if (!(await repairedIdentityManifest())) return [];
-  const rows = await fetchJsonOr404(`${REPAIR_BASE}/institutions/${stripId(id)}.json`);
+  const rows = await fetchJsonOr404(`${await repairedIdentityBase()}/institutions/${stripId(id)}.json`);
   return (rows || []).filter(p => p.identity_status !== "quarantined" && p.status !== "quarantined");
 }
 async function repairedGraphFlags() {
@@ -1735,7 +1747,7 @@ async function repairedGraphFlags() {
     if (meta && meta.version === 3) throw new Error("Repaired identity metadata is missing for this graph release.");
     return null;
   }
-  const raw = await fetchJsonOr404(REPAIR_BASE + "/flags.json");
+  const raw = await fetchJsonOr404((await repairedIdentityBase()) + "/flags.json");
   if (!meta || !raw || raw.paths_ids_file !== meta.files.ids || manifest.paths_ids_file !== meta.files.ids) {
     throw new Error("Repaired identity flags do not match this graph release. Reload the map before searching.");
   }
@@ -1943,6 +1955,14 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
     results = []; active = -1;
   }
 
+  function publishSelection(selection) {
+    const evidence = inputEl.id && document.getElementById(inputEl.id.replace(/-input$/, "-evidence"));
+    if (evidence) evidence.textContent = selection?.identity?.message || "";
+    const identifier = inputEl.id && document.getElementById(inputEl.id.replace(/-input$/, "-identifier"));
+    if (identifier) identifier.hidden = kindEl?.value === "institution";
+    onSelect(selection);
+  }
+
   function select(e) {
     const [, name, id, xw, yw] = e;   // entry shape: [norm, display_name, id, xw, yw, cited, institution?]
     clearTimeout(timer);   // R32: same stale-reopen fix as selectSearchEntry
@@ -1953,7 +1973,7 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
     // stripId so every connect selection stores a bare id, same as infoCard's
     // "Connect from here" and the hash-restore path -- keeps connectA/connectB
     // uniform no matter which route filled them.
-    onSelect({ id: stripId(id), name, xw, yw, identity: e[7] || null });
+    publishSelection({ id: stripId(id), name, xw, yw, identity: e[7] || null });
   }
 
   async function run(query) {
@@ -1981,7 +2001,7 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
 
   inputEl.addEventListener("input", () => {
     gen++;                    // invalidate an older request during the debounce
-    onSelect(null);            // typing invalidates any prior selection
+    publishSelection(null);            // typing invalidates any prior selection
     // the previous matches stay up until the new ones arrive (closing here
     // made the dropdown blink on every keystroke); gen discards late replies
     clearTimeout(timer);
@@ -2019,7 +2039,7 @@ function createAuthorLookup(inputEl, dropdownEl, onSelect, kindEl = null) {
     clearTimeout(timer);
     gen++;
     close();
-    onSelect(null);
+    publishSelection(null);
   }
   function pause() { clearTimeout(timer); gen++; close(); }
   return { isOpen, escape, pause, select };
@@ -2044,22 +2064,28 @@ let connectA = null, connectB = null;    // {id, name, xw, yw} once selected
 // the shared pair no longer matches what the user is about to run.
 const connectALookup = createAuthorLookup(connectAInput, connectADropdown, sel => {
   connectA = sel; pendingP = null; clearPath();
-  document.getElementById("connect-a-evidence").textContent = sel && sel.identity ? sel.identity.message : "";
 }, connectFromKind);
 const connectBLookup = createAuthorLookup(connectBInput, connectBDropdown, sel => {
   connectB = sel; pendingP = null; clearPath();
-  document.getElementById("connect-b-evidence").textContent = sel && sel.identity ? sel.identity.message : "";
 });
 function syncConnectStartUI() {
   const institution = connectFromKind.value === "institution";
   connectScope.hidden = !institution;
-  document.getElementById("connect-a-identifier").hidden = institution;
   connectAInput.placeholder = institution ? "Institution name…" : "Author A…";
   connectAInput.setAttribute("aria-label", institution ? "Starting institution" : "Starting researcher");
+  document.getElementById("connect-a-identifier").hidden = institution;
 }
 connectFromKind.addEventListener("change", () => {
   connectALookup.escape();
   syncConnectStartUI();
+});
+
+function setPathStatus(text) { connectStatus.textContent = text || ""; }
+
+connectToggle.addEventListener("click", () => {
+  const on = connectPanel.classList.toggle("open");
+  connectToggle.classList.toggle("active", on);
+  if (on) prefetchPathIndex();   // R35d: Connect's one-time ~12MB index, ready by the time names are picked
 });
 
 // ---- Identifier lookup dialog ----
@@ -2202,14 +2228,6 @@ document.getElementById("search-identifier").addEventListener("click", () => ope
 document.getElementById("connect-a-identifier").addEventListener("click", () => openIdentifierLookup(connectALookup.select));
 document.getElementById("connect-b-identifier").addEventListener("click", () => openIdentifierLookup(connectBLookup.select));
 // ---- End identifier lookup dialog ----
-
-function setPathStatus(text) { connectStatus.textContent = text || ""; }
-
-connectToggle.addEventListener("click", () => {
-  const on = connectPanel.classList.toggle("open");
-  connectToggle.classList.toggle("active", on);
-  if (on) prefetchPathIndex();   // R35d: Connect's one-time ~12MB index, ready by the time names are picked
-});
 
 // /api/path expects the bare OpenAlex id ("A5108093963"); the map's own data
 // (search entries, id-bucket shards) stores the full "https://openalex.org/..."
@@ -2902,7 +2920,8 @@ function dataFlags() {
     let repaired = false;
     dataFlagsPromise = (async () => {
       if (typeof repairedGraphFlags === "function") {
-        repaired = (await pathsMeta())?.version === 3;
+        const meta = await pathsMeta();
+        repaired = meta?.version === 3 || meta?.identity_generation !== undefined;
         repaired = !!(await repairedIdentityManifest()) || repaired;
         const flags = await repairedGraphFlags();
         if (flags) return flags;

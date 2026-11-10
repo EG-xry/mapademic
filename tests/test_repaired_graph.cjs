@@ -9,7 +9,8 @@ const paths = {version:3,authors:4,files:{ids:'ids-hash.bin'}};
 const records = {
  'M123': {id:'M123',display_name:'Michael Boyle',orcid:null,work_ids:['W1'],identity_status:'partitioned',institution:'St Andrews',papers:{A8:{title:'Political paper'}}},
  'M124': {id:'M124',display_name:'Michael Boyle',orcid:'0000-0002-7287-1353',work_ids:['W2'],identity_status:'partitioned',institution:'Hawaii'},
- 'M125': {id:'M125',identity_status:'quarantined',work_ids:['W3']}
+ 'M125': {id:'M125',identity_status:'quarantined',work_ids:['W3']},
+ 'A8': {id:'A8',status:'retained',work_ids:['W2'],orcid:'0000-0002-7287-1353'}
 };
 function harness(overrides={}) {
  const requests=[];
@@ -20,7 +21,7 @@ function harness(overrides={}) {
    if(url.includes('/profiles/'))return records[url.split('/').pop().replace('.json','')]||null;
    if(url.includes('/aliases/'))return {A7:['M123','M124','M125'],A9:['M123']};
    if(url.endsWith('/flags.json'))return {paths_ids_file:'ids-hash.bin',entries:[{id:'M125',n:3,kind:'quarantined'}]};
-   if(url.includes('/institutions/'))return Object.values(records);
+   if(url.includes('/institutions/'))return Object.values(records).filter(p=>p.id[0]==='M');
    throw new Error('Unexpected URL '+url);
   },...overrides});
  vm.runInContext(code,c);return {c,requests};
@@ -99,4 +100,27 @@ test('ORCID lookup expands real release aliases before checking membership, pres
  const result=await c.fetchIdentifierCandidates('0000-0002-7287-1353','orcid');
  assert.deepEqual(plain(result.candidates.map(x=>x.id)),['M124']);
  assert.match(result.message,/1 mapped profile/);
+});
+
+
+test('a retained source keeps its URL and its DOI results use only clean memberships', async () => {
+ const {c}=harness();
+ assert.equal(await c.resolveMapAlias('A8'),'A8');
+ const result={candidates:[{id:'A8',name:'Retained researcher'}],paper:{id:'W3'},message:'Found.'};
+ assert.equal((await c.expandRepairedCandidates(result,'doi','10.1/ambiguous')).candidates.length,0);
+ result.paper.id='W2';
+ assert.deepEqual(plain((await c.expandRepairedCandidates(result,'doi','10.1/clean')).candidates.map(x=>x.id)),['A8']);
+});
+
+test('graph manifests select their own immutable generation for every identity request', async () => {
+ const generation='a'.repeat(64);
+ const {c,requests}=harness({pathsMeta:async()=>({...paths,identity_generation:generation})});
+ await c.repairedGraphFlags();
+ await c.repairedAliases('A7');
+ await c.repairedProfile('M123');
+ await c.repairedInstitutionCandidates('I1');
+ assert.equal(requests.length,5);
+ assert.ok(requests.every(url=>url.startsWith('/data/identities/'+generation+'/')));
+ const missing=harness({pathsMeta:async()=>({version:2,identity_generation:generation}),fetchJsonOr404:async()=>null}).c;
+ await assert.rejects(missing.repairedIdentityManifest(),/metadata is missing/);
 });

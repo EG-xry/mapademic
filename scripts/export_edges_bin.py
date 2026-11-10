@@ -43,7 +43,6 @@ import numpy as np
 from pipeline.config import apply_resource_limits, data_dir
 from pipeline.palette import group_key_expr, group_rgb_u8
 from scripts.export_points_bin import GREY_RGB, SIZE_SCALE, _color_palette
-from pipeline.sql import sql_literal
 
 QUANT = 65535        # xw,yw uint16 quantization scale (round(v * QUANT))
 FINE = 254           # edges_fine.bin: v * QUANT = edges_pos + edges_fine / FINE (254, not 256:

@@ -21,13 +21,10 @@ import pyarrow as pa
 
 from pipeline.config import apply_resource_limits, data_dir, spill_dir
 from pipeline.identifiers import bare_author_id, decode_author_id, encode_author_id
+from pipeline.sql import sql_literal
 from pipeline.works import quality_predicate
 
 LEGACY_ID_BASE = 5_000_000_000
-
-
-def _sql(value) -> str:
-    return "'" + str(value).replace("'", "''") + "'"
 
 
 def _write_json(path: Path, value) -> None:
@@ -99,13 +96,15 @@ def export_identities(repair_dir: Path, edges_path: str, web_path: str,
         raise ValueError("identity metadata output must be separate from its inputs")
     metadata = json.loads((repair_dir / "profiles.json").read_text())
     profiles = {bare_author_id(aid): profile for aid, profile in metadata.get("profiles", {}).items()}
-    if any(not aid.startswith("M") for aid in profiles):
-        raise ValueError("repair profiles must use application-owned M identities")
+    if any(aid.startswith("A") and (profile.get("status") != "retained" or profile.get("source_ids") != [aid])
+           for aid, profile in profiles.items()):
+        raise ValueError("OpenAlex repair profiles must retain their own source ID")
     aliases = {}
     for source, values in metadata.get("aliases", {}).items():
         source = bare_author_id(source)
         values = sorted({bare_author_id(value) for value in values})
-        if not source.startswith("A") or any(value not in profiles for value in values):
+        if not source.startswith("A") or source in profiles or any(
+                not value.startswith("M") or value not in profiles for value in values):
             raise ValueError("aliases must map source A IDs to known M identities")
         aliases[source] = values
     paths_manifest = json.loads((paths_dir / "manifest.json").read_text())
@@ -120,12 +119,12 @@ def export_identities(repair_dir: Path, edges_path: str, web_path: str,
     profile_cursor = None
     try:
         apply_resource_limits(con)
-        con.execute(f"SET temp_directory={_sql(spill_dir(stage))}")
+        con.execute(f"SET temp_directory={sql_literal(spill_dir(stage))}")
         con.execute("SET preserve_insertion_order=false")
-        con.execute(f"CREATE VIEW web AS SELECT * REPLACE (regexp_replace(id, '^https://openalex.org/', '') AS id) FROM read_parquet({_sql(web_path)})")
-        con.execute(f"CREATE VIEW edges AS SELECT regexp_replace(src, '^https://openalex.org/', '') AS src, regexp_replace(dst, '^https://openalex.org/', '') AS dst FROM read_parquet({_sql(edges_path)})")
-        con.execute(f"CREATE VIEW works AS SELECT * FROM read_parquet({_sql(repair_dir / 'works.parquet')})")
-        con.execute(f"CREATE VIEW memberships AS SELECT * FROM read_parquet({_sql(repair_dir / 'memberships.parquet')})")
+        con.execute(f"CREATE VIEW web AS SELECT * REPLACE (regexp_replace(id, '^https://openalex.org/', '') AS id) FROM read_parquet({sql_literal(web_path)})")
+        con.execute(f"CREATE VIEW edges AS SELECT regexp_replace(src, '^https://openalex.org/', '') AS src, regexp_replace(dst, '^https://openalex.org/', '') AS dst FROM read_parquet({sql_literal(edges_path)})")
+        con.execute(f"CREATE VIEW works AS SELECT * FROM read_parquet({sql_literal(repair_dir / 'works.parquet')})")
+        con.execute(f"CREATE VIEW memberships AS SELECT * FROM read_parquet({sql_literal(repair_dir / 'memberships.parquet')})")
         con.register("changed", pa.table({"id": pa.array(sorted(profiles), type=pa.string())}))
         con.execute("""CREATE TABLE affected AS
             SELECT id FROM changed UNION SELECT dst AS id FROM edges JOIN changed c ON c.id = src

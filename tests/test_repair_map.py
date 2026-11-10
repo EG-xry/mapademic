@@ -6,10 +6,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from pipeline.identity import suspect_links
 from pipeline.identifiers import decode_author_id
 from scripts.export_paths_bin import read_neighbors
 from scripts.repair_map import repair_map
-from tests.test_resolve_identities import make_inputs, duplicate_inputs
+from tests.test_resolve_identities import make_inputs, duplicate_inputs, homogeneous_inputs
 
 
 def setup_release(tmp_path):
@@ -109,3 +110,41 @@ def test_duplicate_profiles_become_one_searchable_identity_without_losing_collab
     assert len(edges) == 1 and edges[0]["weight"] == 4
     shard = json.loads((output / "index/search-v2/pa.json").read_text())
     assert [entry[2] for entry in shard] == [identity]
+
+
+def test_repaired_paths_store_namesake_flags_from_staged_graph(tmp_path, monkeypatch):
+    works, nodes, web = setup_release(tmp_path)
+    coords = pq.read_table(web).to_pylist()
+    # The biology split will inherit its main coauthor's region. Set a very
+    # small common-name threshold so these fixture names trigger the heuristic.
+    coords[2]["community"] = 2
+    pq.write_table(pa.Table.from_pylist(coords), web)
+    monkeypatch.setattr("scripts.repair_map.suspect_links",
+                        lambda *args: suspect_links(*args, common_name=1, rare_region=.75, legend_min=1))
+    out = tmp_path / "flagged"
+    report = repair_map(str(works), str(nodes), str(web), out, zooms="0")
+    paths = report["paths"]
+    flags = sum(flag for i in range(paths["authors"]) for _, flag in read_neighbors(out / "paths", i))
+    assert flags == paths["suspect_links"] > 0
+    assert report["wall_seconds"] > 0 and report["peak_rss_bytes"] > 0
+
+
+def test_retained_id_keeps_its_map_position_and_only_clean_publication_evidence(tmp_path):
+    works, nodes, web = setup_release(tmp_path)
+    _, _, rows = homogeneous_inputs(tmp_path)
+    rows[0]["authorship_evidence"].append(dict(rows[0]["authorship_evidence"][0], raw_name="David A. Chalmers"))
+    pq.write_table(pa.Table.from_pylist(rows), works)
+    out = tmp_path / "retained"
+    repair_map(str(works), str(nodes), str(web), out, zooms="0")
+    aid = "A5023477610"
+    old, new = [{r["id"]: (r["xw"], r["yw"]) for r in pq.read_table(p).to_pylist()}
+                for p in (web, out / "coords_web.parquet")]
+    assert new["https://openalex.org/" + aid] == old["https://openalex.org/" + aid]
+    aliases = json.loads((out / "profiles.json").read_text())["aliases"]
+    assert aid not in aliases
+    retained = json.loads((out / f"identities/profiles/{aid}.json").read_text())
+    assert retained["work_ids"] == ["W2", "W3", "W4"]
+    assert retained["papers"]["A5000000001"]["work_id"] == "W2"
+    flags = json.loads((out / "identities/flags.json").read_text())
+    assert len(flags["entries"]) == 1 and flags["entries"][0]["kind"] == "quarantined"
+    assert flags["entries"][0]["id"].startswith("M")

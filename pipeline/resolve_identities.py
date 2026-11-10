@@ -23,6 +23,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from pipeline.config import apply_resource_limits, data_dir, spill_dir
+from pipeline.sql import sql_literal
 from pipeline.works import quality_predicate
 
 COLLECTION_TITLES = {"book reviews", "reviews", "contributors", "editorial board"}
@@ -269,10 +270,6 @@ def _canonical_sql(column: str) -> str:
             f"FROM (SELECT {digits} AS d))")
 
 
-def _path_sql(path):
-    return "'" + str(path).replace("'", "''") + "'"
-
-
 def resolve_identities(works_glob: str, nodes_path: str, out_dir: Path, *,
                        min_component_works: int = 2, max_profile_works: int = 50000,
                        registry_path: Path | None = None) -> dict:
@@ -289,9 +286,9 @@ def resolve_identities(works_glob: str, nodes_path: str, out_dir: Path, *,
     out_dir.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
     apply_resource_limits(con)
-    con.execute(f"SET temp_directory={_path_sql(spill_dir(out_dir))}")
+    con.execute(f"SET temp_directory={sql_literal(spill_dir(out_dir))}")
     con.execute("SET preserve_insertion_order=false")
-    con.execute(f"CREATE VIEW source_works AS SELECT * FROM read_parquet({_path_sql(works_glob)})")
+    con.execute(f"CREATE VIEW source_works AS SELECT * FROM read_parquet({sql_literal(works_glob)})")
     duplicate_works = con.execute("SELECT count(*) - count(DISTINCT work_id) FROM source_works").fetchone()[0]
     if duplicate_works:
         conflict = con.execute("""SELECT work_id FROM source_works w
@@ -311,9 +308,9 @@ def resolve_identities(works_glob: str, nodes_path: str, out_dir: Path, *,
     evidence_type = column_types["authorship_evidence"]
     institution_names = "e.institution_names" if re.search(r"\binstitution_names\b", evidence_type) else "[]::VARCHAR[]"
     field_name = "e.field_name" if re.search(r"\bfield_name\b", evidence_type) else "NULL::VARCHAR"
-    con.execute(f"CREATE VIEW nodes AS SELECT *, CAST(regexp_extract(id, '(\\d+)$', 1) AS BIGINT) AS source_key FROM read_parquet({_path_sql(nodes_path)})")
+    con.execute(f"CREATE VIEW nodes AS SELECT *, CAST(regexp_extract(id, '(\\d+)$', 1) AS BIGINT) AS source_key FROM read_parquet({sql_literal(nodes_path)})")
     title = "lower(trim(coalesce(title, '')))" if "title" in columns else "''"
-    titles = ", ".join(_path_sql(t) for t in sorted(COLLECTION_TITLES))
+    titles = ", ".join(sql_literal(t) for t in sorted(COLLECTION_TITLES))
     con.execute(f"CREATE VIEW eligible AS SELECT *, ({title} IN ({titles}) AND n_authors >= 3) AS collection FROM works")
     con.execute(f"""CREATE TEMP TABLE evidence AS
         WITH raw AS (
@@ -380,9 +377,9 @@ def resolve_identities(works_glob: str, nodes_path: str, out_dir: Path, *,
             plan.assignments.update((r.work_id, token) for r in ambiguous)
         if len(plan.groups) < 2 and not repeated:
             return
-        split_profiles += int(len(plan.groups) > 1)
+        split_profiles += int(len(plan.groups) > 1 and not any(g["status"] == "retained" for g in plan.groups.values()))
         for token, group in plan.groups.items():
-            group["key"] = _identity_key(token, registry, used_keys)
+            group["key"] = current if group["status"] == "retained" else _identity_key(token, registry, used_keys)
             # Keep only the repair delta; complete publication records can be
             # rejoined from DuckDB when writing profile metadata.
             group["records"] = []
@@ -417,12 +414,12 @@ def resolve_identities(works_glob: str, nodes_path: str, out_dir: Path, *,
     # partitions through a quality-excluded work lacking evidence.
     affected = {source for _, source, _, _ in overrides}
     for source in sorted(affected):
-        missing = con.execute("SELECT work_id FROM memberships WHERE source_author_id = ? AND identity_key = ?", [source, source]).fetchall()
+        missing = con.execute("SELECT work_id FROM memberships WHERE source_author_id = ? AND token IS NULL", [source]).fetchall()
         if missing:
             token = f"source:{source}:quarantine"
             key = _identity_key(token, registry, used_keys)
             groups.setdefault(token, {"status": "quarantined", "records": [], "source_ids": [source], "orcid": None, "key": key})
-            con.execute("UPDATE memberships SET identity_key = ?, token = ? WHERE source_author_id = ? AND identity_key = ?", [key, token, source, source])
+            con.execute("UPDATE memberships SET identity_key = ?, token = ? WHERE source_author_id = ? AND token IS NULL", [key, token, source])
     # Find duplicate source profiles by deposited ORCID plus compatible name
     # and shared affiliation. Candidate comparison stays within each ORCID.
     duplicate_rows = con.execute(f"""SELECT e.author_id, e.raw_orcid,
@@ -506,10 +503,10 @@ def resolve_identities(works_glob: str, nodes_path: str, out_dir: Path, *,
           coalesce(r.ids, []::BIGINT[]) AS author_ids,
           CASE WHEN w.collection THEN []::BIGINT[] ELSE list_distinct(coalesce(r.ids, []::BIGINT[])) END AS edge_author_ids
         FROM eligible w LEFT JOIN resolved_lists r ON r.work_id = w.work_id
-    ) TO {_path_sql(out_works)} (FORMAT PARQUET)""")
+    ) TO {sql_literal(out_works)} (FORMAT PARQUET)""")
     # Restrict metadata joins and indexes to the repair delta. Repeated per-
     # identity scans of the entire snapshot would make a small correction O(N*M).
-    con.execute("CREATE TEMP TABLE repaired_memberships AS SELECT * FROM memberships WHERE identity_key < 0")
+    con.execute("CREATE TEMP TABLE repaired_memberships AS SELECT * FROM memberships WHERE token IS NOT NULL")
     con.execute("CREATE INDEX repaired_memberships_key ON repaired_memberships(identity_key)")
     con.execute("""CREATE TEMP TABLE repaired_evidence AS SELECT m.identity_key, e.* FROM evidence e
         JOIN repaired_memberships m ON m.work_id = e.work_id AND m.source_author_id = e.author_id""")
@@ -541,7 +538,7 @@ def resolve_identities(works_glob: str, nodes_path: str, out_dir: Path, *,
         dominant_inst = inst.most_common(1)[0][0] if inst else None
         dominant_field = field.most_common(1)[0][0] if field else None
         source_ids = [f"A{s}" for s in group["source_ids"]]
-        profile = {"id": f"M{abs(key)}", "source_ids": source_ids,
+        profile = {"id": f"M{-key}" if key < 0 else f"A{key}", "source_ids": source_ids,
                    "display_name": names.most_common(1)[0][0] if names else base["display_name"],
                    "institution": inst_labels[dominant_inst].most_common(1)[0][0] if inst_labels[dominant_inst] else dominant_inst,
                    "institution_ids": sorted(inst),
@@ -551,13 +548,13 @@ def resolve_identities(works_glob: str, nodes_path: str, out_dir: Path, *,
                    "orcid": group["orcid"], "status": group["status"], "identity_status": group["status"],
                    "work_ids": [f"W{w}" for w in work_ids]}
         metadata[profile["id"]] = profile
-        base.update(id=profile["id"], display_name=profile["display_name"],
+        base.update(id=profile["id"] if key < 0 else base["id"], display_name=profile["display_name"],
                     works_count=profile["works_count"], works_kept=profile["works_count"],
                     cited_by_count=profile["cited_by_count"], institution=profile["institution"], field=profile["field"],
                     institution_ids=profile["institution_ids"], field_ids=profile["field_ids"],
                     field_id=profile["field_id"], source_ids=source_ids, orcid=group["orcid"], identity_status=group["status"])
         node_rows.append(base)
-    original = con.execute("SELECT * EXCLUDE(source_key) FROM nodes WHERE source_key NOT IN (SELECT DISTINCT source_author_id FROM memberships WHERE identity_key < 0) ORDER BY id").to_arrow_table()
+    original = con.execute("SELECT * EXCLUDE(source_key) FROM nodes WHERE source_key NOT IN (SELECT DISTINCT source_author_id FROM repaired_memberships) ORDER BY id").to_arrow_table()
     if node_rows:
         additions = pa.Table.from_pylist(node_rows)
         output = pa.concat_tables([original, additions], promote_options="permissive")
@@ -566,16 +563,18 @@ def resolve_identities(works_glob: str, nodes_path: str, out_dir: Path, *,
     pq.write_table(output, out_dir / "nodes.parquet")
     con.execute(f"""COPY (SELECT *, CASE WHEN identity_key < 0 THEN 'M' || CAST(-identity_key AS VARCHAR)
         ELSE 'A' || CAST(identity_key AS VARCHAR) END AS identity_id FROM memberships)
-        TO {_path_sql(out_dir / 'memberships.parquet')} (FORMAT PARQUET)""")
+        TO {sql_literal(out_dir / 'memberships.parquet')} (FORMAT PARQUET)""")
     aliases = defaultdict(list)
     for pid, profile in metadata.items():
         for source in profile["source_ids"]:
-            aliases[source].append(pid)
+            if source not in metadata:  # retained A IDs still resolve to themselves
+                aliases[source].append(pid)
     (out_dir / "profiles.json").write_text(json.dumps({"version": 1, "profiles": metadata, "aliases": dict(aliases)}, indent=2))
     (out_dir / "identity_registry.json").write_text(json.dumps({"version": 1, "tokens": registry}, indent=2))
     diagnostics = {"version": 1, "split_profiles": split_profiles, "merged_profiles": merged_profiles,
                    "ambiguous_profiles": ambiguous_profiles,
-                   "repaired_identities": len(metadata), "quarantined_identities": sum(p["status"] == "quarantined" for p in metadata.values()),
+                   "repaired_identities": sum(pid.startswith("M") for pid in metadata),
+                   "retained_profiles": sum(pid.startswith("A") for pid in metadata), "quarantined_identities": sum(p["status"] == "quarantined" for p in metadata.values()),
                    "oversized_profiles_unchanged": oversized_profiles, "input_nodes": original.num_rows + len(affected),
                    "output_nodes": output.num_rows, "work_count": con.execute("SELECT count(*) FROM works").fetchone()[0],
                    "duplicate_works_removed": duplicate_works,

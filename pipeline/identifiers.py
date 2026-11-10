@@ -44,3 +44,16 @@ def decode_author_id(value: int) -> str:
         raise ValueError("author identity record is outside uint64")
     aid = ("M" + str(value ^ IDENTITY_TAG)) if value & IDENTITY_TAG else "A" + str(value)
     return bare_author_id(aid)
+
+
+def tagged_author_id_sql(col: str) -> str:
+    """DuckDB expression for the same tagged uint64 format used by the browser."""
+    key = f"TRY_CAST(regexp_extract({col}, '^(https://openalex[.]org/A|[AM])([0-9]+)$', 2) AS UBIGINT)"
+    is_repaired = f"starts_with({col}, 'M')"
+    return f"""CASE
+        WHEN {key} IS NULL OR {key} >= {IDENTITY_TAG}
+             OR ({is_repaired} AND {key} NOT BETWEEN 1 AND {MAX_IDENTITY_KEY})
+            THEN error('invalid author identity in graph')
+        WHEN {is_repaired} THEN {key} | {IDENTITY_TAG}::UBIGINT
+        ELSE {key}
+        END"""

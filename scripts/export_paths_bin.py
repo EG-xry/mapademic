@@ -30,7 +30,6 @@ shards carry each author's new number (see build_index), which is how the
 browser starts a search.
 """
 
-from pipeline.sql import sql_literal
 import argparse
 import hashlib
 import json
@@ -42,7 +41,7 @@ import numpy as np
 
 from pipeline.config import data_dir
 from pipeline.identity import suspect_links
-from pipeline.identifiers import IDENTITY_TAG, encode_author_id
+from pipeline.identifiers import IDENTITY_TAG, tagged_author_id_sql
 from pipeline.sql import sql_literal
 
 ID_BASE = 5_000_000_000      # every author id in the 2026-09-23 graph is A5xxxxxxxxx
@@ -106,10 +105,10 @@ def export_paths(pathgraph_dir: Path, web_path: str, out_dir: Path,
         assert int(ids.min()) >= ID_BASE and int(ids.max()) - ID_BASE < 2 ** 32, "ids outside the uint32 window"
     # renumber along a Z-order curve of map position (authors without one go last)
     con = duckdb.connect()
-    pos = con.execute(f"""SELECT id,
+    pos = con.execute(f"""SELECT {tagged_author_id_sql('id')} AS id,
                                  CAST(round(xw * 65535) AS INTEGER) AS x, CAST(round(yw * 65535) AS INTEGER) AS y
                           FROM read_parquet({sql_literal(web_path)})""").fetchnumpy()
-    position_ids = np.array([encode_author_id(aid) for aid in pos["id"]], dtype=np.uint64)
+    position_ids = pos["id"]
     sk = np.argsort(position_ids)
     where = np.searchsorted(position_ids[sk], ids)
     found = (where < len(sk)) & (position_ids[sk][np.minimum(where, len(sk) - 1)] == ids)
