@@ -90,7 +90,10 @@ function highlightOwnershipHarness(state={}) {
   clearSearchHighlight(){},updateSearchClearVisibility(){},drawLabels(){},highlightLegendForCoords(){},
   clearPath(){clearCalls++;c.activeG=null;c.pendingG=null;c.activeConnectGroup=null;c.pathGen++;},
   writeHash(){hashes.push({a:c.activeA,g:c.activeG,pending:c.pendingG});},...state});
- vm.runInContext(section('function setSearchHighlight(','function selectSearchEntry('),c);
+ const start=html.indexOf('function setSearchHighlight(');
+ const end=html.indexOf('\n}\n',start);
+ assert.ok(start>=0&&end>start);
+ vm.runInContext(html.slice(start,end+2),c);
  return {c,hashes,clearCalls:()=>clearCalls};
 }
 
@@ -130,7 +133,7 @@ test('Escape cancels a pending group restore and stops an active search from the
  const closed={classList:{contains:()=>false}};
  const lookup={isOpen:()=>false};
  const c=vm.createContext({document:{activeElement:null,addEventListener:(_event,fn)=>{handler=fn;}},
-  shareOverlay:closed,infoCard:closed,helpOverlay:closed,searchDropdown:closed,
+  identifierDialog:{open:false},shareOverlay:closed,infoCard:closed,helpOverlay:closed,searchDropdown:closed,
   connectALookup:lookup,connectBLookup:lookup,extraConnectRows:[],connectAInput:{},connectBInput:{},
   pendingG:['A1','A2','A3'],activeConnectGroup:null,connectStop:{click(){stops++;}},
   clearPath(){clears++;},activeA:null,rayMarkers:[],map:{getSource:()=>null},isolateCommunity:null});
